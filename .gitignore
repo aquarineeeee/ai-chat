@@ -1,1 +1,17 @@
 实施方案.md
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local environment
+.env
+
+# IDE / local runtime
+.idea/
+.claude/
+.run/
+.tmp/
+*.log
