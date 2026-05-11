@@ -8,6 +8,15 @@ from pydantic import BaseModel, ConfigDict
 from app.models.message import MessageRole, MessageStatus
 
 
+class MessageCreateRequest(BaseModel):
+    content: str
+    parent_id: int | None = None
+    provider: str | None = None
+    model: str | None = None
+    temperature: Decimal | None = None
+    max_tokens: int | None = None
+
+
 class MessageNodeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -30,3 +39,10 @@ class ConversationMessagesResponse(BaseModel):
     conversation_id: int
     current_leaf_message_id: int | None
     items: list[MessageNodeResponse]
+
+
+class MessageSendResponse(BaseModel):
+    conversation_id: int
+    current_leaf_message_id: int
+    user_message: MessageNodeResponse
+    assistant_message: MessageNodeResponse
