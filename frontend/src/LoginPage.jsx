@@ -31,7 +31,7 @@ export default function LoginPage() {
             className="w-12 h-12 rounded-2xl flex items-center justify-center mb-4"
             style={{ background: 'var(--accent)', boxShadow: '0 8px 24px var(--accent-subtle)' }}
           >
-            <MessageSquare className="w-6 h-6" style={{ color: 'var(--bubble-text)' }} />
+            <MessageSquare className="w-6 h-6" style={{ color: 'var(--text-primary)' }} />
           </div>
           <h1 className="text-2xl font-semibold" style={{ color: 'var(--text-primary)' }}>AI Chat</h1>
           <p className="text-sm mt-1" style={{ color: 'var(--text-muted)' }}>登录以继续</p>
@@ -106,7 +106,7 @@ export default function LoginPage() {
               type="submit"
               disabled={loading}
               className="w-full font-medium rounded-xl py-2.5 text-sm transition flex items-center justify-center gap-2 mt-2 disabled:opacity-60 disabled:cursor-not-allowed"
-              style={{ background: 'var(--accent)', color: 'var(--bubble-text)' }}
+              style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
               onMouseEnter={e => { if (!loading) e.target.style.background = 'var(--accent-hover)' }}
               onMouseLeave={e => e.target.style.background = 'var(--accent)'}
             >

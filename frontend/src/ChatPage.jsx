@@ -214,7 +214,7 @@ export default function ChatPage() {
               {sending && !streamingContent && (
                 <div className="flex gap-3 py-3">
                   <div className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-bold"
-                    style={{ background: 'var(--accent)', color: 'var(--bubble-text)' }}>
+                    style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}>
                     AI
                   </div>
                   <div className="flex items-center gap-1 pt-2">

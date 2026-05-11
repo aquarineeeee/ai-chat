@@ -6,6 +6,7 @@ from app.services.conversations import (
     list_conversations,
     update_conversation,
 )
+from app.services.messages import list_conversation_messages
 
 __all__ = [
     "authenticate_user",
@@ -13,5 +14,6 @@ __all__ = [
     "delete_conversation",
     "get_conversation",
     "list_conversations",
+    "list_conversation_messages",
     "update_conversation",
 ]

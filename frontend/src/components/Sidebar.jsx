@@ -52,7 +52,7 @@ export default function Sidebar({
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg flex items-center justify-center"
             style={{ background: 'var(--accent)' }}>
-            <MessageSquare className="w-4 h-4" style={{ color: 'var(--bubble-text)' }} />
+            <MessageSquare className="w-4 h-4" style={{ color: 'var(--text-primary)' }} />
           </div>
           <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>AI Chat</span>
         </div>
@@ -71,7 +71,7 @@ export default function Sidebar({
         <button
           onClick={() => onNew()}
           className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition"
-          style={{ background: 'var(--accent)', color: 'var(--bubble-text)' }}
+          style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
           onMouseEnter={e => e.currentTarget.style.background = 'var(--accent-hover)'}
           onMouseLeave={e => e.currentTarget.style.background = 'var(--accent)'}
         >

@@ -59,8 +59,8 @@ export default function ChatInput({ onSend, disabled }) {
             aria-label="发送"
           >
             {disabled
-              ? <Square className="w-3.5 h-3.5 fill-current" style={{ color: 'var(--bubble-text)' }} />
-              : <Send className="w-3.5 h-3.5" style={{ color: 'var(--bubble-text)' }} />
+              ? <Square className="w-3.5 h-3.5 fill-current" style={{ color: 'var(--text-primary)' }} />
+              : <Send className="w-3.5 h-3.5" style={{ color: 'var(--text-primary)' }} />
             }
           </button>
         </div>
