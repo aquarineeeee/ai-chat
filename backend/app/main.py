@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.api.router import api_router
 from app.core.config import get_settings
@@ -12,6 +15,7 @@ from app.db.session import bootstrap_admin_user
 
 
 settings = get_settings()
+STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 
 
 @asynccontextmanager
@@ -35,3 +39,12 @@ register_exception_handlers(app)
 @app.get("/health")
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# Serve frontend static files (must be after API routes)
+if STATIC_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(_: str):
+        return FileResponse(STATIC_DIR / "index.html")
