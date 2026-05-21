@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import {
   Plus, Trash2, MessageSquare, Loader2,
   LogOut, ChevronLeft, User, Sun, Moon, Key, AlertTriangle, Palette,
+  Upload, CheckCircle2,
 } from 'lucide-react'
 import { PALETTES } from '../ThemeContext'
 
@@ -72,11 +73,13 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
 
 export default function Sidebar({
   open, conversations, activeId, loading,
-  onSelect, onNew, onDelete, onClose,
+  importLoading, importStatus,
+  onSelect, onNew, onImport, onDelete, onClose,
   onToggleTheme, palette, mode, onSetPalette, user, onLogout, onOpenKeys,
 }) {
   const [deletingId, setDeletingId] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
+  const fileInputRef = useRef(null)
 
   function handleDelete(e, id) {
     e.stopPropagation()
@@ -103,6 +106,13 @@ export default function Sidebar({
       hour: '2-digit',
       minute: '2-digit',
     })
+  }
+
+  async function handleImportChange(e) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    await onImport(file)
   }
 
   const btnHover = {
@@ -151,21 +161,68 @@ export default function Sidebar({
       </div>
 
       <div className="px-3 py-3 shrink-0">
-        <button
-          type="button"
-          onClick={() => onNew()}
-          className="w-full flex items-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition"
-          style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
-          onMouseEnter={e => {
-            e.currentTarget.style.background = 'var(--accent-hover)'
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.background = 'var(--accent)'
-          }}
-        >
-          <Plus className="w-4 h-4" />
-          新对话
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onNew()}
+            className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition"
+            style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--accent-hover)'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'var(--accent)'
+            }}
+          >
+            <Plus className="w-4 h-4" />
+            新对话
+          </button>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importLoading}
+            className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition"
+            style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+            title="导入 Markdown"
+            aria-label="导入 Markdown"
+            onMouseEnter={e => {
+              if (!e.currentTarget.disabled) e.currentTarget.style.background = 'var(--border)'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'var(--bg-elevated)'
+            }}
+          >
+            {importLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".md,.markdown,text/markdown"
+            className="hidden"
+            onChange={handleImportChange}
+          />
+        </div>
+        {importStatus && (
+          <div
+            className="mt-3 rounded-xl px-3 py-2 text-xs leading-relaxed"
+            style={{
+              background: importStatus.type === 'success' ? 'var(--bg-elevated)' : 'var(--error-bg)',
+              border: `1px solid ${importStatus.type === 'success' ? 'var(--border)' : 'var(--error-border)'}`,
+              color: importStatus.type === 'success' ? 'var(--text-secondary)' : 'var(--error-text)',
+            }}
+          >
+            <div className="flex items-center gap-2 font-medium" style={{ color: 'var(--text-primary)' }}>
+              {importStatus.type === 'success' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+              <span className="truncate">{importStatus.title}</span>
+            </div>
+            <p className="mt-1">{importStatus.message}</p>
+            {importStatus.type === 'success' && importStatus.meta && (
+              <p className="mt-1" style={{ color: 'var(--text-muted)' }}>
+                消息 {importStatus.meta.messageCount} · 忽略 {importStatus.meta.ignoredCount} · 警告 {importStatus.meta.warningCount}
+              </p>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="flex-1 overflow-y-auto scrollbar-thin px-2 pb-2">

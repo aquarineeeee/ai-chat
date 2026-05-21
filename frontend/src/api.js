@@ -8,8 +8,12 @@ async function request(method, path, body) {
   }
 
   if (body !== undefined) {
-    opts.headers['Content-Type'] = 'application/json'
-    opts.body = JSON.stringify(body)
+    if (body instanceof FormData) {
+      opts.body = body
+    } else {
+      opts.headers['Content-Type'] = 'application/json'
+      opts.body = JSON.stringify(body)
+    }
   }
 
   const res = await fetch(BASE + path, opts)
@@ -37,6 +41,11 @@ export const api = {
 
   getConversations: () => request('GET', '/api/conversations'),
   createConversation: (data) => request('POST', '/api/conversations', data),
+  importMarkdownConversation: (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return request('POST', '/api/conversations/import-md', formData)
+  },
   updateConversation: (id, data) => request('PUT', `/api/conversations/${id}`, data),
   deleteConversation: (id) => request('DELETE', `/api/conversations/${id}`),
 

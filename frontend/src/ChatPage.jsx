@@ -27,6 +27,8 @@ export default function ChatPage() {
   const [apiKeys, setApiKeys] = useState([])
   const [loadingKeys, setLoadingKeys] = useState(false)
   const [keysError, setKeysError] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importStatus, setImportStatus] = useState(null)
   const bottomRef = useRef(null)
 
   const refreshMessages = useCallback(async (conversationId) => {
@@ -38,6 +40,11 @@ export default function ChatPage() {
         : conv
     )))
     return data
+  }, [])
+
+  const fetchConversations = useCallback(async () => {
+    const data = await api.getConversations()
+    return data || []
   }, [])
 
   const loadApiKeys = useCallback(async () => {
@@ -79,7 +86,7 @@ export default function ChatPage() {
   useEffect(() => {
     let cancelled = false
 
-    api.getConversations()
+    fetchConversations()
       .then(async data => {
         if (cancelled) return
         const items = data || []
@@ -98,7 +105,22 @@ export default function ChatPage() {
     return () => {
       cancelled = true
     }
-  }, [selectConversation])
+  }, [fetchConversations, selectConversation])
+
+  const reloadConversations = useCallback(async (nextActiveId = null) => {
+    const items = await fetchConversations()
+    setConversations(items)
+    const resolvedActiveId = nextActiveId ?? items[0]?.id ?? null
+
+    if (resolvedActiveId) {
+      await selectConversation(resolvedActiveId)
+    } else {
+      setActiveId(null)
+      setMessages([])
+    }
+
+    return items
+  }, [fetchConversations, selectConversation])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -110,6 +132,37 @@ export default function ChatPage() {
     await selectConversation(conv.id)
     return conv
   }, [selectConversation])
+
+  const importConversation = useCallback(async (file) => {
+    if (!file || importing) return
+
+    setImporting(true)
+    setImportStatus(null)
+
+    try {
+      const result = await api.importMarkdownConversation(file)
+      const importedId = result?.conversation?.id ?? null
+      await reloadConversations(importedId)
+      setImportStatus({
+        type: 'success',
+        title: result?.conversation?.title || file.name,
+        message: `已导入 ${result?.message_count ?? 0} 条消息`,
+        meta: {
+          messageCount: result?.message_count ?? 0,
+          ignoredCount: result?.ignored_count ?? 0,
+          warningCount: result?.warnings?.length ?? 0,
+        },
+      })
+    } catch (err) {
+      setImportStatus({
+        type: 'error',
+        title: file.name,
+        message: err.message || '导入 Markdown 失败',
+      })
+    } finally {
+      setImporting(false)
+    }
+  }, [importing, reloadConversations])
 
   const deleteConversation = useCallback(async (id) => {
     await api.deleteConversation(id)
@@ -323,10 +376,13 @@ export default function ChatPage() {
           conversations={conversations}
           activeId={activeId}
           loading={loadingConvs}
+          importLoading={importing}
+          importStatus={importStatus}
           palette={palette}
           mode={mode}
           onSelect={id => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false) }}
           onNew={createConversation}
+          onImport={importConversation}
           onDelete={deleteConversation}
           onClose={() => setSidebarOpen(false)}
           onToggleTheme={toggle}
