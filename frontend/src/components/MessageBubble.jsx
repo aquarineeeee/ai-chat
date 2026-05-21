@@ -1,13 +1,15 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { RotateCw } from 'lucide-react'
+import { GitBranch, RotateCw } from 'lucide-react'
 
 export default function MessageBubble({
   message,
   onRegenerate,
+  onSwitchBranch,
   disableActions = false,
   isRegenerating = false,
+  isSwitchingBranch = false,
 }) {
   const isUser = message.role === 'user'
   const isStreaming = message.status === 'streaming'
@@ -88,6 +90,30 @@ export default function MessageBubble({
               >
                 {`分支 ${message.sibling_index}/${message.sibling_count}`}
               </span>
+            )}
+            {onSwitchBranch && (
+              <button
+                type="button"
+                onClick={onSwitchBranch}
+                disabled={actionDisabled}
+                className="p-1.5 rounded-full transition"
+                aria-label={isSwitchingBranch ? '切换分支中' : '切换分支'}
+                title={isSwitchingBranch ? '切换分支中' : '切换分支'}
+                style={{
+                  background: 'transparent',
+                  color: actionDisabled ? 'var(--text-muted)' : 'var(--text-secondary)',
+                  opacity: actionDisabled ? 0.7 : 1,
+                  cursor: actionDisabled ? 'not-allowed' : 'pointer',
+                }}
+                onMouseEnter={e => {
+                  if (!actionDisabled) e.currentTarget.style.background = 'var(--bg-elevated)'
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                <GitBranch className={`w-3.5 h-3.5 ${isSwitchingBranch ? 'animate-pulse' : ''}`} />
+              </button>
             )}
             {onRegenerate && (
               <button

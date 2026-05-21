@@ -33,7 +33,7 @@ async def list_conversation_messages(
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    sibling_map = _build_sibling_position_map(history)
+    sibling_map = _build_sibling_meta_map(history)
     visible_messages = _visible_conversation_messages(history, conversation.current_leaf_message_id)
 
     return ConversationMessagesResponse(
@@ -41,6 +41,24 @@ async def list_conversation_messages(
         current_leaf_message_id=conversation.current_leaf_message_id,
         items=[_serialize_message_node(item, sibling_map=sibling_map) for item in visible_messages],
     )
+
+
+async def activate_message_branch(
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+) -> ConversationMessagesResponse:
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    target_message = next((item for item in history if item.id == message_id), None)
+    if target_message is None:
+        raise AppError(status_code=404, code="NOT_FOUND", message="消息不存在")
+
+    conversation.current_leaf_message_id = _resolve_branch_leaf_message_id(history, target_message.id)
+    await session.commit()
+    await session.refresh(conversation)
+    return await list_conversation_messages(session=session, user_id=user_id, conversation_id=conversation_id)
 
 
 async def create_message_pair(
@@ -501,7 +519,7 @@ async def _build_send_response(
     await session.refresh(assistant_message)
     await session.refresh(conversation)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    sibling_map = _build_sibling_position_map(history)
+    sibling_map = _build_sibling_meta_map(history)
     return MessageSendResponse(
         conversation_id=conversation.id,
         current_leaf_message_id=conversation.current_leaf_message_id,
@@ -520,7 +538,7 @@ async def _build_regenerate_response(
     await session.refresh(assistant_message)
     await session.refresh(conversation)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    sibling_map = _build_sibling_position_map(history)
+    sibling_map = _build_sibling_meta_map(history)
     return MessageRegenerateResponse(
         conversation_id=conversation.id,
         current_leaf_message_id=conversation.current_leaf_message_id,
@@ -628,31 +646,60 @@ def _lineage_ids(by_id: dict[int, Message], leaf_message_id: int) -> list[int]:
     return lineage_ids
 
 
-def _build_sibling_position_map(messages: list[Message]) -> dict[int, tuple[int, int]]:
+def _build_sibling_meta_map(messages: list[Message]) -> dict[int, tuple[int, int, int | None, int | None]]:
     siblings_by_parent: dict[int | None, list[Message]] = defaultdict(list)
     for message in messages:
         siblings_by_parent[message.parent_id].append(message)
 
-    sibling_map: dict[int, tuple[int, int]] = {}
+    sibling_map: dict[int, tuple[int, int, int | None, int | None]] = {}
     for siblings in siblings_by_parent.values():
         total = len(siblings)
         for index, message in enumerate(siblings, start=1):
-            sibling_map[message.id] = (index, total)
+            previous_id = siblings[index - 2].id if total > 1 and index > 1 else (siblings[-1].id if total > 1 else None)
+            next_id = siblings[index].id if total > 1 and index < total else (siblings[0].id if total > 1 else None)
+            sibling_map[message.id] = (index, total, previous_id, next_id)
     return sibling_map
 
 
 def _serialize_message_node(
     message: Message,
     *,
-    sibling_map: dict[int, tuple[int, int]],
+    sibling_map: dict[int, tuple[int, int, int | None, int | None]],
 ) -> MessageNodeResponse:
-    sibling_index, sibling_count = sibling_map.get(message.id, (1, 1))
+    sibling_index, sibling_count, previous_sibling_id, next_sibling_id = sibling_map.get(
+        message.id,
+        (1, 1, None, None),
+    )
     return MessageNodeResponse.model_validate(message).model_copy(
         update={
             "sibling_index": sibling_index,
             "sibling_count": sibling_count,
+            "previous_sibling_id": previous_sibling_id,
+            "next_sibling_id": next_sibling_id,
         }
     )
+
+
+def _resolve_branch_leaf_message_id(messages: list[Message], root_message_id: int) -> int:
+    by_parent: dict[int | None, list[Message]] = defaultdict(list)
+    for message in messages:
+        by_parent[message.parent_id].append(message)
+
+    subtree_ids: set[int] = set()
+    stack = [root_message_id]
+    while stack:
+        current_id = stack.pop()
+        if current_id in subtree_ids:
+            continue
+        subtree_ids.add(current_id)
+        for child in by_parent.get(current_id, []):
+            stack.append(child.id)
+
+    leaves = [message for message in messages if message.id in subtree_ids and not by_parent.get(message.id)]
+    if not leaves:
+        return root_message_id
+    leaves.sort(key=lambda item: (item.updated_at, item.created_at, item.id))
+    return leaves[-1].id
 
 
 def _prompt_seed_content(prompt_messages: list[dict[str, str]]) -> str:

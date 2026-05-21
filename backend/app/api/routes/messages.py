@@ -16,6 +16,7 @@ from app.schemas.message import (
     MessageSendResponse,
 )
 from app.services.messages import (
+    activate_message_branch,
     create_message_pair,
     create_message_stream,
     list_conversation_messages,
@@ -134,4 +135,19 @@ async def messages_regenerate_stream(
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/activate", response_model=ConversationMessagesResponse)
+async def messages_activate_branch(
+    conversation_id: int,
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> ConversationMessagesResponse:
+    return await activate_message_branch(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        message_id=message_id,
     )

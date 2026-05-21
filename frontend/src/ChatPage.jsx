@@ -21,6 +21,7 @@ export default function ChatPage() {
   const [loadingMsgs, setLoadingMsgs] = useState(false)
   const [sending, setSending] = useState(false)
   const [regeneratingMessageId, setRegeneratingMessageId] = useState(null)
+  const [switchingBranchMessageId, setSwitchingBranchMessageId] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
   const [error, setError] = useState('')
   const [apiKeys, setApiKeys] = useState([])
@@ -210,7 +211,7 @@ export default function ChatPage() {
   }, [activeId, createConversation, refreshMessages, regeneratingMessageId, sending])
 
   const regenerateMessage = useCallback(async (messageId) => {
-    if (!activeId || sending || regeneratingMessageId !== null) return
+    if (!activeId || sending || regeneratingMessageId !== null || switchingBranchMessageId !== null) return
     setError('')
     setRegeneratingMessageId(messageId)
     setStreamingContent('')
@@ -282,10 +283,28 @@ export default function ChatPage() {
       setRegeneratingMessageId(null)
       setStreamingContent('')
     }
-  }, [activeId, refreshMessages, regeneratingMessageId, sending])
+  }, [activeId, refreshMessages, regeneratingMessageId, sending, switchingBranchMessageId])
+
+  const switchBranch = useCallback(async (messageId) => {
+    if (!activeId || sending || regeneratingMessageId !== null || switchingBranchMessageId !== null) return
+    const sourceMessage = messages.find(msg => msg.id === messageId)
+    const targetMessageId = sourceMessage?.next_sibling_id
+    if (!targetMessageId) return
+
+    setError('')
+    setSwitchingBranchMessageId(messageId)
+    try {
+      await api.activateMessageBranch(activeId, targetMessageId)
+      await refreshMessages(activeId)
+    } catch (e) {
+      setError(e.message || '切换分支失败，请重试')
+    } finally {
+      setSwitchingBranchMessageId(null)
+    }
+  }, [activeId, messages, refreshMessages, regeneratingMessageId, sending, switchingBranchMessageId])
 
   const activeConv = conversations.find(c => c.id === activeId)
-  const busy = sending || regeneratingMessageId !== null
+  const busy = sending || regeneratingMessageId !== null || switchingBranchMessageId !== null
   const regeneratingMsg = regeneratingMessageId !== null
     ? messages.find(m => m.id === regeneratingMessageId)
     : null
@@ -374,8 +393,10 @@ export default function ChatPage() {
                       key={msg.id}
                       message={renderedMessage}
                       onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMessage(msg.id) }}
+                      onSwitchBranch={msg.next_sibling_id ? () => { void switchBranch(msg.id) } : undefined}
                       disableActions={busy}
                       isRegenerating={isRegeneratingSource}
+                      isSwitchingBranch={switchingBranchMessageId === msg.id}
                     />
                   )
                 })}

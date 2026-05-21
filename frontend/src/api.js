@@ -44,6 +44,8 @@ export const api = {
   sendMessage: (convId, data) => request('POST', `/api/conversations/${convId}/messages`, data),
   regenerateMessage: (convId, messageId, data = {}) =>
     request('POST', `/api/conversations/${convId}/messages/${messageId}/regenerate`, data),
+  activateMessageBranch: (convId, messageId) =>
+    request('POST', `/api/conversations/${convId}/messages/${messageId}/activate`),
 
   getApiKeys: () => request('GET', '/api/keys'),
   createApiKey: (data) => request('POST', '/api/keys', data),

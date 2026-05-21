@@ -42,6 +42,8 @@ class MessageNodeResponse(BaseModel):
     updated_at: datetime
     sibling_index: int = 1
     sibling_count: int = 1
+    previous_sibling_id: int | None = None
+    next_sibling_id: int | None = None
 
 
 class ConversationMessagesResponse(BaseModel):
