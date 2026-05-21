@@ -320,23 +320,33 @@ async def _prepare_regeneration(
         conversation_id=conversation.id,
         message_id=message_id,
     )
-    if target_message.role != MessageRole.ASSISTANT:
-        raise AppError(status_code=400, code="VALIDATION_ERROR", message="只能重新生成 assistant 消息")
-    if target_message.status == MessageStatus.STREAMING:
-        raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能重新生成")
-
-    provider, model, temperature, max_tokens = _resolve_generation_options(
-        conversation=conversation,
-        provider=payload.provider or target_message.provider,
-        model=payload.model or target_message.model,
-        temperature=payload.temperature if payload.temperature is not None else target_message.temperature,
-        max_tokens=payload.max_tokens if payload.max_tokens is not None else target_message.max_tokens,
-    )
+    if target_message.role == MessageRole.ASSISTANT:
+        if target_message.status == MessageStatus.STREAMING:
+            raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能重新生成")
+        parent_id = target_message.parent_id
+        provider, model, temperature, max_tokens = _resolve_generation_options(
+            conversation=conversation,
+            provider=payload.provider or target_message.provider,
+            model=payload.model or target_message.model,
+            temperature=payload.temperature if payload.temperature is not None else target_message.temperature,
+            max_tokens=payload.max_tokens if payload.max_tokens is not None else target_message.max_tokens,
+        )
+    elif target_message.role == MessageRole.USER:
+        parent_id = target_message.id
+        provider, model, temperature, max_tokens = _resolve_generation_options(
+            conversation=conversation,
+            provider=payload.provider,
+            model=payload.model,
+            temperature=payload.temperature,
+            max_tokens=payload.max_tokens,
+        )
+    else:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持重新生成此类型消息")
 
     assistant_message = await _create_assistant_message(
         session=session,
         conversation_id=conversation.id,
-        parent_id=target_message.parent_id,
+        parent_id=parent_id,
         provider=provider,
         model=model,
         temperature=temperature,
@@ -345,7 +355,7 @@ async def _prepare_regeneration(
     prompt_messages = await _build_prompt_messages(
         session=session,
         conversation=conversation,
-        parent_id=target_message.parent_id,
+        parent_id=parent_id,
     )
     return {
         "assistant_message": assistant_message,

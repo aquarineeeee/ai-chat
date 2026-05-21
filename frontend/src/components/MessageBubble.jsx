@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import { RotateCw } from 'lucide-react'
 
 export default function MessageBubble({
   message,
@@ -11,17 +12,46 @@ export default function MessageBubble({
   const isUser = message.role === 'user'
   const isStreaming = message.status === 'streaming'
   const showBranchInfo = Number(message.sibling_count) > 1
+  const actionDisabled = disableActions || isStreaming
 
   if (isUser) {
     return (
       <div className="flex justify-end py-2">
-        <div
-          className="max-w-[80%] rounded-2xl rounded-tr-sm px-4 py-3 text-sm"
-          style={{ background: 'var(--bubble-bg)', color: 'var(--text-primary)' }}
-        >
-          <div className="prose-chat whitespace-pre-wrap break-words">
-            {message.content}
+        <div className="max-w-[80%]">
+          <div
+            className="rounded-2xl rounded-tr-sm px-4 py-3 text-sm"
+            style={{ background: 'var(--bubble-bg)', color: 'var(--text-primary)' }}
+          >
+            <div className="prose-chat whitespace-pre-wrap break-words">
+              {message.content}
+            </div>
           </div>
+          {onRegenerate && (
+            <div className="flex justify-end mt-2">
+              <button
+                type="button"
+                onClick={onRegenerate}
+                disabled={actionDisabled}
+                className="p-1.5 rounded-full transition"
+                aria-label={isRegenerating ? '重新回答中' : '重新回答'}
+                title={isRegenerating ? '重新回答中' : '重新回答'}
+                style={{
+                  background: 'transparent',
+                  color: actionDisabled ? 'var(--text-muted)' : 'var(--text-secondary)',
+                  opacity: actionDisabled ? 0.7 : 1,
+                  cursor: actionDisabled ? 'not-allowed' : 'pointer',
+                }}
+                onMouseEnter={e => {
+                  if (!actionDisabled) e.currentTarget.style.background = 'var(--bg-elevated)'
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'transparent'
+                }}
+              >
+                <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
+              </button>
+            </div>
+          )}
         </div>
       </div>
     )
@@ -63,16 +93,24 @@ export default function MessageBubble({
               <button
                 type="button"
                 onClick={onRegenerate}
-                disabled={disableActions || isStreaming}
-                className="px-2 py-1 rounded-full transition"
+                disabled={actionDisabled}
+                className="p-1.5 rounded-full transition"
+                aria-label={isRegenerating ? '重新生成中' : '重新生成'}
+                title={isRegenerating ? '重新生成中' : '重新生成'}
                 style={{
-                  background: 'var(--bg-elevated)',
-                  color: disableActions || isStreaming ? 'var(--text-muted)' : 'var(--text-primary)',
-                  opacity: disableActions || isStreaming ? 0.7 : 1,
-                  cursor: disableActions || isStreaming ? 'not-allowed' : 'pointer',
+                  background: 'transparent',
+                  color: actionDisabled ? 'var(--text-muted)' : 'var(--text-secondary)',
+                  opacity: actionDisabled ? 0.7 : 1,
+                  cursor: actionDisabled ? 'not-allowed' : 'pointer',
+                }}
+                onMouseEnter={e => {
+                  if (!actionDisabled) e.currentTarget.style.background = 'var(--bg-elevated)'
+                }}
+                onMouseLeave={e => {
+                  e.currentTarget.style.background = 'transparent'
                 }}
               >
-                {isRegenerating ? '重新生成中...' : '重新生成'}
+                <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
               </button>
             )}
           </div>

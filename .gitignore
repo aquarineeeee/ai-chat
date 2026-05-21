@@ -17,3 +17,5 @@ __pycache__/
 *.log
 docs/plan.md
 docs/markdown-conversation-import.md
+docs/conversation-tree-export.md
+docs/devdiary.md

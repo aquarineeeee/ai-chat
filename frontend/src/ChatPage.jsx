@@ -286,6 +286,9 @@ export default function ChatPage() {
 
   const activeConv = conversations.find(c => c.id === activeId)
   const busy = sending || regeneratingMessageId !== null
+  const regeneratingMsg = regeneratingMessageId !== null
+    ? messages.find(m => m.id === regeneratingMessageId)
+    : null
   const regenerationCutoffIndex = regeneratingMessageId === null
     ? -1
     : messages.findIndex(msg => msg.id === regeneratingMessageId)
@@ -360,7 +363,8 @@ export default function ChatPage() {
             ) : (
               <div className="max-w-3xl mx-auto px-4 py-6 space-y-1">
                 {displayedMessages.map(msg => {
-                  const isRegeneratingTarget = regeneratingMessageId === msg.id
+                  const isRegeneratingTarget = regeneratingMessageId === msg.id && msg.role === 'assistant'
+                  const isRegeneratingSource = regeneratingMessageId === msg.id
                   const renderedMessage = isRegeneratingTarget
                     ? { ...msg, content: streamingContent, status: 'streaming', error_message: null }
                     : msg
@@ -369,9 +373,9 @@ export default function ChatPage() {
                     <MessageBubble
                       key={msg.id}
                       message={renderedMessage}
-                      onRegenerate={msg.role === 'assistant' ? () => { void regenerateMessage(msg.id) } : undefined}
+                      onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMessage(msg.id) }}
                       disableActions={busy}
-                      isRegenerating={isRegeneratingTarget}
+                      isRegenerating={isRegeneratingSource}
                     />
                   )
                 })}
@@ -389,7 +393,7 @@ export default function ChatPage() {
                     </div>
                   </div>
                 )}
-                {streamingContent && regeneratingMessageId === null && (
+                {streamingContent && (regeneratingMessageId === null || regeneratingMsg?.role === 'user') && (
                   <MessageBubble message={{ role: 'assistant', content: streamingContent, status: 'streaming' }} />
                 )}
                 {error && (
