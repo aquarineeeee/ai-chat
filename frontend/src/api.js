@@ -49,7 +49,14 @@ export const api = {
   updateConversation: (id, data) => request('PUT', `/api/conversations/${id}`, data),
   deleteConversation: (id) => request('DELETE', `/api/conversations/${id}`),
 
-  getMessages: (convId) => request('GET', `/api/conversations/${convId}/messages`),
+  getMessages: (convId, params = {}) => {
+    const search = new URLSearchParams()
+    if (params.leafMessageId) search.set('leaf_message_id', params.leafMessageId)
+    if (params.rootMessageId) search.set('root_message_id', params.rootMessageId)
+    if (params.expandLeaf) search.set('expand_leaf_descendants', 'true')
+    const qs = search.toString()
+    return request('GET', `/api/conversations/${convId}/messages${qs ? `?${qs}` : ''}`)
+  },
   sendMessage: (convId, data) => request('POST', `/api/conversations/${convId}/messages`, data),
   regenerateMessage: (convId, messageId, data = {}) =>
     request('POST', `/api/conversations/${convId}/messages/${messageId}/regenerate`, data),
@@ -60,4 +67,5 @@ export const api = {
   createApiKey: (data) => request('POST', '/api/keys', data),
   deleteApiKey: (id) => request('DELETE', `/api/keys/${id}`),
   testApiKey: (id) => request('POST', `/api/keys/${id}/test`),
+  getProviderModels: (provider) => request('GET', `/api/keys/providers/${encodeURIComponent(provider)}/models`),
 }

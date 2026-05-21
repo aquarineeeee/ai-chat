@@ -51,7 +51,7 @@ def _extract_error_message(response: httpx.Response) -> str:
     try:
         payload = response.json()
     except Exception:
-        return response.text or f"上游服务返回 HTTP {response.status_code}"
+        return response.text or f"涓婃父鏈嶅姟杩斿洖 HTTP {response.status_code}"
 
     error = payload.get("error")
     if isinstance(error, dict):
@@ -60,7 +60,7 @@ def _extract_error_message(response: httpx.Response) -> str:
             return str(message)
     if isinstance(error, str):
         return error
-    return response.text or f"上游服务返回 HTTP {response.status_code}"
+    return response.text or f"涓婃父鏈嶅姟杩斿洖 HTTP {response.status_code}"
 
 
 def _chat_payload(
@@ -110,7 +110,7 @@ async def create_openai_compatible_reply(
         try:
             response = await client.post(url, headers=_build_headers(raw_key), json=payload)
         except httpx.HTTPError as exc:
-            raise AppError(status_code=502, code="MODEL_ERROR", message=f"请求上游模型服务失败: {exc}") from exc
+            raise AppError(status_code=502, code="MODEL_ERROR", message=f"璇锋眰涓婃父妯″瀷鏈嶅姟澶辫触: {exc}") from exc
 
     if response.status_code >= 400:
         raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(response))
@@ -124,7 +124,7 @@ async def create_openai_compatible_reply(
         raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型响应格式不正确") from exc
 
     if not content:
-        raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型返回了空内容")
+        raise AppError(status_code=502, code="MODEL_ERROR", message="涓婃父妯″瀷杩斿洖浜嗙┖鍐呭")
     return content
 
 
@@ -178,7 +178,7 @@ async def stream_openai_compatible_reply(
                     error = data.get("error")
                     if error:
                         if isinstance(error, dict):
-                            message = str(error.get("message") or "上游模型返回错误")
+                            message = str(error.get("message") or "涓婃父妯″瀷杩斿洖閿欒")
                         else:
                             message = str(error)
                         raise AppError(status_code=502, code="MODEL_ERROR", message=message)
@@ -193,7 +193,7 @@ async def stream_openai_compatible_reply(
         except AppError:
             raise
         except httpx.HTTPError as exc:
-            raise AppError(status_code=502, code="MODEL_ERROR", message=f"请求上游模型服务失败: {exc}") from exc
+            raise AppError(status_code=502, code="MODEL_ERROR", message=f"璇锋眰涓婃父妯″瀷鏈嶅姟澶辫触: {exc}") from exc
 
 
 async def test_openai_compatible_key(*, api_key: ApiKey) -> tuple[bool, str]:
@@ -214,3 +214,45 @@ async def test_openai_compatible_key(*, api_key: ApiKey) -> tuple[bool, str]:
     if response.status_code >= 400:
         return False, _extract_error_message(response)
     return True, "连接成功"
+
+
+async def list_openai_compatible_models(*, api_key: ApiKey) -> list[dict[str, str | None]]:
+    raw_key = decrypt_text(api_key.key_encrypted)
+    url = f"{_resolve_base_url(api_key.base_url)}/models"
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0, connect=10.0),
+        follow_redirects=True,
+        trust_env=False,
+        http2=False,
+    ) as client:
+        try:
+            response = await client.get(url, headers=_build_headers(raw_key))
+        except httpx.HTTPError as exc:
+            raise AppError(status_code=502, code="MODEL_ERROR", message=f"请求上游模型服务失败: {exc}") from exc
+
+    if response.status_code >= 400:
+        raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(response))
+
+    try:
+        payload = response.json()
+        items = payload.get("data") or []
+    except Exception as exc:
+        raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型列表响应格式不正确") from exc
+
+    models: list[dict[str, str | None]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        if not model_id:
+            continue
+        models.append(
+            {
+                "id": str(model_id),
+                "owned_by": str(item.get("owned_by")) if item.get("owned_by") is not None else None,
+            }
+        )
+
+    models.sort(key=lambda item: item["id"])
+    return models

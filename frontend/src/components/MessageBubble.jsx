@@ -1,19 +1,68 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { GitBranch, RotateCw } from 'lucide-react'
+import { ChevronLeft, ChevronRight, GitBranch, RotateCw } from 'lucide-react'
+
+function IconButton({ label, onClick, disabled, children, pulse = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="p-1.5 rounded-full transition"
+      aria-label={label}
+      title={label}
+      style={{
+        background: 'transparent',
+        color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)',
+        opacity: disabled ? 0.7 : 1,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+      }}
+      onMouseEnter={e => {
+        if (!disabled) e.currentTarget.style.background = 'var(--bg-elevated)'
+      }}
+      onMouseLeave={e => {
+        e.currentTarget.style.background = 'transparent'
+      }}
+    >
+      <span className={pulse ? 'animate-spin' : ''}>
+        {children}
+      </span>
+    </button>
+  )
+}
+
+function SiblingNavigator({ message, onPrevSibling, onNextSibling, disabled }) {
+  if (message.role !== 'assistant' || Number(message.sibling_count) <= 1) return null
+
+  return (
+    <div className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+      <IconButton label="上一个分支" onClick={onPrevSibling} disabled={disabled}>
+        <ChevronLeft className="w-3.5 h-3.5" />
+      </IconButton>
+      <span className="min-w-[44px] text-center">
+        {message.sibling_index}/{message.sibling_count}
+      </span>
+      <IconButton label="下一个分支" onClick={onNextSibling} disabled={disabled}>
+        <ChevronRight className="w-3.5 h-3.5" />
+      </IconButton>
+    </div>
+  )
+}
 
 export default function MessageBubble({
   message,
   onRegenerate,
-  onSwitchBranch,
+  onCreateBranch,
+  onPrevSibling,
+  onNextSibling,
   disableActions = false,
   isRegenerating = false,
-  isSwitchingBranch = false,
+  isCreatingBranch = false,
+  hideActions = false,
 }) {
   const isUser = message.role === 'user'
   const isStreaming = message.status === 'streaming'
-  const showBranchInfo = Number(message.sibling_count) > 1
   const actionDisabled = disableActions || isStreaming
 
   if (isUser) {
@@ -28,30 +77,18 @@ export default function MessageBubble({
               {message.content}
             </div>
           </div>
-          {onRegenerate && (
-            <div className="flex justify-end mt-2">
-              <button
-                type="button"
-                onClick={onRegenerate}
-                disabled={actionDisabled}
-                className="p-1.5 rounded-full transition"
-                aria-label={isRegenerating ? '重新回答中' : '重新回答'}
-                title={isRegenerating ? '重新回答中' : '重新回答'}
-                style={{
-                  background: 'transparent',
-                  color: actionDisabled ? 'var(--text-muted)' : 'var(--text-secondary)',
-                  opacity: actionDisabled ? 0.7 : 1,
-                  cursor: actionDisabled ? 'not-allowed' : 'pointer',
-                }}
-                onMouseEnter={e => {
-                  if (!actionDisabled) e.currentTarget.style.background = 'var(--bg-elevated)'
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'transparent'
-                }}
-              >
-                <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
-              </button>
+          {!hideActions && (
+            <div className="flex justify-end items-center gap-1 mt-2">
+              {onCreateBranch && (
+                <IconButton label={isCreatingBranch ? '创建分支中' : '创建分支'} onClick={onCreateBranch} disabled={actionDisabled}>
+                  <GitBranch className={`w-3.5 h-3.5 ${isCreatingBranch ? 'animate-pulse' : ''}`} />
+                </IconButton>
+              )}
+              {onRegenerate && (
+                <IconButton label={isRegenerating ? '重新回答中' : '重新回答'} onClick={onRegenerate} disabled={actionDisabled}>
+                  <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
+                </IconButton>
+              )}
             </div>
           )}
         </div>
@@ -81,64 +118,26 @@ export default function MessageBubble({
             {message.error_message || '生成失败'}
           </p>
         )}
-        {(showBranchInfo || onRegenerate) && (
-          <div className="flex items-center gap-2 mt-3 text-xs">
-            {showBranchInfo && (
-              <span
-                className="px-2 py-1 rounded-full"
-                style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}
-              >
-                {`分支 ${message.sibling_index}/${message.sibling_count}`}
-              </span>
-            )}
-            {onSwitchBranch && (
-              <button
-                type="button"
-                onClick={onSwitchBranch}
-                disabled={actionDisabled}
-                className="p-1.5 rounded-full transition"
-                aria-label={isSwitchingBranch ? '切换分支中' : '切换分支'}
-                title={isSwitchingBranch ? '切换分支中' : '切换分支'}
-                style={{
-                  background: 'transparent',
-                  color: actionDisabled ? 'var(--text-muted)' : 'var(--text-secondary)',
-                  opacity: actionDisabled ? 0.7 : 1,
-                  cursor: actionDisabled ? 'not-allowed' : 'pointer',
-                }}
-                onMouseEnter={e => {
-                  if (!actionDisabled) e.currentTarget.style.background = 'var(--bg-elevated)'
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'transparent'
-                }}
-              >
-                <GitBranch className={`w-3.5 h-3.5 ${isSwitchingBranch ? 'animate-pulse' : ''}`} />
-              </button>
-            )}
-            {onRegenerate && (
-              <button
-                type="button"
-                onClick={onRegenerate}
-                disabled={actionDisabled}
-                className="p-1.5 rounded-full transition"
-                aria-label={isRegenerating ? '重新生成中' : '重新生成'}
-                title={isRegenerating ? '重新生成中' : '重新生成'}
-                style={{
-                  background: 'transparent',
-                  color: actionDisabled ? 'var(--text-muted)' : 'var(--text-secondary)',
-                  opacity: actionDisabled ? 0.7 : 1,
-                  cursor: actionDisabled ? 'not-allowed' : 'pointer',
-                }}
-                onMouseEnter={e => {
-                  if (!actionDisabled) e.currentTarget.style.background = 'var(--bg-elevated)'
-                }}
-                onMouseLeave={e => {
-                  e.currentTarget.style.background = 'transparent'
-                }}
-              >
-                <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
-              </button>
-            )}
+        {!hideActions && (
+          <div className="flex items-center justify-between gap-3 mt-3">
+            <SiblingNavigator
+              message={message}
+              onPrevSibling={onPrevSibling}
+              onNextSibling={onNextSibling}
+              disabled={actionDisabled}
+            />
+            <div className="flex items-center gap-1 ml-auto">
+              {onCreateBranch && (
+                <IconButton label={isCreatingBranch ? '创建分支中' : '创建分支'} onClick={onCreateBranch} disabled={actionDisabled}>
+                  <GitBranch className={`w-3.5 h-3.5 ${isCreatingBranch ? 'animate-pulse' : ''}`} />
+                </IconButton>
+              )}
+              {onRegenerate && (
+                <IconButton label={isRegenerating ? '重新生成中' : '重新生成'} onClick={onRegenerate} disabled={actionDisabled}>
+                  <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
+                </IconButton>
+              )}
+            </div>
           </div>
         )}
       </div>

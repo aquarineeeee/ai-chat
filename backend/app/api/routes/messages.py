@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,9 @@ router = APIRouter()
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
 async def messages_index(
     conversation_id: int,
+    leaf_message_id: int | None = Query(default=None, ge=1),
+    root_message_id: int | None = Query(default=None, ge=1),
+    expand_leaf_descendants: bool = False,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> ConversationMessagesResponse:
@@ -38,6 +41,9 @@ async def messages_index(
         session=session,
         user_id=current_user.id,
         conversation_id=conversation_id,
+        leaf_message_id=leaf_message_id,
+        root_message_id=root_message_id,
+        expand_leaf_descendants=expand_leaf_descendants,
     )
 
 

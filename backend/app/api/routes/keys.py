@@ -5,8 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, get_current_user
 from app.models.user import User
-from app.schemas.api_key import ApiKeyCreateRequest, ApiKeyResponse, ApiKeyTestResponse
-from app.services.api_keys import create_api_key, delete_api_key, list_api_keys, test_api_key
+from app.schemas.api_key import ApiKeyCreateRequest, ApiKeyResponse, ApiKeyTestResponse, ProviderModelResponse
+from app.services.api_keys import create_api_key, delete_api_key, list_api_keys, list_provider_models, test_api_key
 
 
 router = APIRouter()
@@ -53,3 +53,13 @@ async def keys_test(
         message=message,
         api_key=ApiKeyResponse.model_validate(api_key),
     )
+
+
+@router.get("/providers/{provider}/models", response_model=list[ProviderModelResponse])
+async def keys_provider_models(
+    provider: str,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> list[ProviderModelResponse]:
+    models = await list_provider_models(session=session, user_id=current_user.id, provider=provider)
+    return [ProviderModelResponse.model_validate(item) for item in models]

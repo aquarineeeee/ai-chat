@@ -8,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.encryption import encrypt_text
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
-from app.providers.openai_compatible import normalize_base_url, test_openai_compatible_key
+from app.providers.openai_compatible import (
+    list_openai_compatible_models,
+    normalize_base_url,
+    test_openai_compatible_key,
+)
 from app.schemas.api_key import ApiKeyCreateRequest
 
 
@@ -94,3 +98,12 @@ async def test_api_key(session: AsyncSession, user_id: int, api_key_id: int) -> 
     await session.commit()
     await session.refresh(api_key)
     return api_key, success, message
+
+
+async def list_provider_models(session: AsyncSession, user_id: int, provider: str) -> list[dict[str, str | None]]:
+    api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+
+    if api_key.provider == "openai":
+        return await list_openai_compatible_models(api_key=api_key)
+
+    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"鏆備笉鏀寔 provider '{api_key.provider}'")

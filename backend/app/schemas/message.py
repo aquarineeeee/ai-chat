@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,6 +16,9 @@ class MessageCreateRequest(BaseModel):
     model: str | None = None
     temperature: Decimal | None = None
     max_tokens: int | None = None
+    activate_branch: bool = True
+    context_mode: Literal["full", "root_only"] = "full"
+    context_root_message_id: int | None = None
 
 
 class MessageRegenerateRequest(BaseModel):
@@ -22,6 +26,9 @@ class MessageRegenerateRequest(BaseModel):
     model: str | None = None
     temperature: Decimal | None = None
     max_tokens: int | None = None
+    activate_branch: bool = True
+    context_mode: Literal["full", "root_only"] = "full"
+    context_root_message_id: int | None = None
 
 
 class MessageNodeResponse(BaseModel):

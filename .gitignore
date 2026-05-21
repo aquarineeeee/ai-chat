@@ -19,3 +19,10 @@ docs/plan.md
 docs/markdown-conversation-import.md
 docs/conversation-tree-export.md
 docs/devdiary.md
+
+# Build outputs
+/backend/static/
+/frontend/dist-check/
+/frontend/dist-temp/
+/frontend/dist-temp-2/
+/frontend/dist-verify/

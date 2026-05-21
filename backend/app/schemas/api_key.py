@@ -32,3 +32,8 @@ class ApiKeyTestResponse(BaseModel):
     success: bool
     message: str
     api_key: ApiKeyResponse
+
+
+class ProviderModelResponse(BaseModel):
+    id: str
+    owned_by: str | None = None

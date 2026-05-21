@@ -30,15 +30,46 @@ async def list_conversation_messages(
     session: AsyncSession,
     user_id: int,
     conversation_id: int,
+    leaf_message_id: int | None = None,
+    root_message_id: int | None = None,
+    expand_leaf_descendants: bool = False,
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+
+    if root_message_id is not None:
+        await _ensure_message_belongs_to_conversation(
+            session=session,
+            conversation_id=conversation.id,
+            message_id=root_message_id,
+        )
+
+    if leaf_message_id is not None:
+        await _ensure_message_belongs_to_conversation(
+            session=session,
+            conversation_id=conversation.id,
+            message_id=leaf_message_id,
+        )
+        selected_leaf_message_id = (
+            _resolve_branch_leaf_message_id(history, leaf_message_id)
+            if expand_leaf_descendants
+            else leaf_message_id
+        )
+    elif root_message_id is not None:
+        selected_leaf_message_id = _resolve_branch_leaf_message_id(history, root_message_id)
+    else:
+        selected_leaf_message_id = conversation.current_leaf_message_id
+
     sibling_map = _build_sibling_meta_map(history)
-    visible_messages = _visible_conversation_messages(history, conversation.current_leaf_message_id)
+    visible_messages = _visible_conversation_messages(
+        history,
+        selected_leaf_message_id,
+        root_message_id=root_message_id,
+    )
 
     return ConversationMessagesResponse(
         conversation_id=conversation.id,
-        current_leaf_message_id=conversation.current_leaf_message_id,
+        current_leaf_message_id=selected_leaf_message_id,
         items=[_serialize_message_node(item, sibling_map=sibling_map) for item in visible_messages],
     )
 
@@ -89,6 +120,7 @@ async def create_message_pair(
             message=app_error.message,
             status=MessageStatus.FAILED,
             leaf_message_id=context["user_message"].id,
+            activate_branch=context["activate_branch"],
         )
         raise app_error
 
@@ -97,12 +129,14 @@ async def create_message_pair(
         conversation=context["conversation"],
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
+        activate_branch=context["activate_branch"],
     )
     return await _build_send_response(
         session=session,
         conversation=context["conversation"],
         user_message=context["user_message"],
         assistant_message=context["assistant_message"],
+        selected_leaf_message_id=context["assistant_message"].id,
     )
 
 
@@ -141,6 +175,7 @@ async def create_message_stream(
                 status=status,
                 leaf_message_id=leaf_message_id,
                 partial_content=accumulated,
+                activate_branch=context["activate_branch"],
             )
             yield {"error": app_error.message}
             return
@@ -150,6 +185,7 @@ async def create_message_stream(
             conversation=context["conversation"],
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
+            activate_branch=context["activate_branch"],
         )
 
     return iterator()
@@ -190,6 +226,7 @@ async def regenerate_message(
             message=app_error.message,
             status=MessageStatus.FAILED,
             leaf_message_id=context["target_message"].id,
+            activate_branch=context["activate_branch"],
         )
         raise app_error
 
@@ -198,12 +235,14 @@ async def regenerate_message(
         conversation=context["conversation"],
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
+        activate_branch=context["activate_branch"],
     )
     return await _build_regenerate_response(
         session=session,
         conversation=context["conversation"],
         replaced_message=context["target_message"],
         assistant_message=context["assistant_message"],
+        selected_leaf_message_id=context["assistant_message"].id,
     )
 
 
@@ -249,6 +288,7 @@ async def regenerate_message_stream(
                 status=status,
                 leaf_message_id=leaf_message_id,
                 partial_content=accumulated,
+                activate_branch=context["activate_branch"],
             )
             yield {"error": app_error.message}
             return
@@ -258,6 +298,7 @@ async def regenerate_message_stream(
             conversation=context["conversation"],
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
+            activate_branch=context["activate_branch"],
         )
 
     return iterator()
@@ -278,6 +319,16 @@ async def _prepare_generation(
             conversation_id=conversation.id,
             message_id=parent_id,
         )
+
+    context_root_message_id = payload.context_root_message_id
+    if payload.context_mode == "root_only":
+        context_root_message_id = context_root_message_id or parent_id
+        if context_root_message_id is not None:
+            await _ensure_message_belongs_to_conversation(
+                session=session,
+                conversation_id=conversation.id,
+                message_id=context_root_message_id,
+            )
 
     provider, model, temperature, max_tokens = _resolve_generation_options(
         conversation=conversation,
@@ -311,8 +362,11 @@ async def _prepare_generation(
         conversation=conversation,
         parent_id=parent_id,
         user_content=payload.content,
+        context_mode=payload.context_mode,
+        context_root_message_id=context_root_message_id,
     )
     return {
+        "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
         "conversation": conversation,
         "max_tokens": max_tokens,
@@ -361,6 +415,16 @@ async def _prepare_regeneration(
     else:
         raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持重新生成此类型消息")
 
+    context_root_message_id = payload.context_root_message_id
+    if payload.context_mode == "root_only":
+        context_root_message_id = context_root_message_id or target_message.id
+        if context_root_message_id is not None:
+            await _ensure_message_belongs_to_conversation(
+                session=session,
+                conversation_id=conversation.id,
+                message_id=context_root_message_id,
+            )
+
     assistant_message = await _create_assistant_message(
         session=session,
         conversation_id=conversation.id,
@@ -374,8 +438,11 @@ async def _prepare_regeneration(
         session=session,
         conversation=conversation,
         parent_id=parent_id,
+        context_mode=payload.context_mode,
+        context_root_message_id=context_root_message_id,
     )
     return {
+        "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
         "conversation": conversation,
         "max_tokens": max_tokens,
@@ -393,19 +460,25 @@ async def _build_prompt_messages(
     conversation: Conversation,
     parent_id: int | None,
     user_content: str | None = None,
+    context_mode: str = "full",
+    context_root_message_id: int | None = None,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     if conversation.system_prompt:
         messages.append({"role": "system", "content": conversation.system_prompt})
 
-    if parent_id is not None:
-        history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-        by_id = {item.id: item for item in history}
-        lineage = _lineage_messages(by_id, parent_id)
-        for item in lineage:
-            if item.status not in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
-                continue
-            messages.append({"role": item.role.value, "content": item.content})
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    by_id = {item.id: item for item in history}
+
+    if context_mode == "root_only":
+        if context_root_message_id is not None and context_root_message_id in by_id:
+            root_message = by_id[context_root_message_id]
+            if root_message.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
+                messages.append({"role": root_message.role.value, "content": root_message.content})
+    elif parent_id is not None:
+        for item in _lineage_messages(by_id, parent_id):
+            if item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
+                messages.append({"role": item.role.value, "content": item.content})
 
     if user_content is not None:
         messages.append({"role": "user", "content": user_content})
@@ -479,11 +552,13 @@ async def _finalize_success(
     conversation: Conversation,
     assistant_message: Message,
     reply_content: str,
+    activate_branch: bool,
 ) -> None:
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
     assistant_message.error_message = None
-    conversation.current_leaf_message_id = assistant_message.id
+    if activate_branch:
+        conversation.current_leaf_message_id = assistant_message.id
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
@@ -497,12 +572,14 @@ async def _mark_failed(
     message: str,
     status: MessageStatus,
     leaf_message_id: int,
+    activate_branch: bool,
     partial_content: str = "",
 ) -> None:
     assistant_message.content = partial_content
     assistant_message.status = status
     assistant_message.error_message = message
-    conversation.current_leaf_message_id = leaf_message_id
+    if activate_branch:
+        conversation.current_leaf_message_id = leaf_message_id
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
@@ -514,6 +591,7 @@ async def _build_send_response(
     conversation: Conversation,
     user_message: Message,
     assistant_message: Message,
+    selected_leaf_message_id: int,
 ) -> MessageSendResponse:
     await session.refresh(user_message)
     await session.refresh(assistant_message)
@@ -522,7 +600,7 @@ async def _build_send_response(
     sibling_map = _build_sibling_meta_map(history)
     return MessageSendResponse(
         conversation_id=conversation.id,
-        current_leaf_message_id=conversation.current_leaf_message_id,
+        current_leaf_message_id=selected_leaf_message_id,
         user_message=_serialize_message_node(user_message, sibling_map=sibling_map),
         assistant_message=_serialize_message_node(assistant_message, sibling_map=sibling_map),
     )
@@ -534,6 +612,7 @@ async def _build_regenerate_response(
     conversation: Conversation,
     replaced_message: Message,
     assistant_message: Message,
+    selected_leaf_message_id: int,
 ) -> MessageRegenerateResponse:
     await session.refresh(assistant_message)
     await session.refresh(conversation)
@@ -541,7 +620,7 @@ async def _build_regenerate_response(
     sibling_map = _build_sibling_meta_map(history)
     return MessageRegenerateResponse(
         conversation_id=conversation.id,
-        current_leaf_message_id=conversation.current_leaf_message_id,
+        current_leaf_message_id=selected_leaf_message_id,
         replaced_message_id=replaced_message.id,
         assistant_message=_serialize_message_node(assistant_message, sibling_map=sibling_map),
     )
@@ -560,7 +639,7 @@ async def _ensure_message_belongs_to_conversation(
         )
     )
     if message is None:
-        raise AppError(status_code=400, code="VALIDATION_ERROR", message="parent_id 不属于当前会话")
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="message_id 不属于当前会话")
     return message
 
 
@@ -618,7 +697,12 @@ def _resolve_generation_options(
     return resolved_provider, resolved_model, resolved_temperature, resolved_max_tokens
 
 
-def _visible_conversation_messages(messages: list[Message], current_leaf_message_id: int | None) -> list[Message]:
+def _visible_conversation_messages(
+    messages: list[Message],
+    current_leaf_message_id: int | None,
+    *,
+    root_message_id: int | None = None,
+) -> list[Message]:
     if not messages:
         return []
     if current_leaf_message_id is None:
@@ -628,6 +712,10 @@ def _visible_conversation_messages(messages: list[Message], current_leaf_message
     lineage_ids = _lineage_ids(by_id, current_leaf_message_id)
     if not lineage_ids:
         return messages
+    if root_message_id is not None and root_message_id in lineage_ids:
+        lineage_ids = lineage_ids[lineage_ids.index(root_message_id):]
+    elif root_message_id is not None:
+        return [by_id[root_message_id]] if root_message_id in by_id else []
     return [by_id[item_id] for item_id in lineage_ids]
 
 
