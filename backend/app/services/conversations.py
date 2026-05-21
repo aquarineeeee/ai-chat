@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.models.conversation import Conversation
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
+from app.services.markdown_import import import_markdown_conversation
 
 
 settings = get_settings()

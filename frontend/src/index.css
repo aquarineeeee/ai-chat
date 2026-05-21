@@ -1,71 +1,204 @@
 @import "tailwindcss";
 @import "highlight.js/styles/github-dark.css";
 
-/* ─── Dark theme (default) ─────────────────────────────────────────── */
+/* ─── 暖石 dark (default) ───────────────────────────────────────────── */
 :root,
-[data-theme="dark"] {
+[data-theme="stone-dark"] {
   --bg-base:       #1c1917;
   --bg-surface:    #292524;
   --bg-elevated:   #3c3330;
   --bg-input:      #231f1e;
-
   --border:        #44403c;
   --border-subtle: #292524;
-
   --text-primary:  #f5f0eb;
   --text-secondary:#a8a29e;
   --text-muted:    #78716c;
-
-  /* 强调色：与背景同色相（暖棕），只是稍微提亮提饱和 */
   --accent:        #6e5c52;
   --accent-hover:  #7d6a5f;
   --accent-subtle: rgba(110, 92, 82, 0.25);
   --accent-border: rgba(110, 92, 82, 0.5);
-
-  /* 气泡：用户和 AI 用同一套，比 bg-elevated 稍深一点点 */
   --bubble-bg:     #332d2a;
   --bubble-text:   #f5f0eb;
-
   --error-bg:      rgba(180, 100, 80, 0.12);
   --error-border:  rgba(180, 100, 80, 0.3);
   --error-text:    #d4a090;
-
   --scrollbar:     #44403c;
   --overlay:       rgba(0, 0, 0, 0.55);
-
   color-scheme: dark;
 }
 
-/* ─── Light theme ───────────────────────────────────────────────────── */
-[data-theme="light"] {
+/* ─── 暖石 light ────────────────────────────────────────────────────── */
+[data-theme="stone-light"] {
   --bg-base:       #faf7f4;
   --bg-surface:    #f0ebe5;
   --bg-elevated:   #e5ddd6;
   --bg-input:      #ffffff;
-
   --border:        #d6cec6;
   --border-subtle: #e5ddd6;
-
   --text-primary:  #2c2420;
   --text-secondary:#7c6f68;
   --text-muted:    #a89890;
-
-  /* 强调色：同色相，比背景深一些 */
   --accent:        #9c8478;
   --accent-hover:  #8a7268;
   --accent-subtle: rgba(156, 132, 120, 0.15);
   --accent-border: rgba(156, 132, 120, 0.4);
-
   --bubble-bg:     #e8e0d8;
   --bubble-text:   #2c2420;
-
   --error-bg:      rgba(160, 80, 60, 0.08);
   --error-border:  rgba(160, 80, 60, 0.2);
   --error-text:    #8c4a38;
-
   --scrollbar:     #c4b8b0;
   --overlay:       rgba(0, 0, 0, 0.35);
+  color-scheme: light;
+}
 
+/* ─── 薰衣草 dark ───────────────────────────────────────────────────── */
+[data-theme="lavender-dark"] {
+  --bg-base:       #1a1820;
+  --bg-surface:    #252330;
+  --bg-elevated:   #332f42;
+  --bg-input:      #1e1c28;
+  --border:        #3d3952;
+  --border-subtle: #252330;
+  --text-primary:  #ede9f8;
+  --text-secondary:#a09ab8;
+  --text-muted:    #6e6888;
+  --accent:        #7c6fa0;
+  --accent-hover:  #8e80b2;
+  --accent-subtle: rgba(124, 111, 160, 0.25);
+  --accent-border: rgba(124, 111, 160, 0.5);
+  --bubble-bg:     #2e2a3e;
+  --bubble-text:   #ede9f8;
+  --error-bg:      rgba(180, 100, 120, 0.12);
+  --error-border:  rgba(180, 100, 120, 0.3);
+  --error-text:    #d4a0b0;
+  --scrollbar:     #3d3952;
+  --overlay:       rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+/* ─── 薰衣草 light ──────────────────────────────────────────────────── */
+[data-theme="lavender-light"] {
+  --bg-base:       #f7f5fc;
+  --bg-surface:    #eeeaf8;
+  --bg-elevated:   #e2daf0;
+  --bg-input:      #ffffff;
+  --border:        #cec6e8;
+  --border-subtle: #e2daf0;
+  --text-primary:  #221e30;
+  --text-secondary:#6b6488;
+  --text-muted:    #9890b0;
+  --accent:        #7c6fa0;
+  --accent-hover:  #6a5e8e;
+  --accent-subtle: rgba(124, 111, 160, 0.15);
+  --accent-border: rgba(124, 111, 160, 0.4);
+  --bubble-bg:     #ddd6f0;
+  --bubble-text:   #221e30;
+  --error-bg:      rgba(140, 60, 80, 0.08);
+  --error-border:  rgba(140, 60, 80, 0.2);
+  --error-text:    #8c3a50;
+  --scrollbar:     #c0b8d8;
+  --overlay:       rgba(0, 0, 0, 0.35);
+  color-scheme: light;
+}
+
+/* ─── 鼠尾草 dark ───────────────────────────────────────────────────── */
+[data-theme="sage-dark"] {
+  --bg-base:       #181c1a;
+  --bg-surface:    #222824;
+  --bg-elevated:   #2e3830;
+  --bg-input:      #1c2220;
+  --border:        #384038;
+  --border-subtle: #222824;
+  --text-primary:  #e8f0ea;
+  --text-secondary:#96a89a;
+  --text-muted:    #647068;
+  --accent:        #5e8a6e;
+  --accent-hover:  #6e9a7e;
+  --accent-subtle: rgba(94, 138, 110, 0.25);
+  --accent-border: rgba(94, 138, 110, 0.5);
+  --bubble-bg:     #263028;
+  --bubble-text:   #e8f0ea;
+  --error-bg:      rgba(160, 100, 80, 0.12);
+  --error-border:  rgba(160, 100, 80, 0.3);
+  --error-text:    #c8a090;
+  --scrollbar:     #384038;
+  --overlay:       rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+/* ─── 鼠尾草 light ──────────────────────────────────────────────────── */
+[data-theme="sage-light"] {
+  --bg-base:       #f4f8f5;
+  --bg-surface:    #e8f0ea;
+  --bg-elevated:   #d8e8dc;
+  --bg-input:      #ffffff;
+  --border:        #c0d4c8;
+  --border-subtle: #d8e8dc;
+  --text-primary:  #1c2820;
+  --text-secondary:#587060;
+  --text-muted:    #88a090;
+  --accent:        #5e8a6e;
+  --accent-hover:  #4e7a5e;
+  --accent-subtle: rgba(94, 138, 110, 0.15);
+  --accent-border: rgba(94, 138, 110, 0.4);
+  --bubble-bg:     #cce0d4;
+  --bubble-text:   #1c2820;
+  --error-bg:      rgba(140, 70, 50, 0.08);
+  --error-border:  rgba(140, 70, 50, 0.2);
+  --error-text:    #7a3820;
+  --scrollbar:     #a8c8b4;
+  --overlay:       rgba(0, 0, 0, 0.35);
+  color-scheme: light;
+}
+
+/* ─── 蓝色 dark ─────────────────────────────────────────────────────── */
+[data-theme="blue-dark"] {
+  --bg-base:       #161a20;
+  --bg-surface:    #1e2430;
+  --bg-elevated:   #2a3244;
+  --bg-input:      #1a1e28;
+  --border:        #323c52;
+  --border-subtle: #1e2430;
+  --text-primary:  #e4ecf8;
+  --text-secondary:#8a9ab8;
+  --text-muted:    #5e6e88;
+  --accent:        #4a72a8;
+  --accent-hover:  #5a82b8;
+  --accent-subtle: rgba(74, 114, 168, 0.25);
+  --accent-border: rgba(74, 114, 168, 0.5);
+  --bubble-bg:     #222c40;
+  --bubble-text:   #e4ecf8;
+  --error-bg:      rgba(160, 80, 80, 0.12);
+  --error-border:  rgba(160, 80, 80, 0.3);
+  --error-text:    #d4a0a0;
+  --scrollbar:     #323c52;
+  --overlay:       rgba(0, 0, 0, 0.55);
+  color-scheme: dark;
+}
+
+/* ─── 蓝色 light ────────────────────────────────────────────────────── */
+[data-theme="blue-light"] {
+  --bg-base:       #f2f6fc;
+  --bg-surface:    #e6eef8;
+  --bg-elevated:   #d4e2f4;
+  --bg-input:      #ffffff;
+  --border:        #b8cce4;
+  --border-subtle: #d4e2f4;
+  --text-primary:  #18243a;
+  --text-secondary:#4a6080;
+  --text-muted:    #7a90a8;
+  --accent:        #4a72a8;
+  --accent-hover:  #3a6298;
+  --accent-subtle: rgba(74, 114, 168, 0.15);
+  --accent-border: rgba(74, 114, 168, 0.4);
+  --bubble-bg:     #c8daf0;
+  --bubble-text:   #18243a;
+  --error-bg:      rgba(140, 50, 50, 0.08);
+  --error-border:  rgba(140, 50, 50, 0.2);
+  --error-text:    #8c2828;
+  --scrollbar:     #a0bcd8;
+  --overlay:       rgba(0, 0, 0, 0.35);
   color-scheme: light;
 }
 

@@ -3,6 +3,7 @@ from app.services.conversations import (
     create_conversation,
     delete_conversation,
     get_conversation,
+    import_markdown_conversation,
     list_conversations,
     update_conversation,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "create_conversation",
     "delete_conversation",
     "get_conversation",
+    "import_markdown_conversation",
     "list_conversations",
     "list_conversation_messages",
     "update_conversation",

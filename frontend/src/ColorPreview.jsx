@@ -1,4 +1,4 @@
-import { MessageSquare, Send, Sparkles } from 'lucide-react'
+import { MessageSquare, Send } from 'lucide-react'
 
 const OPTIONS = [
   {

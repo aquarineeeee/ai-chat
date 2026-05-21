@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, File, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, get_current_user
 from app.models.user import User
-from app.schemas.conversation import ConversationCreate, ConversationResponse, ConversationUpdate
+from app.schemas.conversation import (
+    ConversationCreate,
+    ConversationImportResponse,
+    ConversationResponse,
+    ConversationUpdate,
+)
 from app.services.conversations import (
     create_conversation,
     delete_conversation,
     get_conversation,
+    import_markdown_conversation,
     list_conversations,
     update_conversation,
 )
@@ -35,6 +41,22 @@ async def conversations_create(
 ) -> ConversationResponse:
     conversation = await create_conversation(session=session, user_id=current_user.id, payload=payload)
     return ConversationResponse.model_validate(conversation)
+
+
+@router.post("/import-md", response_model=ConversationImportResponse, status_code=status.HTTP_201_CREATED)
+async def conversations_import_markdown(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> ConversationImportResponse:
+    file_bytes = await file.read()
+    result = await import_markdown_conversation(
+        session=session,
+        user_id=current_user.id,
+        filename=file.filename or "import.md",
+        file_bytes=file_bytes,
+    )
+    return ConversationImportResponse.model_validate(result)
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)

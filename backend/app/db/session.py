@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import get_settings
@@ -21,10 +21,7 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 async def bootstrap_admin_user() -> None:
     async with AsyncSessionLocal() as session:
-        user = await session.scalar(select(User).where(User.id == 1))
-        if user is None:
+        user_count = await session.scalar(select(func.count()).select_from(User))
+        if not user_count:
             session.add(User(id=1, username="admin", password_hash=settings.login_password_hash))
-        else:
-            user.username = "admin"
-            user.password_hash = settings.login_password_hash
-        await session.commit()
+            await session.commit()

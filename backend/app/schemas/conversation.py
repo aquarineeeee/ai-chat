@@ -39,3 +39,17 @@ class ConversationResponse(BaseModel):
     current_leaf_message_id: int | None
     created_at: datetime
     updated_at: datetime
+
+
+class ImportedConversationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    title: str
+
+
+class ConversationImportResponse(BaseModel):
+    conversation: ImportedConversationSummary
+    message_count: int
+    ignored_count: int
+    warnings: list[str]

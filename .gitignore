@@ -16,3 +16,4 @@ __pycache__/
 .tmp/
 *.log
 docs/plan.md
+docs/markdown-conversation-import.md
