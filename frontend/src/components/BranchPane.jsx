@@ -8,6 +8,7 @@ export default function BranchPane({
   onToggleContextMode,
   onSend,
   onRegenerate,
+  onDelete,
   onCreateBranch,
   onPrevSibling,
   onNextSibling,
@@ -76,12 +77,14 @@ export default function BranchPane({
               key={msg.id}
               message={msg}
               onRegenerate={msg.role === 'system' ? undefined : () => { void onRegenerate(msg.id) }}
+              onDelete={msg.role === 'system' ? undefined : () => { void onDelete(msg.id) }}
               onCreateBranch={msg.role === 'system' ? undefined : () => { void onCreateBranch(msg) }}
               onPrevSibling={msg.previous_sibling_id ? () => { void onPrevSibling(msg) } : undefined}
               onNextSibling={msg.next_sibling_id ? () => { void onNextSibling(msg) } : undefined}
               disableActions={pane.busy}
               isRegenerating={pane.regeneratingMessageId === msg.id}
               isCreatingBranch={pane.creatingBranchMessageId === msg.id}
+              isDeleting={pane.deletingMessageId === msg.id}
             />
           ))}
           {pane.streamingContent && (

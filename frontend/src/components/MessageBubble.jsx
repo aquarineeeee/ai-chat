@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
-import { ChevronLeft, ChevronRight, GitBranch, RotateCw } from 'lucide-react'
+import { ChevronLeft, ChevronRight, GitBranch, RotateCw, Trash2 } from 'lucide-react'
 
 function IconButton({ label, onClick, disabled, children, pulse = false }) {
   return (
@@ -37,13 +37,13 @@ function SiblingNavigator({ message, onPrevSibling, onNextSibling, disabled }) {
 
   return (
     <div className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-      <IconButton label="上一个分支" onClick={onPrevSibling} disabled={disabled}>
+      <IconButton label="上一条分支" onClick={onPrevSibling} disabled={disabled}>
         <ChevronLeft className="w-3.5 h-3.5" />
       </IconButton>
       <span className="min-w-[44px] text-center">
         {message.sibling_index}/{message.sibling_count}
       </span>
-      <IconButton label="下一个分支" onClick={onNextSibling} disabled={disabled}>
+      <IconButton label="下一条分支" onClick={onNextSibling} disabled={disabled}>
         <ChevronRight className="w-3.5 h-3.5" />
       </IconButton>
     </div>
@@ -54,11 +54,13 @@ export default function MessageBubble({
   message,
   onRegenerate,
   onCreateBranch,
+  onDelete,
   onPrevSibling,
   onNextSibling,
   disableActions = false,
   isRegenerating = false,
   isCreatingBranch = false,
+  isDeleting = false,
   hideActions = false,
 }) {
   const isUser = message.role === 'user'
@@ -79,6 +81,11 @@ export default function MessageBubble({
           </div>
           {!hideActions && (
             <div className="flex justify-end items-center gap-1 mt-2">
+              {onDelete && (
+                <IconButton label={isDeleting ? '删除中' : '删除消息'} onClick={onDelete} disabled={actionDisabled}>
+                  <Trash2 className={`w-3.5 h-3.5 ${isDeleting ? 'animate-pulse' : ''}`} />
+                </IconButton>
+              )}
               {onCreateBranch && (
                 <IconButton label={isCreatingBranch ? '创建分支中' : '创建分支'} onClick={onCreateBranch} disabled={actionDisabled}>
                   <GitBranch className={`w-3.5 h-3.5 ${isCreatingBranch ? 'animate-pulse' : ''}`} />
@@ -127,6 +134,11 @@ export default function MessageBubble({
               disabled={actionDisabled}
             />
             <div className="flex items-center gap-1 ml-auto">
+              {onDelete && (
+                <IconButton label={isDeleting ? '删除中' : '删除消息'} onClick={onDelete} disabled={actionDisabled}>
+                  <Trash2 className={`w-3.5 h-3.5 ${isDeleting ? 'animate-pulse' : ''}`} />
+                </IconButton>
+              )}
               {onCreateBranch && (
                 <IconButton label={isCreatingBranch ? '创建分支中' : '创建分支'} onClick={onCreateBranch} disabled={actionDisabled}>
                   <GitBranch className={`w-3.5 h-3.5 ${isCreatingBranch ? 'animate-pulse' : ''}`} />

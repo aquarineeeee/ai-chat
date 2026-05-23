@@ -21,6 +21,7 @@ function createBranchPane(sourceMessage) {
     loading: true,
     sending: false,
     regeneratingMessageId: null,
+    deletingMessageId: null,
     creatingBranchMessageId: null,
     switchingSiblingMessageId: null,
     error: '',
@@ -40,6 +41,7 @@ export default function ChatPage() {
   const [loadingMsgs, setLoadingMsgs] = useState(false)
   const [sending, setSending] = useState(false)
   const [regeneratingMessageId, setRegeneratingMessageId] = useState(null)
+  const [deletingMessageId, setDeletingMessageId] = useState(null)
   const [switchingSiblingMessageId, setSwitchingSiblingMessageId] = useState(null)
   const [creatingBranchMessageId, setCreatingBranchMessageId] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
@@ -52,6 +54,8 @@ export default function ChatPage() {
   const [savingModel, setSavingModel] = useState(false)
   const [modelError, setModelError] = useState('')
   const [pendingModel, setPendingModel] = useState('')
+  const [importing, setImporting] = useState(false)
+  const [importStatus, setImportStatus] = useState(null)
   const [branchPanes, setBranchPanes] = useState([])
   const bottomRef = useRef(null)
   const activeConv = conversations.find(c => c.id === activeId)
@@ -95,6 +99,41 @@ export default function ChatPage() {
     return data
   }, [branchPanes, patchBranchPane])
 
+  const refreshBranchPanesSnapshot = useCallback(async (conversationId, panesSnapshot, deletedMessageId = null) => {
+    if (!panesSnapshot.length) return
+
+    const idsToClose = []
+    const updates = []
+
+    for (const pane of panesSnapshot) {
+      if (pane.rootMessageId === deletedMessageId) {
+        idsToClose.push(pane.id)
+        continue
+      }
+
+      try {
+        const data = await api.getMessages(conversationId, { rootMessageId: pane.rootMessageId })
+        updates.push({ paneId: pane.id, data })
+      } catch {
+        idsToClose.push(pane.id)
+      }
+    }
+
+    if (idsToClose.length > 0) {
+      setBranchPanes(prev => prev.filter(pane => !idsToClose.includes(pane.id)))
+    }
+
+    for (const { paneId, data } of updates) {
+      patchBranchPane(paneId, current => ({
+        ...current,
+        loading: false,
+        messages: data?.items || [],
+        currentLeafMessageId: data?.current_leaf_message_id ?? current.currentLeafMessageId,
+        error: '',
+      }))
+    }
+  }, [patchBranchPane])
+
   const loadApiKeys = useCallback(async () => {
     setKeysError('')
     setLoadingKeys(true)
@@ -130,6 +169,11 @@ export default function ChatPage() {
     }
   }, [])
 
+  const fetchConversations = useCallback(async () => {
+    const data = await api.getConversations()
+    return data || []
+  }, [])
+
   const selectConversation = useCallback(async (conversationId) => {
     setActiveId(conversationId)
     setBranchPanes([])
@@ -157,7 +201,7 @@ export default function ChatPage() {
   useEffect(() => {
     let cancelled = false
 
-    api.getConversations()
+    fetchConversations()
       .then(async data => {
         if (cancelled) return
         const items = data || []
@@ -176,7 +220,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true
     }
-  }, [selectConversation])
+  }, [fetchConversations, selectConversation])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -200,6 +244,53 @@ export default function ChatPage() {
     await selectConversation(conv.id)
     return conv
   }, [selectConversation])
+
+  const reloadConversations = useCallback(async (nextActiveId = null) => {
+    const items = await fetchConversations()
+    setConversations(items)
+    const resolvedActiveId = nextActiveId ?? items[0]?.id ?? null
+
+    if (resolvedActiveId) {
+      await selectConversation(resolvedActiveId)
+    } else {
+      setActiveId(null)
+      setMessages([])
+      setBranchPanes([])
+    }
+
+    return items
+  }, [fetchConversations, selectConversation])
+
+  const importConversation = useCallback(async (file) => {
+    if (!file || importing) return
+
+    setImporting(true)
+    setImportStatus(null)
+
+    try {
+      const result = await api.importMarkdownConversation(file)
+      const importedId = result?.conversation?.id ?? null
+      await reloadConversations(importedId)
+      setImportStatus({
+        type: 'success',
+        title: result?.conversation?.title || file.name,
+        message: `已导入 ${result?.message_count ?? 0} 条消息`,
+        meta: {
+          messageCount: result?.message_count ?? 0,
+          ignoredCount: result?.ignored_count ?? 0,
+          warningCount: result?.warnings?.length ?? 0,
+        },
+      })
+    } catch (err) {
+      setImportStatus({
+        type: 'error',
+        title: file.name,
+        message: err.message || '导入 Markdown 失败',
+      })
+    } finally {
+      setImporting(false)
+    }
+  }, [importing, reloadConversations])
 
   const deleteConversation = useCallback(async (id) => {
     await api.deleteConversation(id)
@@ -446,6 +537,41 @@ export default function ChatPage() {
     }
   }, [activeId, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
+  const deleteMainMessage = useCallback(async (messageId) => {
+    if (
+      !activeId
+      || sending
+      || regeneratingMessageId !== null
+      || switchingSiblingMessageId !== null
+      || creatingBranchMessageId !== null
+      || deletingMessageId !== null
+    ) return
+
+    setError('')
+    setDeletingMessageId(messageId)
+    const panesSnapshot = branchPanes
+
+    try {
+      await api.deleteMessage(activeId, messageId)
+      await refreshMessages(activeId)
+      await refreshBranchPanesSnapshot(activeId, panesSnapshot, messageId)
+    } catch (e) {
+      setError(e.message || '删除消息失败，请重试')
+    } finally {
+      setDeletingMessageId(null)
+    }
+  }, [
+    activeId,
+    branchPanes,
+    creatingBranchMessageId,
+    deletingMessageId,
+    refreshBranchPanesSnapshot,
+    refreshMessages,
+    regeneratingMessageId,
+    sending,
+    switchingSiblingMessageId,
+  ])
+
   const togglePaneContextMode = useCallback((paneId) => {
     patchBranchPane(paneId, pane => ({
       ...pane,
@@ -510,13 +636,39 @@ export default function ChatPage() {
     }
   }, [activeId, branchPanes, patchBranchPane, refreshBranchPane])
 
+  const deleteBranchMessage = useCallback(async (paneId, messageId) => {
+    const pane = branchPanes.find(item => item.id === paneId)
+    if (
+      !activeId
+      || !pane
+      || pane.sending
+      || pane.regeneratingMessageId
+      || pane.switchingSiblingMessageId
+      || pane.creatingBranchMessageId
+      || pane.deletingMessageId
+    ) return
+
+    patchBranchPane(paneId, { deletingMessageId: messageId, error: '' })
+    const panesSnapshot = branchPanes
+
+    try {
+      await api.deleteMessage(activeId, messageId)
+      await refreshMessages(activeId)
+      await refreshBranchPanesSnapshot(activeId, panesSnapshot, messageId)
+    } catch (e) {
+      patchBranchPane(paneId, { error: e.message || '删除消息失败，请重试' })
+    } finally {
+      patchBranchPane(paneId, { deletingMessageId: null })
+    }
+  }, [activeId, branchPanes, patchBranchPane, refreshBranchPanesSnapshot, refreshMessages])
+
   const modelChoices = [
     ...(pendingModel && !modelOptions.some(option => option.id === pendingModel)
       ? [{ id: pendingModel }]
       : []),
     ...modelOptions,
   ]
-  const mainBusy = sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null || creatingBranchMessageId !== null
+  const mainBusy = sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null || creatingBranchMessageId !== null || deletingMessageId !== null
   const regeneratingMsg = regeneratingMessageId !== null
     ? messages.find(m => m.id === regeneratingMessageId)
     : null
@@ -535,10 +687,13 @@ export default function ChatPage() {
           conversations={conversations}
           activeId={activeId}
           loading={loadingConvs}
+          importLoading={importing}
+          importStatus={importStatus}
           palette={palette}
           mode={mode}
           onSelect={id => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false) }}
           onNew={createConversation}
+          onImport={importConversation}
           onDelete={deleteConversation}
           onClose={() => setSidebarOpen(false)}
           onToggleTheme={toggle}
@@ -606,11 +761,13 @@ export default function ChatPage() {
                           key={msg.id}
                           message={renderedMessage}
                           onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
+                          onDelete={msg.role === 'system' ? undefined : () => { void deleteMainMessage(msg.id) }}
                           onCreateBranch={msg.role === 'system' ? undefined : () => { void openBranchPane(msg) }}
                           onPrevSibling={msg.previous_sibling_id ? () => { void switchMainSibling(msg.previous_sibling_id) } : undefined}
                           onNextSibling={msg.next_sibling_id ? () => { void switchMainSibling(msg.next_sibling_id) } : undefined}
                           disableActions={mainBusy}
                           isRegenerating={regeneratingMessageId === msg.id}
+                          isDeleting={deletingMessageId === msg.id}
                           isCreatingBranch={creatingBranchMessageId === msg.id}
                         />
                       )
@@ -674,12 +831,13 @@ export default function ChatPage() {
                     <BranchPane
                       pane={{
                         ...pane,
-                        busy: pane.loading || pane.sending || pane.regeneratingMessageId !== null || pane.switchingSiblingMessageId !== null || pane.creatingBranchMessageId !== null,
+                        busy: pane.loading || pane.sending || pane.regeneratingMessageId !== null || pane.switchingSiblingMessageId !== null || pane.creatingBranchMessageId !== null || pane.deletingMessageId !== null,
                       }}
                       onClose={() => closeBranchPane(pane.id)}
                       onToggleContextMode={() => togglePaneContextMode(pane.id)}
                       onSend={content => sendBranchMessage(pane.id, content)}
                       onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
+                      onDelete={messageId => deleteBranchMessage(pane.id, messageId)}
                       onCreateBranch={message => openBranchPane(message, pane.id)}
                       onPrevSibling={message => switchBranchPaneSibling(pane.id, message.previous_sibling_id)}
                       onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}

@@ -57,6 +57,7 @@ export const api = {
     const qs = search.toString()
     return request('GET', `/api/conversations/${convId}/messages${qs ? `?${qs}` : ''}`)
   },
+  deleteMessage: (convId, messageId) => request('DELETE', `/api/conversations/${convId}/messages/${messageId}`),
   sendMessage: (convId, data) => request('POST', `/api/conversations/${convId}/messages`, data),
   regenerateMessage: (convId, messageId, data = {}) =>
     request('POST', `/api/conversations/${convId}/messages/${messageId}/regenerate`, data),

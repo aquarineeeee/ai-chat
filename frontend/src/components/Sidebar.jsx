@@ -2,7 +2,7 @@ import { useRef, useState } from 'react'
 import {
   Plus, Trash2, MessageSquare, Loader2,
   LogOut, ChevronLeft, User, Sun, Moon, Key, AlertTriangle, Palette,
-  Upload, CheckCircle2,
+  FileInput, CheckCircle2,
 } from 'lucide-react'
 import { PALETTES } from '../ThemeContext'
 
@@ -112,6 +112,7 @@ export default function Sidebar({
     const file = e.target.files?.[0]
     e.target.value = ''
     if (!file) return
+    if (typeof onImport !== 'function') return
     await onImport(file)
   }
 
@@ -180,7 +181,7 @@ export default function Sidebar({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            disabled={importLoading}
+            disabled={importLoading || typeof onImport !== 'function'}
             className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition"
             style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
             title="导入 Markdown"
@@ -192,7 +193,7 @@ export default function Sidebar({
               e.currentTarget.style.background = 'var(--bg-elevated)'
             }}
           >
-            {importLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+            {importLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileInput className="w-4 h-4" />}
           </button>
           <input
             ref={fileInputRef}

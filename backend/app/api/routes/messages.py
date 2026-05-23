@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +19,7 @@ from app.services.messages import (
     activate_message_branch,
     create_message_pair,
     create_message_stream,
+    delete_message,
     list_conversation_messages,
     regenerate_message,
     regenerate_message_stream,
@@ -157,3 +158,19 @@ async def messages_activate_branch(
         conversation_id=conversation_id,
         message_id=message_id,
     )
+
+
+@router.delete("/conversations/{conversation_id}/messages/{message_id}", status_code=204)
+async def messages_delete(
+    conversation_id: int,
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> Response:
+    await delete_message(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+    )
+    return Response(status_code=204)

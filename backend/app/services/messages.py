@@ -92,6 +92,38 @@ async def activate_message_branch(
     return await list_conversation_messages(session=session, user_id=user_id, conversation_id=conversation_id)
 
 
+async def delete_message(
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+) -> None:
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    target_message = next((item for item in history if item.id == message_id), None)
+    if target_message is None:
+        raise AppError(status_code=404, code="NOT_FOUND", message="消息不存在")
+    if target_message.status == MessageStatus.STREAMING:
+        raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能删除")
+
+    remaining_message_ids = {item.id for item in history if item.id != target_message.id}
+    if conversation.current_leaf_message_id == target_message.id:
+        if target_message.parent_id in remaining_message_ids:
+            conversation.current_leaf_message_id = target_message.parent_id
+        else:
+            conversation.current_leaf_message_id = _resolve_latest_leaf_message_id(
+                [item for item in history if item.id != target_message.id]
+            )
+
+    direct_children = [item for item in history if item.parent_id == target_message.id]
+    for child in direct_children:
+        child.parent_id = target_message.parent_id
+
+    await session.delete(target_message)
+    await session.commit()
+    await session.refresh(conversation)
+
+
 async def create_message_pair(
     session: AsyncSession,
     user_id: int,
@@ -786,6 +818,22 @@ def _resolve_branch_leaf_message_id(messages: list[Message], root_message_id: in
     leaves = [message for message in messages if message.id in subtree_ids and not by_parent.get(message.id)]
     if not leaves:
         return root_message_id
+    leaves.sort(key=lambda item: (item.updated_at, item.created_at, item.id))
+    return leaves[-1].id
+
+
+def _resolve_latest_leaf_message_id(messages: list[Message]) -> int | None:
+    if not messages:
+        return None
+
+    by_parent: dict[int | None, list[Message]] = defaultdict(list)
+    for message in messages:
+        by_parent[message.parent_id].append(message)
+
+    leaves = [message for message in messages if not by_parent.get(message.id)]
+    if not leaves:
+        return None
+
     leaves.sort(key=lambda item: (item.updated_at, item.created_at, item.id))
     return leaves[-1].id
 
