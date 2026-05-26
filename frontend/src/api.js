@@ -34,6 +34,48 @@ async function request(method, path, body) {
   return data
 }
 
+function parseFilename(contentDisposition) {
+  if (!contentDisposition) return null
+
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1])
+    } catch {
+      // ignore malformed encoding
+    }
+  }
+
+  const fallbackMatch = contentDisposition.match(/filename="([^"]+)"/i)
+  if (fallbackMatch?.[1]) return fallbackMatch[1]
+  return null
+}
+
+async function download(path) {
+  const res = await fetch(BASE + path, { credentials: 'include' })
+  if (!res.ok) {
+    let data
+    try {
+      data = await res.json()
+    } catch {
+      data = null
+    }
+    const message = data?.error?.message || data?.detail || '下载失败'
+    throw Object.assign(new Error(message), { status: res.status, data })
+  }
+
+  const blob = await res.blob()
+  const filename = parseFilename(res.headers.get('Content-Disposition')) || 'download'
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
 export const api = {
   login: (username, password) => request('POST', '/api/auth/login', { username, password }),
   logout: () => request('POST', '/api/auth/logout'),
@@ -41,6 +83,8 @@ export const api = {
 
   getConversations: () => request('GET', '/api/conversations'),
   createConversation: (data) => request('POST', '/api/conversations', data),
+  exportConversation: (id, { format, scope }) =>
+    download(`/api/conversations/${id}/export?${new URLSearchParams({ format, scope }).toString()}`),
   importMarkdownConversation: (file) => {
     const formData = new FormData()
     formData.append('file', file)

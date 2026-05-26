@@ -8,7 +8,7 @@ import ChatInput from './components/ChatInput'
 import EmptyState from './components/EmptyState'
 import ApiKeysModal from './components/ApiKeysModal'
 import BranchPane from './components/BranchPane'
-import { Menu, X, Loader2, AlertCircle } from 'lucide-react'
+import { Menu, X, Loader2, AlertCircle, Download, ChevronDown } from 'lucide-react'
 
 function createBranchPane(sourceMessage) {
   return {
@@ -28,6 +28,12 @@ function createBranchPane(sourceMessage) {
     openedAt: Date.now(),
   }
 }
+
+const EXPORT_OPTIONS = [
+  { key: 'markdown-current_branch', label: 'Markdown · 当前分支', format: 'markdown', scope: 'current_branch' },
+  { key: 'json-current_branch', label: 'JSON · 当前分支', format: 'json', scope: 'current_branch' },
+  { key: 'json-all_branches', label: 'JSON · 全部分支', format: 'json', scope: 'all_branches' },
+]
 
 export default function ChatPage() {
   const { user, logout } = useAuth()
@@ -57,8 +63,24 @@ export default function ChatPage() {
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
   const [branchPanes, setBranchPanes] = useState([])
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const [exportingKey, setExportingKey] = useState('')
   const bottomRef = useRef(null)
+  const exportMenuRef = useRef(null)
   const activeConv = conversations.find(c => c.id === activeId)
+
+  useEffect(() => {
+    if (!exportMenuOpen) return undefined
+
+    function handlePointerDown(event) {
+      if (!exportMenuRef.current?.contains(event.target)) {
+        setExportMenuOpen(false)
+      }
+    }
+
+    document.addEventListener('mousedown', handlePointerDown)
+    return () => document.removeEventListener('mousedown', handlePointerDown)
+  }, [exportMenuOpen])
 
   const patchBranchPane = useCallback((paneId, updater) => {
     setBranchPanes(prev => prev.map(pane => (
@@ -301,6 +323,21 @@ export default function ChatPage() {
     }
   }, [activeId, conversations, selectConversation])
 
+  const exportConversation = useCallback(async ({ key, format, scope }) => {
+    if (!activeConv || exportingKey) return
+
+    setError('')
+    setExportingKey(key)
+    try {
+      await api.exportConversation(activeConv.id, { format, scope })
+      setExportMenuOpen(false)
+    } catch (e) {
+      setError(e.message || '导出失败，请重试')
+    } finally {
+      setExportingKey('')
+    }
+  }, [activeConv, exportingKey])
+
   const changeConversationModel = useCallback(async (nextModel) => {
     setPendingModel(nextModel)
     setModelError('')
@@ -379,7 +416,13 @@ export default function ChatPage() {
       }
     }
 
-    const userMsg = { id: Date.now(), role: 'user', content, status: 'completed' }
+    const userMsg = {
+      id: Date.now(),
+      role: 'user',
+      content,
+      status: 'completed',
+      created_at: new Date().toISOString(),
+    }
     setMessages(prev => [...prev, userMsg])
     setSending(true)
     setStreamingContent('')
@@ -737,6 +780,51 @@ export default function ChatPage() {
                 {activeConv.model}
               </span>
             )}
+            <div className="relative shrink-0" ref={exportMenuRef}>
+              <button
+                type="button"
+                onClick={() => activeConv && setExportMenuOpen(open => !open)}
+                disabled={!activeConv || !!exportingKey}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+                aria-label="导出对话"
+              >
+                {exportingKey ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                <span className="text-sm">导出</span>
+                <ChevronDown className="w-4 h-4" />
+              </button>
+              {exportMenuOpen && activeConv && (
+                <div
+                  className="absolute right-0 top-full mt-2 w-56 rounded-xl p-1 z-20"
+                  style={{
+                    background: 'color-mix(in srgb, var(--bg-surface) 94%, transparent)',
+                    border: '1px solid var(--border)',
+                    boxShadow: '0 18px 48px rgba(0, 0, 0, 0.18)',
+                    backdropFilter: 'blur(18px)',
+                  }}
+                  role="menu"
+                >
+                  {EXPORT_OPTIONS.map(option => (
+                    <button
+                      key={option.key}
+                      type="button"
+                      onClick={() => { void exportConversation(option) }}
+                      disabled={!!exportingKey}
+                      className="w-full text-left px-3 py-2 rounded-lg text-sm transition disabled:opacity-50"
+                      style={{
+                        color: 'var(--text-secondary)',
+                        background: exportingKey === option.key ? 'var(--bg-elevated)' : 'transparent',
+                      }}
+                      role="menuitem"
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </header>
 
           <div className="flex flex-1 min-h-0 overflow-hidden">

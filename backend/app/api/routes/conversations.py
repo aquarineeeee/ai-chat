@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, get_current_user
@@ -10,6 +10,12 @@ from app.schemas.conversation import (
     ConversationImportResponse,
     ConversationResponse,
     ConversationUpdate,
+)
+from app.services.conversation_export import (
+    ExportFormat,
+    ExportScope,
+    build_content_disposition,
+    export_conversation,
 )
 from app.services.conversations import (
     create_conversation,
@@ -57,6 +63,28 @@ async def conversations_import_markdown(
         file_bytes=file_bytes,
     )
     return ConversationImportResponse.model_validate(result)
+
+
+@router.get("/{conversation_id}/export")
+async def conversations_export(
+    conversation_id: int,
+    export_format: ExportFormat = Query(alias="format"),
+    scope: ExportScope = Query(...),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> Response:
+    exported = await export_conversation(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        export_format=export_format,
+        scope=scope,
+    )
+    return Response(
+        content=exported.content,
+        media_type=exported.media_type,
+        headers={"Content-Disposition": build_content_disposition(exported.filename)},
+    )
 
 
 @router.get("/{conversation_id}", response_model=ConversationResponse)
