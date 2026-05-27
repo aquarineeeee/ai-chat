@@ -31,6 +31,13 @@ class MessageRegenerateRequest(BaseModel):
     context_root_message_id: int | None = None
 
 
+class MessageEditRequest(BaseModel):
+    content: str
+    mode: Literal["update", "branch"] = "update"
+    context_mode: Literal["full", "root_only"] = "full"
+    context_root_message_id: int | None = None
+
+
 class MessageNodeResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -71,3 +78,9 @@ class MessageRegenerateResponse(BaseModel):
     current_leaf_message_id: int
     replaced_message_id: int
     assistant_message: MessageNodeResponse
+
+
+class MessageEditResponse(BaseModel):
+    conversation_id: int
+    message_id: int
+    current_leaf_message_id: int | None

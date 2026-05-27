@@ -102,6 +102,7 @@ export const api = {
     return request('GET', `/api/conversations/${convId}/messages${qs ? `?${qs}` : ''}`)
   },
   deleteMessage: (convId, messageId) => request('DELETE', `/api/conversations/${convId}/messages/${messageId}`),
+  editMessage: (convId, messageId, data) => request('POST', `/api/conversations/${convId}/messages/${messageId}/edit`, data),
   sendMessage: (convId, data) => request('POST', `/api/conversations/${convId}/messages`, data),
   regenerateMessage: (convId, messageId, data = {}) =>
     request('POST', `/api/conversations/${convId}/messages/${messageId}/regenerate`, data),

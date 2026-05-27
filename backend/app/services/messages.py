@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +17,8 @@ from app.providers import (
 )
 from app.schemas.message import (
     ConversationMessagesResponse,
+    MessageEditRequest,
+    MessageEditResponse,
     MessageCreateRequest,
     MessageNodeResponse,
     MessageRegenerateRequest,
@@ -122,6 +125,59 @@ async def delete_message(
     await session.delete(target_message)
     await session.commit()
     await session.refresh(conversation)
+
+
+async def edit_message(
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+    payload: MessageEditRequest,
+) -> MessageEditResponse:
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    target_message = await _ensure_message_belongs_to_conversation(
+        session=session,
+        conversation_id=conversation.id,
+        message_id=message_id,
+    )
+
+    content = payload.content.strip()
+    if not content:
+        raise AppError(status_code=422, code="VALIDATION_ERROR", message="消息内容不能为空")
+    if target_message.role != MessageRole.USER:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="仅支持编辑用户消息")
+    if target_message.status == MessageStatus.STREAMING:
+        raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能编辑")
+
+    if payload.mode == "update":
+        target_message.content = content
+        target_message.updated_at = datetime.utcnow()
+        await session.commit()
+        await session.refresh(target_message)
+        await session.refresh(conversation)
+        return MessageEditResponse(
+            conversation_id=conversation.id,
+            message_id=target_message.id,
+            current_leaf_message_id=conversation.current_leaf_message_id,
+        )
+
+    response = await create_message_pair(
+        session=session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        payload=MessageCreateRequest(
+            content=content,
+            parent_id=target_message.parent_id,
+            activate_branch=True,
+            context_mode=payload.context_mode,
+            context_root_message_id=payload.context_root_message_id,
+        ),
+    )
+    return MessageEditResponse(
+        conversation_id=response.conversation_id,
+        message_id=response.user_message.id,
+        current_leaf_message_id=response.current_leaf_message_id,
+    )
 
 
 async def create_message_pair(

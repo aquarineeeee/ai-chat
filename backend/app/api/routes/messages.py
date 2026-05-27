@@ -9,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import db_session, get_current_user
 from app.models.user import User
 from app.schemas.message import (
+    MessageEditRequest,
+    MessageEditResponse,
     ConversationMessagesResponse,
     MessageCreateRequest,
     MessageRegenerateRequest,
@@ -20,6 +22,7 @@ from app.services.messages import (
     create_message_pair,
     create_message_stream,
     delete_message,
+    edit_message,
     list_conversation_messages,
     regenerate_message,
     regenerate_message_stream,
@@ -151,12 +154,29 @@ async def messages_activate_branch(
     message_id: int,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
-) -> ConversationMessagesResponse:
+    ) -> ConversationMessagesResponse:
     return await activate_message_branch(
         session=session,
         user_id=current_user.id,
         conversation_id=conversation_id,
         message_id=message_id,
+    )
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/edit", response_model=MessageEditResponse)
+async def messages_edit(
+    conversation_id: int,
+    message_id: int,
+    payload: MessageEditRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> MessageEditResponse:
+    return await edit_message(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        payload=payload,
     )
 
 

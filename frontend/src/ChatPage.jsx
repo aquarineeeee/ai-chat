@@ -24,6 +24,10 @@ function createBranchPane(sourceMessage) {
     deletingMessageId: null,
     creatingBranchMessageId: null,
     switchingSiblingMessageId: null,
+    editingMessageId: null,
+    editingContent: '',
+    editingMode: 'update',
+    editingSubmittingMessageId: null,
     error: '',
     openedAt: Date.now(),
   }
@@ -50,6 +54,10 @@ export default function ChatPage() {
   const [deletingMessageId, setDeletingMessageId] = useState(null)
   const [switchingSiblingMessageId, setSwitchingSiblingMessageId] = useState(null)
   const [creatingBranchMessageId, setCreatingBranchMessageId] = useState(null)
+  const [editingMessageId, setEditingMessageId] = useState(null)
+  const [editingContent, setEditingContent] = useState('')
+  const [editingMode, setEditingMode] = useState('update')
+  const [editingSubmittingMessageId, setEditingSubmittingMessageId] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
   const [error, setError] = useState('')
   const [apiKeys, setApiKeys] = useState([])
@@ -191,6 +199,20 @@ export default function ChatPage() {
     }
   }, [])
 
+  const resetMainEdit = useCallback(() => {
+    setEditingMessageId(null)
+    setEditingContent('')
+    setEditingMode('update')
+  }, [])
+
+  const copyToClipboard = useCallback(async (content) => {
+    const text = content ?? ''
+    if (!navigator?.clipboard?.writeText) {
+      throw new Error('当前环境不支持复制')
+    }
+    await navigator.clipboard.writeText(text)
+  }, [])
+
   const fetchConversations = useCallback(async () => {
     const data = await api.getConversations()
     return data || []
@@ -199,6 +221,7 @@ export default function ChatPage() {
   const selectConversation = useCallback(async (conversationId) => {
     setActiveId(conversationId)
     setBranchPanes([])
+    resetMainEdit()
     if (!conversationId) {
       setMessages([])
       return
@@ -213,7 +236,7 @@ export default function ChatPage() {
     } finally {
       setLoadingMsgs(false)
     }
-  }, [refreshMessages])
+  }, [refreshMessages, resetMainEdit])
 
   const openKeysModal = useCallback(async () => {
     setKeysOpen(true)
@@ -400,6 +423,52 @@ export default function ChatPage() {
   const closeBranchPane = useCallback((paneId) => {
     setBranchPanes(prev => prev.filter(pane => pane.id !== paneId))
   }, [])
+
+  const copyMainMessage = useCallback(async (message) => {
+    try {
+      await copyToClipboard(message?.content || '')
+    } catch (e) {
+      setError(e.message || '复制失败，请重试')
+    }
+  }, [copyToClipboard])
+
+  const startMainEdit = useCallback((message) => {
+    setError('')
+    setEditingMessageId(message.id)
+    setEditingContent(message.content || '')
+    setEditingMode('update')
+  }, [])
+
+  const submitMainEdit = useCallback(async (messageId) => {
+    if (!activeId || !editingContent.trim() || editingSubmittingMessageId !== null) return
+
+    setError('')
+    setEditingSubmittingMessageId(messageId)
+    const panesSnapshot = branchPanes
+
+    try {
+      await api.editMessage(activeId, messageId, {
+        content: editingContent.trim(),
+        mode: editingMode,
+      })
+      await refreshMessages(activeId)
+      await refreshBranchPanesSnapshot(activeId, panesSnapshot)
+      resetMainEdit()
+    } catch (e) {
+      setError(e.message || '编辑消息失败，请重试')
+    } finally {
+      setEditingSubmittingMessageId(null)
+    }
+  }, [
+    activeId,
+    branchPanes,
+    editingContent,
+    editingMode,
+    editingSubmittingMessageId,
+    refreshBranchPanesSnapshot,
+    refreshMessages,
+    resetMainEdit,
+  ])
 
   const sendMessage = useCallback(async (content) => {
     if (!content.trim() || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -622,6 +691,31 @@ export default function ChatPage() {
     }))
   }, [patchBranchPane])
 
+  const copyBranchMessage = useCallback(async (paneId, message) => {
+    try {
+      await copyToClipboard(message?.content || '')
+    } catch (e) {
+      patchBranchPane(paneId, { error: e.message || '复制失败，请重试' })
+    }
+  }, [copyToClipboard, patchBranchPane])
+
+  const startBranchEdit = useCallback((paneId, message) => {
+    patchBranchPane(paneId, {
+      editingMessageId: message.id,
+      editingContent: message.content || '',
+      editingMode: 'update',
+      error: '',
+    })
+  }, [patchBranchPane])
+
+  const cancelBranchEdit = useCallback((paneId) => {
+    patchBranchPane(paneId, {
+      editingMessageId: null,
+      editingContent: '',
+      editingMode: 'update',
+    })
+  }, [patchBranchPane])
+
   const sendBranchMessage = useCallback(async (paneId, content) => {
     const pane = branchPanes.find(item => item.id === paneId)
     if (!activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
@@ -705,13 +799,65 @@ export default function ChatPage() {
     }
   }, [activeId, branchPanes, patchBranchPane, refreshBranchPanesSnapshot, refreshMessages])
 
+  const submitBranchEdit = useCallback(async (paneId, messageId) => {
+    const pane = branchPanes.find(item => item.id === paneId)
+    if (
+      !activeId
+      || !pane
+      || !pane.editingContent.trim()
+      || pane.editingSubmittingMessageId !== null
+    ) return
+
+    const panesSnapshot = branchPanes.filter(item => item.id !== paneId)
+    patchBranchPane(paneId, { editingSubmittingMessageId: messageId, error: '' })
+
+    try {
+      const result = await api.editMessage(activeId, messageId, {
+        content: pane.editingContent.trim(),
+        mode: pane.editingMode,
+        context_mode: pane.contextMode,
+        context_root_message_id: pane.rootMessageId,
+      })
+      await refreshMessages(activeId)
+      await refreshBranchPane(
+        activeId,
+        paneId,
+        pane.editingMode === 'branch' && result?.current_leaf_message_id
+          ? { leafMessageId: result.current_leaf_message_id }
+          : {},
+      )
+      await refreshBranchPanesSnapshot(activeId, panesSnapshot)
+      patchBranchPane(paneId, {
+        editingMessageId: null,
+        editingContent: '',
+        editingMode: 'update',
+      })
+    } catch (e) {
+      patchBranchPane(paneId, { error: e.message || '编辑消息失败，请重试' })
+    } finally {
+      patchBranchPane(paneId, { editingSubmittingMessageId: null })
+    }
+  }, [
+    activeId,
+    branchPanes,
+    patchBranchPane,
+    refreshBranchPane,
+    refreshBranchPanesSnapshot,
+    refreshMessages,
+  ])
+
   const modelChoices = [
     ...(pendingModel && !modelOptions.some(option => option.id === pendingModel)
       ? [{ id: pendingModel }]
       : []),
     ...modelOptions,
   ]
-  const mainBusy = sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null || creatingBranchMessageId !== null || deletingMessageId !== null
+  const mainBusy = sending
+    || regeneratingMessageId !== null
+    || switchingSiblingMessageId !== null
+    || creatingBranchMessageId !== null
+    || deletingMessageId !== null
+    || editingSubmittingMessageId !== null
   const regeneratingMsg = regeneratingMessageId !== null
     ? messages.find(m => m.id === regeneratingMessageId)
     : null
@@ -848,11 +994,21 @@ export default function ChatPage() {
                         <MessageBubble
                           key={msg.id}
                           message={renderedMessage}
+                          onCopy={msg.role === 'system' ? undefined : () => { void copyMainMessage(msg) }}
+                          onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
                           onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
                           onDelete={msg.role === 'system' ? undefined : () => { void deleteMainMessage(msg.id) }}
                           onCreateBranch={msg.role === 'system' ? undefined : () => { void openBranchPane(msg) }}
                           onPrevSibling={msg.previous_sibling_id ? () => { void switchMainSibling(msg.previous_sibling_id) } : undefined}
                           onNextSibling={msg.next_sibling_id ? () => { void switchMainSibling(msg.next_sibling_id) } : undefined}
+                          isEditing={editingMessageId === msg.id}
+                          editDraft={editingMessageId === msg.id ? editingContent : ''}
+                          editMode={editingMode}
+                          onEditDraftChange={setEditingContent}
+                          onEditModeChange={setEditingMode}
+                          onEditCancel={resetMainEdit}
+                          onEditSubmit={() => { void submitMainEdit(msg.id) }}
+                          isEditSubmitting={editingSubmittingMessageId === msg.id}
                           disableActions={mainBusy}
                           isRegenerating={regeneratingMessageId === msg.id}
                           isDeleting={deletingMessageId === msg.id}
@@ -919,10 +1075,22 @@ export default function ChatPage() {
                     <BranchPane
                       pane={{
                         ...pane,
-                        busy: pane.loading || pane.sending || pane.regeneratingMessageId !== null || pane.switchingSiblingMessageId !== null || pane.creatingBranchMessageId !== null || pane.deletingMessageId !== null,
+                        busy: pane.loading
+                          || pane.sending
+                          || pane.regeneratingMessageId !== null
+                          || pane.switchingSiblingMessageId !== null
+                          || pane.creatingBranchMessageId !== null
+                          || pane.deletingMessageId !== null
+                          || pane.editingSubmittingMessageId !== null,
                       }}
                       onClose={() => closeBranchPane(pane.id)}
                       onToggleContextMode={() => togglePaneContextMode(pane.id)}
+                      onCopy={message => copyBranchMessage(pane.id, message)}
+                      onEdit={message => startBranchEdit(pane.id, message)}
+                      onEditCancel={() => cancelBranchEdit(pane.id)}
+                      onEditSubmit={messageId => submitBranchEdit(pane.id, messageId)}
+                      onEditDraftChange={content => patchBranchPane(pane.id, { editingContent: content })}
+                      onEditModeChange={mode => patchBranchPane(pane.id, { editingMode: mode })}
                       onSend={content => sendBranchMessage(pane.id, content)}
                       onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
                       onDelete={messageId => deleteBranchMessage(pane.id, messageId)}
