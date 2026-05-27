@@ -61,6 +61,15 @@ const EXPORT_OPTIONS = [
   { key: 'json-all_branches', label: 'JSON · 全部分支', format: 'json', scope: 'all_branches' },
 ]
 
+function sortConversations(items) {
+  return [...items].sort((a, b) => {
+    const timeA = new Date(a.updated_at || a.created_at || 0).getTime()
+    const timeB = new Date(b.updated_at || b.created_at || 0).getTime()
+    if (timeA !== timeB) return timeB - timeA
+    return (b.id || 0) - (a.id || 0)
+  })
+}
+
 export default function ChatPage() {
   const { user, logout } = useAuth()
   const { palette, mode, toggle, setPalette } = useTheme()
@@ -430,6 +439,12 @@ export default function ChatPage() {
     }
   }, [importing, reloadConversations])
 
+  const renameConversation = useCallback(async (id, title) => {
+    const updated = await api.updateConversation(id, { title })
+    setConversations(prev => sortConversations(prev.map(conv => (conv.id === updated.id ? updated : conv))))
+    return updated
+  }, [])
+
   const deleteConversation = useCallback(async (id) => {
     await api.deleteConversation(id)
     const remaining = conversations.filter(c => c.id !== id)
@@ -465,7 +480,7 @@ export default function ChatPage() {
     setSavingModel(true)
     try {
       const updated = await api.updateConversation(activeConv.id, { model: nextModel })
-      setConversations(prev => prev.map(conv => (conv.id === updated.id ? updated : conv)))
+      setConversations(prev => sortConversations(prev.map(conv => (conv.id === updated.id ? updated : conv))))
     } catch (e) {
       setPendingModel(activeConv.model || '')
       setModelError(e.message || '保存模型失败')
@@ -484,12 +499,7 @@ export default function ChatPage() {
       setCreatingBranchMessageId(sourceMessage.id)
     }
 
-    setBranchPanes(prev => {
-      const remaining = prev.length >= 2
-        ? [...prev].sort((a, b) => a.openedAt - b.openedAt).slice(1)
-        : prev
-      return [...remaining, nextPane]
-    })
+    setBranchPanes([nextPane])
 
     try {
       const data = await api.getMessages(activeId, { rootMessageId: sourceMessage.id })
@@ -977,6 +987,7 @@ export default function ChatPage() {
           onNew={createConversation}
           onImport={importConversation}
           onDelete={deleteConversation}
+          onRename={renameConversation}
           onClose={() => setSidebarOpen(false)}
           onToggleTheme={toggle}
           onSetPalette={setPalette}

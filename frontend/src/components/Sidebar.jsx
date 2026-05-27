@@ -1,16 +1,30 @@
 import { useRef, useState } from 'react'
 import {
-  Plus, Trash2, MessageSquare, Loader2,
-  LogOut, ChevronLeft, User, Sun, Moon, Key, AlertTriangle, Palette,
-  FileInput, CheckCircle2,
+  Plus,
+  Trash2,
+  MessageSquare,
+  Loader2,
+  LogOut,
+  ChevronLeft,
+  User,
+  Sun,
+  Moon,
+  Key,
+  AlertTriangle,
+  Palette,
+  FileInput,
+  CheckCircle2,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react'
 import { PALETTES } from '../ThemeContext'
 
 const PALETTE_COLORS = {
-  stone:    '#6e5c52',
+  stone: '#6e5c52',
   lavender: '#7c6fa0',
-  sage:     '#5e8a6e',
-  blue:     '#4a72a8',
+  sage: '#5e8a6e',
+  blue: '#4a72a8',
 }
 
 function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
@@ -25,31 +39,35 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
         style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
         onClick={e => e.stopPropagation()}
       >
-        <div className="flex items-start gap-3 mb-4">
+        <div className="mb-4 flex items-start gap-3">
           <div
-            className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl"
             style={{ background: 'var(--error-bg)' }}
           >
-            <AlertTriangle className="w-4 h-4" style={{ color: 'var(--error-text)' }} />
+            <AlertTriangle className="h-4 w-4" style={{ color: 'var(--error-text)' }} />
           </div>
           <div>
             <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
               删除对话
             </p>
-            <p className="text-xs mt-1" style={{ color: 'var(--text-muted)' }}>
+            <p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
               确定要删除「{conv?.title || '新对话'}」吗？此操作无法撤销。
             </p>
           </div>
         </div>
-        <div className="flex gap-2 justify-end">
+        <div className="flex justify-end gap-2">
           <button
             type="button"
             onClick={onCancel}
             disabled={deleting}
-            className="px-3 py-1.5 rounded-lg text-sm transition"
+            className="rounded-lg px-3 py-1.5 text-sm transition"
             style={{ color: 'var(--text-secondary)', background: 'var(--bg-elevated)' }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'var(--border)' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'var(--bg-elevated)' }}
+            onMouseEnter={e => {
+              e.currentTarget.style.background = 'var(--border)'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.background = 'var(--bg-elevated)'
+            }}
           >
             取消
           </button>
@@ -57,12 +75,20 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
             type="button"
             onClick={onConfirm}
             disabled={deleting}
-            className="px-3 py-1.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5"
-            style={{ background: 'var(--error-bg)', color: 'var(--error-text)', border: '1px solid var(--error-border)' }}
-            onMouseEnter={e => { e.currentTarget.style.opacity = '0.85' }}
-            onMouseLeave={e => { e.currentTarget.style.opacity = '1' }}
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition"
+            style={{
+              background: 'var(--error-bg)',
+              color: 'var(--error-text)',
+              border: '1px solid var(--error-border)',
+            }}
+            onMouseEnter={e => {
+              e.currentTarget.style.opacity = '0.85'
+            }}
+            onMouseLeave={e => {
+              e.currentTarget.style.opacity = '1'
+            }}
           >
-            {deleting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
             删除
           </button>
         </div>
@@ -72,13 +98,32 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
 }
 
 export default function Sidebar({
-  open, conversations, activeId, loading,
-  importLoading, importStatus,
-  onSelect, onNew, onImport, onDelete, onClose,
-  onToggleTheme, palette, mode, onSetPalette, user, onLogout, onOpenKeys,
+  open,
+  conversations,
+  activeId,
+  loading,
+  importLoading,
+  importStatus,
+  onSelect,
+  onNew,
+  onImport,
+  onDelete,
+  onRename,
+  onClose,
+  onToggleTheme,
+  palette,
+  mode,
+  onSetPalette,
+  user,
+  onLogout,
+  onOpenKeys,
 }) {
   const [deletingId, setDeletingId] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
+  const [editingId, setEditingId] = useState(null)
+  const [editingTitle, setEditingTitle] = useState('')
+  const [renamingId, setRenamingId] = useState(null)
+  const [renameError, setRenameError] = useState('')
   const fileInputRef = useRef(null)
 
   function handleDelete(e, id) {
@@ -94,6 +139,48 @@ export default function Sidebar({
       await onDelete(id)
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  function startRename(e, conv) {
+    e.stopPropagation()
+    setPendingDelete(null)
+    setRenameError('')
+    setEditingId(conv.id)
+    setEditingTitle(conv.title || '')
+  }
+
+  function cancelRename(e) {
+    e?.stopPropagation?.()
+    setEditingId(null)
+    setEditingTitle('')
+    setRenameError('')
+    setRenamingId(null)
+  }
+
+  async function submitRename(e, id) {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const nextTitle = editingTitle.trim()
+    if (!nextTitle) {
+      setRenameError('标题不能为空')
+      return
+    }
+    if (typeof onRename !== 'function') {
+      cancelRename()
+      return
+    }
+
+    setRenameError('')
+    setRenamingId(id)
+    try {
+      await onRename(id, nextTitle)
+      cancelRename()
+    } catch (err) {
+      setRenameError(err.message || '重命名失败，请重试')
+    } finally {
+      setRenamingId(null)
     }
   }
 
@@ -136,37 +223,37 @@ export default function Sidebar({
       style={{ background: 'var(--bg-surface)', borderRight: '1px solid var(--border)' }}
     >
       <div
-        className="flex items-center justify-between px-4 py-4 shrink-0"
+        className="flex shrink-0 items-center justify-between px-4 py-4"
         style={{ borderBottom: '1px solid var(--border)' }}
       >
         <div className="flex items-center gap-2">
           <div
-            className="w-7 h-7 rounded-lg flex items-center justify-center"
+            className="flex h-7 w-7 items-center justify-center rounded-lg"
             style={{ background: 'var(--accent)' }}
           >
-            <MessageSquare className="w-4 h-4" style={{ color: 'var(--text-primary)' }} />
+            <MessageSquare className="h-4 w-4" style={{ color: 'var(--text-primary)' }} />
           </div>
-          <span className="font-semibold text-sm" style={{ color: 'var(--text-primary)' }}>
+          <span className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
             AI Chat
           </span>
         </div>
         <button
           type="button"
           onClick={onClose}
-          className="p-1 rounded-lg transition md:hidden"
+          className="rounded-lg p-1 transition md:hidden"
           style={{ color: 'var(--text-muted)' }}
           {...btnHover}
         >
-          <ChevronLeft className="w-4 h-4" />
+          <ChevronLeft className="h-4 w-4" />
         </button>
       </div>
 
-      <div className="px-3 py-3 shrink-0">
+      <div className="shrink-0 px-3 py-3">
         <div className="flex gap-2">
           <button
             type="button"
             onClick={() => onNew()}
-            className="flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium transition"
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition"
             style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
             onMouseEnter={e => {
               e.currentTarget.style.background = 'var(--accent-hover)'
@@ -175,14 +262,14 @@ export default function Sidebar({
               e.currentTarget.style.background = 'var(--accent)'
             }}
           >
-            <Plus className="w-4 h-4" />
+            <Plus className="h-4 w-4" />
             新对话
           </button>
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
             disabled={importLoading || typeof onImport !== 'function'}
-            className="shrink-0 w-11 h-11 rounded-xl flex items-center justify-center transition"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition"
             style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
             title="导入 Markdown"
             aria-label="导入 Markdown"
@@ -193,7 +280,7 @@ export default function Sidebar({
               e.currentTarget.style.background = 'var(--bg-elevated)'
             }}
           >
-            {importLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileInput className="w-4 h-4" />}
+            {importLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileInput className="h-4 w-4" />}
           </button>
           <input
             ref={fileInputRef}
@@ -213,7 +300,9 @@ export default function Sidebar({
             }}
           >
             <div className="flex items-center gap-2 font-medium" style={{ color: 'var(--text-primary)' }}>
-              {importStatus.type === 'success' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
+              {importStatus.type === 'success'
+                ? <CheckCircle2 className="h-3.5 w-3.5" />
+                : <AlertTriangle className="h-3.5 w-3.5" />}
               <span className="truncate">{importStatus.title}</span>
             </div>
             <p className="mt-1">{importStatus.message}</p>
@@ -226,63 +315,148 @@ export default function Sidebar({
         )}
       </div>
 
-      <div className="flex-1 overflow-y-auto scrollbar-thin px-2 pb-2">
+      <div className="scrollbar-thin flex-1 overflow-y-auto px-2 pb-2">
         {loading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="w-5 h-5 animate-spin" style={{ color: 'var(--text-muted)' }} />
+            <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--text-muted)' }} />
           </div>
         ) : conversations.length === 0 ? (
-          <p className="text-center text-xs py-8 px-4" style={{ color: 'var(--text-muted)' }}>
-            还没有对话，点击上方按钮开始
+          <p className="px-4 py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
+            还没有对话，点击上方按钮开始。
           </p>
         ) : (
           <ul className="space-y-0.5">
             {conversations.map(conv => {
               const isActive = activeId === conv.id
+              const isEditing = editingId === conv.id
+              const isRenaming = renamingId === conv.id
 
               return (
                 <li key={conv.id}>
                   <div className="group relative">
-                    <button
-                      type="button"
-                      onClick={() => onSelect(conv.id)}
-                      className="w-full text-left px-3 py-2.5 pr-10 rounded-xl text-sm transition"
-                      style={{
-                        background: isActive ? 'var(--bg-elevated)' : 'transparent',
-                        color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
-                      }}
-                      onMouseEnter={e => {
-                        if (!isActive) e.currentTarget.style.background = 'var(--bg-elevated)'
-                      }}
-                      onMouseLeave={e => {
-                        if (!isActive) e.currentTarget.style.background = 'transparent'
-                      }}
-                    >
-                      <div className="flex items-start gap-2">
-                        <MessageSquare className="w-3.5 h-3.5 mt-0.5 shrink-0 opacity-50" />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium leading-snug">
-                            {conv.title || '新对话'}
-                          </p>
-                          <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                            {formatDate(conv.updated_at)}
-                          </p>
+                    {isEditing ? (
+                      <form
+                        onSubmit={e => { void submitRename(e, conv.id) }}
+                        className="rounded-xl px-3 py-2.5 pr-20 text-sm"
+                        style={{ background: 'var(--bg-elevated)', color: 'var(--text-primary)' }}
+                      >
+                        <div className="flex items-start gap-2">
+                          <MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-50" />
+                          <div className="min-w-0 flex-1">
+                            <input
+                              autoFocus
+                              type="text"
+                              value={editingTitle}
+                              maxLength={255}
+                              disabled={isRenaming}
+                              placeholder="输入对话标题"
+                              onClick={e => e.stopPropagation()}
+                              onChange={e => {
+                                setEditingTitle(e.target.value)
+                                if (renameError) setRenameError('')
+                              }}
+                              onKeyDown={e => {
+                                if (e.key === 'Escape') cancelRename(e)
+                              }}
+                              className="w-full rounded-lg px-2 py-1 text-sm outline-none"
+                              style={{
+                                background: 'var(--bg-surface)',
+                                color: 'var(--text-primary)',
+                                border: `1px solid ${renameError ? 'var(--error-border)' : 'var(--border)'}`,
+                              }}
+                            />
+                            {renameError ? (
+                              <p className="mt-1 text-xs" style={{ color: 'var(--error-text)' }}>
+                                {renameError}
+                              </p>
+                            ) : (
+                              <p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
+                                {formatDate(conv.updated_at)}
+                              </p>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </button>
+                      </form>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => onSelect(conv.id)}
+                        className="w-full rounded-xl px-3 py-2.5 pr-16 text-left text-sm transition"
+                        style={{
+                          background: isActive ? 'var(--bg-elevated)' : 'transparent',
+                          color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)',
+                        }}
+                        onMouseEnter={e => {
+                          if (!isActive) e.currentTarget.style.background = 'var(--bg-elevated)'
+                        }}
+                        onMouseLeave={e => {
+                          if (!isActive) e.currentTarget.style.background = 'transparent'
+                        }}
+                      >
+                        <div className="flex items-start gap-2">
+                          <MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-50" />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium leading-snug">
+                              {conv.title || '新对话'}
+                            </p>
+                            <p className="mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                              {formatDate(conv.updated_at)}
+                            </p>
+                          </div>
+                        </div>
+                      </button>
+                    )}
 
-                    <button
-                      type="button"
-                      onClick={e => handleDelete(e, conv.id)}
-                      disabled={deletingId === conv.id}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-lg transition opacity-0 group-hover:opacity-100"
-                      style={{ color: 'var(--text-muted)' }}
-                      title="删除对话"
-                    >
-                      {deletingId === conv.id
-                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        : <Trash2 className="w-3.5 h-3.5" />}
-                    </button>
+                    {isEditing ? (
+                      <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={e => { void submitRename(e, conv.id) }}
+                          disabled={isRenaming}
+                          className="rounded-lg p-1 transition"
+                          style={{ color: 'var(--text-muted)' }}
+                          title="保存重命名"
+                        >
+                          {isRenaming
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Check className="h-3.5 w-3.5" />}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelRename}
+                          disabled={isRenaming}
+                          className="rounded-lg p-1 transition"
+                          style={{ color: 'var(--text-muted)' }}
+                          title="取消重命名"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={e => startRename(e, conv)}
+                          className="rounded-lg p-1 transition"
+                          style={{ color: 'var(--text-muted)' }}
+                          title="重命名对话"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={e => handleDelete(e, conv.id)}
+                          disabled={deletingId === conv.id}
+                          className="rounded-lg p-1 transition"
+                          style={{ color: 'var(--text-muted)' }}
+                          title="删除对话"
+                        >
+                          {deletingId === conv.id
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <Trash2 className="h-3.5 w-3.5" />}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </li>
               )
@@ -291,39 +465,39 @@ export default function Sidebar({
         )}
       </div>
 
-      <div className="px-3 py-3 shrink-0 space-y-1" style={{ borderTop: '1px solid var(--border)' }}>
+      <div className="shrink-0 space-y-1 px-3 py-3" style={{ borderTop: '1px solid var(--border)' }}>
         <button
           type="button"
           onClick={onOpenKeys}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition"
+          className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition"
           style={{ color: 'var(--text-secondary)' }}
           {...btnHover}
         >
-          <Key className="w-4 h-4" />
+          <Key className="h-4 w-4" />
           管理 API Keys
         </button>
 
         <button
           type="button"
           onClick={onToggleTheme}
-          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-sm transition"
+          className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition"
           style={{ color: 'var(--text-secondary)' }}
           {...btnHover}
         >
-          {mode === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+          {mode === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           {mode === 'dark' ? '切换日间模式' : '切换夜间模式'}
         </button>
 
         <div className="flex items-center gap-1.5 px-3 py-2">
-          <Palette className="w-4 h-4 shrink-0" style={{ color: 'var(--text-secondary)' }} />
-          <div className="flex gap-1.5 flex-1">
+          <Palette className="h-4 w-4 shrink-0" style={{ color: 'var(--text-secondary)' }} />
+          <div className="flex flex-1 gap-1.5">
             {PALETTES.map(p => (
               <button
                 key={p.id}
                 type="button"
                 onClick={() => onSetPalette(p.id)}
                 title={p.label}
-                className="w-5 h-5 rounded-full transition-transform"
+                className="h-5 w-5 rounded-full transition-transform"
                 style={{
                   background: PALETTE_COLORS[p.id],
                   outline: palette === p.id ? `2px solid ${PALETTE_COLORS[p.id]}` : 'none',
@@ -337,18 +511,18 @@ export default function Sidebar({
 
         <div className="flex items-center gap-2.5 px-3 py-2">
           <div
-            className="w-6 h-6 rounded-full flex items-center justify-center shrink-0"
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full"
             style={{ background: 'var(--bg-elevated)' }}
           >
-            <User className="w-3.5 h-3.5" style={{ color: 'var(--text-secondary)' }} />
+            <User className="h-3.5 w-3.5" style={{ color: 'var(--text-secondary)' }} />
           </div>
-          <span className="text-sm flex-1 truncate" style={{ color: 'var(--text-secondary)' }}>
+          <span className="flex-1 truncate text-sm" style={{ color: 'var(--text-secondary)' }}>
             {user?.username}
           </span>
           <button
             type="button"
             onClick={onLogout}
-            className="p-1 rounded-lg transition"
+            className="rounded-lg p-1 transition"
             style={{ color: 'var(--text-muted)' }}
             onMouseEnter={e => {
               e.currentTarget.style.color = 'var(--error-text)'
@@ -360,7 +534,7 @@ export default function Sidebar({
             }}
             title="退出登录"
           >
-            <LogOut className="w-3.5 h-3.5" />
+            <LogOut className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
