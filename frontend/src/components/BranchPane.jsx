@@ -26,8 +26,8 @@ export default function BranchPane({
 
   return (
     <section
-      className="flex flex-col min-h-0 rounded-3xl border overflow-hidden"
-      style={{ borderColor: 'var(--border)', background: 'var(--bg-surface)' }}
+      className="flex h-full flex-col min-h-0 overflow-hidden"
+      style={{ background: 'var(--bg-surface)' }}
     >
       <div
         className="flex items-center justify-between px-4 py-3 shrink-0"

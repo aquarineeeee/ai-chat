@@ -10,6 +10,28 @@ import ApiKeysModal from './components/ApiKeysModal'
 import BranchPane from './components/BranchPane'
 import { Menu, X, Loader2, AlertCircle, Download, ChevronDown } from 'lucide-react'
 
+const DEFAULT_BRANCH_PANE_WIDTH = 440
+const MIN_BRANCH_PANE_WIDTH = 280
+const MAX_BRANCH_PANE_WIDTH = 760
+const MIN_MAIN_PANEL_WIDTH = 320
+const BRANCH_PANE_WIDTH_STORAGE_KEY = 'ai-chat.branch-pane-width'
+
+function clampBranchPaneWidth(width, containerWidth) {
+  if (!Number.isFinite(width)) return DEFAULT_BRANCH_PANE_WIDTH
+
+  if (!Number.isFinite(containerWidth) || containerWidth <= 0) {
+    return Math.min(Math.max(width, MIN_BRANCH_PANE_WIDTH), MAX_BRANCH_PANE_WIDTH)
+  }
+
+  const minWidth = Math.min(MIN_BRANCH_PANE_WIDTH, Math.max(220, Math.round(containerWidth * 0.28)))
+  const maxWidth = Math.min(
+    MAX_BRANCH_PANE_WIDTH,
+    Math.max(minWidth, Math.round(containerWidth - MIN_MAIN_PANEL_WIDTH)),
+  )
+
+  return Math.min(Math.max(width, minWidth), maxWidth)
+}
+
 function createBranchPane(sourceMessage) {
   return {
     id: `branch-${sourceMessage.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -71,10 +93,17 @@ export default function ChatPage() {
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
   const [branchPanes, setBranchPanes] = useState([])
+  const [branchPaneWidth, setBranchPaneWidth] = useState(() => {
+    if (typeof window === 'undefined') return DEFAULT_BRANCH_PANE_WIDTH
+    const storedWidth = Number(window.localStorage.getItem(BRANCH_PANE_WIDTH_STORAGE_KEY))
+    return clampBranchPaneWidth(storedWidth, NaN)
+  })
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const [exportingKey, setExportingKey] = useState('')
   const bottomRef = useRef(null)
   const exportMenuRef = useRef(null)
+  const conversationLayoutRef = useRef(null)
+  const resizeCleanupRef = useRef(null)
   const activeConv = conversations.find(c => c.id === activeId)
 
   useEffect(() => {
@@ -89,6 +118,70 @@ export default function ChatPage() {
     document.addEventListener('mousedown', handlePointerDown)
     return () => document.removeEventListener('mousedown', handlePointerDown)
   }, [exportMenuOpen])
+
+  useEffect(() => {
+    window.localStorage.setItem(BRANCH_PANE_WIDTH_STORAGE_KEY, String(branchPaneWidth))
+  }, [branchPaneWidth])
+
+  useEffect(() => {
+    function syncBranchPaneWidth() {
+      const containerWidth = conversationLayoutRef.current?.getBoundingClientRect().width
+      if (!containerWidth) return
+      setBranchPaneWidth(current => clampBranchPaneWidth(current, containerWidth))
+    }
+
+    syncBranchPaneWidth()
+    window.addEventListener('resize', syncBranchPaneWidth)
+    return () => window.removeEventListener('resize', syncBranchPaneWidth)
+  }, [branchPanes.length])
+
+  const stopBranchPaneResize = useCallback(() => {
+    if (!resizeCleanupRef.current) return
+    resizeCleanupRef.current()
+    resizeCleanupRef.current = null
+  }, [])
+
+  useEffect(() => stopBranchPaneResize, [stopBranchPaneResize])
+
+  const startBranchPaneResize = useCallback((event) => {
+    if (event.button !== 0) return
+
+    const updateWidth = (clientX) => {
+      const containerWidth = conversationLayoutRef.current?.getBoundingClientRect().width
+      const containerRight = conversationLayoutRef.current?.getBoundingClientRect().right
+      if (!containerWidth || !containerRight) return
+      setBranchPaneWidth(clampBranchPaneWidth(containerRight - clientX, containerWidth))
+    }
+
+    stopBranchPaneResize()
+    event.preventDefault()
+    updateWidth(event.clientX)
+
+    const previousCursor = document.body.style.cursor
+    const previousUserSelect = document.body.style.userSelect
+
+    const handlePointerMove = (moveEvent) => {
+      updateWidth(moveEvent.clientX)
+    }
+
+    const handlePointerUp = () => {
+      stopBranchPaneResize()
+    }
+
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp)
+    window.addEventListener('pointercancel', handlePointerUp)
+
+    resizeCleanupRef.current = () => {
+      document.body.style.cursor = previousCursor
+      document.body.style.userSelect = previousUserSelect
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+      window.removeEventListener('pointercancel', handlePointerUp)
+    }
+  }, [stopBranchPaneResize])
 
   const patchBranchPane = useCallback((paneId, updater) => {
     setBranchPanes(prev => prev.map(pane => (
@@ -973,7 +1066,7 @@ export default function ChatPage() {
             </div>
           </header>
 
-          <div className="flex flex-1 min-h-0 overflow-hidden">
+          <div className="flex flex-1 min-h-0 overflow-hidden" ref={conversationLayoutRef}>
             <div className="flex flex-col flex-1 min-w-0">
               <div className="flex-1 overflow-y-auto scrollbar-thin">
                 {loadingMsgs ? (
@@ -1066,41 +1159,64 @@ export default function ChatPage() {
             </div>
 
             {branchPanes.length > 0 && (
-              <div
-                className="w-[440px] shrink-0 p-4 flex flex-col gap-4"
-                style={{ borderLeft: '1px solid var(--border)', background: 'color-mix(in srgb, var(--bg-surface) 78%, transparent)' }}
-              >
-                {branchPanes.map(pane => (
-                  <div key={pane.id} className="flex-1 min-h-0">
-                    <BranchPane
-                      pane={{
-                        ...pane,
-                        busy: pane.loading
-                          || pane.sending
-                          || pane.regeneratingMessageId !== null
-                          || pane.switchingSiblingMessageId !== null
-                          || pane.creatingBranchMessageId !== null
-                          || pane.deletingMessageId !== null
-                          || pane.editingSubmittingMessageId !== null,
-                      }}
-                      onClose={() => closeBranchPane(pane.id)}
-                      onToggleContextMode={() => togglePaneContextMode(pane.id)}
-                      onCopy={message => copyBranchMessage(pane.id, message)}
-                      onEdit={message => startBranchEdit(pane.id, message)}
-                      onEditCancel={() => cancelBranchEdit(pane.id)}
-                      onEditSubmit={messageId => submitBranchEdit(pane.id, messageId)}
-                      onEditDraftChange={content => patchBranchPane(pane.id, { editingContent: content })}
-                      onEditModeChange={mode => patchBranchPane(pane.id, { editingMode: mode })}
-                      onSend={content => sendBranchMessage(pane.id, content)}
-                      onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
-                      onDelete={messageId => deleteBranchMessage(pane.id, messageId)}
-                      onCreateBranch={message => openBranchPane(message, pane.id)}
-                      onPrevSibling={message => switchBranchPaneSibling(pane.id, message.previous_sibling_id)}
-                      onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}
-                    />
-                  </div>
-                ))}
-              </div>
+              <>
+                <div
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="调整分支视图宽度"
+                  onPointerDown={startBranchPaneResize}
+                  className="shrink-0 flex items-stretch justify-center cursor-col-resize group"
+                  style={{ width: '14px', touchAction: 'none' }}
+                >
+                  <div
+                    className="h-full transition-colors"
+                    style={{
+                      width: '1px',
+                      background: 'transparent',
+                      boxShadow: '0 0 0 3px transparent',
+                    }}
+                  />
+                </div>
+
+                <div
+                  className="h-full shrink-0 p-4 flex flex-col gap-4"
+                  style={{
+                    width: `${branchPaneWidth}px`,
+                    background: 'color-mix(in srgb, var(--bg-surface) 78%, transparent)',
+                  }}
+                >
+                  {branchPanes.map(pane => (
+                    <div key={pane.id} className="flex-1 min-h-0">
+                      <BranchPane
+                        pane={{
+                          ...pane,
+                          busy: pane.loading
+                            || pane.sending
+                            || pane.regeneratingMessageId !== null
+                            || pane.switchingSiblingMessageId !== null
+                            || pane.creatingBranchMessageId !== null
+                            || pane.deletingMessageId !== null
+                            || pane.editingSubmittingMessageId !== null,
+                        }}
+                        onClose={() => closeBranchPane(pane.id)}
+                        onToggleContextMode={() => togglePaneContextMode(pane.id)}
+                        onCopy={message => copyBranchMessage(pane.id, message)}
+                        onEdit={message => startBranchEdit(pane.id, message)}
+                        onEditCancel={() => cancelBranchEdit(pane.id)}
+                        onEditSubmit={messageId => submitBranchEdit(pane.id, messageId)}
+                        onEditDraftChange={content => patchBranchPane(pane.id, { editingContent: content })}
+                        onEditModeChange={mode => patchBranchPane(pane.id, { editingMode: mode })}
+                        onSend={content => sendBranchMessage(pane.id, content)}
+                        onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
+                        onDelete={messageId => deleteBranchMessage(pane.id, messageId)}
+                        onCreateBranch={message => openBranchPane(message, pane.id)}
+                        onPrevSibling={message => switchBranchPaneSibling(pane.id, message.previous_sibling_id)}
+                        onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </div>

@@ -4,12 +4,12 @@ import { Loader2, Send, Square } from 'lucide-react'
 export default function ChatInput({
   onSend,
   disabled,
-  modelValue,
-  modelOptions,
-  modelProvider,
-  modelLoading,
-  modelSaving,
-  modelError,
+  modelValue = '',
+  modelOptions = [],
+  modelProvider = 'openai',
+  modelLoading = false,
+  modelSaving = false,
+  modelError = '',
   onModelChange,
 }) {
   const [value, setValue] = useState('')
