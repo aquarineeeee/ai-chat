@@ -18,6 +18,13 @@ export default function BranchPane({
   onCreateBranch,
   onPrevSibling,
   onNextSibling,
+  modelValue = '',
+  modelOptions = [],
+  modelProvider = 'openai',
+  modelLoading = false,
+  modelSaving = false,
+  modelError = '',
+  onModelChange,
 }) {
   const rootMessage = pane.messages[0] || pane.sourceMessage
   const branchMessages = pane.messages.length > 0 && pane.messages[0]?.id === pane.rootMessageId
@@ -138,7 +145,17 @@ export default function BranchPane({
         </div>
       </div>
 
-      <ChatInput onSend={onSend} disabled={pane.busy} />
+      <ChatInput
+        onSend={onSend}
+        disabled={pane.busy}
+        modelValue={modelValue}
+        modelOptions={modelOptions}
+        modelProvider={modelProvider}
+        modelLoading={modelLoading}
+        modelSaving={modelSaving}
+        modelError={modelError}
+        onModelChange={onModelChange}
+      />
     </section>
   )
 }

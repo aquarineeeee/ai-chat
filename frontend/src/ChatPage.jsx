@@ -318,7 +318,6 @@ export default function ChatPage() {
       setModelOptions(items)
       return items
     } catch (err) {
-      setModelOptions([])
       setModelError(err.message || '鍔犺浇妯″瀷澶辫触')
       return []
     } finally {
@@ -372,6 +371,24 @@ export default function ChatPage() {
     setKeysOpen(true)
     await loadApiKeys()
   }, [loadApiKeys])
+
+  const createApiKey = useCallback(async (data) => {
+    const result = await api.createApiKey(data)
+    await loadProviderModels(data?.provider || activeConv?.provider || 'openai')
+    return result
+  }, [activeConv?.provider, loadProviderModels])
+
+  const deleteApiKey = useCallback(async (id) => {
+    const result = await api.deleteApiKey(id)
+    await loadProviderModels(activeConv?.provider || 'openai')
+    return result
+  }, [activeConv?.provider, loadProviderModels])
+
+  const testApiKey = useCallback(async (id) => {
+    const result = await api.testApiKey(id)
+    await loadProviderModels(activeConv?.provider || result?.api_key?.provider || 'openai')
+    return result
+  }, [activeConv?.provider, loadProviderModels])
 
   useEffect(() => {
     let cancelled = false
@@ -1326,6 +1343,13 @@ export default function ChatPage() {
                         onCreateBranch={message => openBranchPane(message, pane.id)}
                         onPrevSibling={message => switchBranchPaneSibling(pane.id, message.previous_sibling_id)}
                         onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}
+                        modelValue={pendingModel}
+                        modelOptions={modelChoices}
+                        modelProvider={activeConv?.provider || 'openai'}
+                        modelLoading={loadingModels}
+                        modelSaving={savingModel}
+                        modelError={modelError}
+                        onModelChange={changeConversationModel}
                       />
                     </div>
                   ))}
@@ -1344,9 +1368,9 @@ export default function ChatPage() {
           loading={loadingKeys}
           loadError={keysError}
           onRefresh={loadApiKeys}
-          onCreate={api.createApiKey}
-          onDelete={api.deleteApiKey}
-          onTest={api.testApiKey}
+          onCreate={createApiKey}
+          onDelete={deleteApiKey}
+          onTest={testApiKey}
         />
       )}
     </>
