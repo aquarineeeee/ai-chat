@@ -387,8 +387,9 @@ export default function Sidebar({
               const isEditing = editingId === conv.id
               const isRenaming = renamingId === conv.id
               const branches = branchesByConversation[conv.id] || []
+              const visibleBranches = branches.filter(branch => branch.parent_branch_id !== null)
               const isLoadingBranches = !!loadingBranches[conv.id]
-              const showBranches = isActive || branches.length > 0 || isLoadingBranches
+              const showBranches = visibleBranches.length > 0 || isLoadingBranches
 
               return (
                 <li key={conv.id}>
@@ -519,12 +520,12 @@ export default function Sidebar({
                   </div>
                   {showBranches && (
                     <div className="ml-5 mt-0.5 space-y-0.5">
-                      {isLoadingBranches && branches.length === 0 ? (
+                      {isLoadingBranches && visibleBranches.length === 0 ? (
                         <div className="flex items-center gap-2 px-3 py-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
                           <Loader2 className="h-3 w-3 animate-spin" />
                           <span>加载分支</span>
                         </div>
-                      ) : branches.map(branch => {
+                      ) : visibleBranches.map(branch => {
                         const isBranchActive = isActive && activeBranchId === branch.id
                         const isBranchEditing = editingBranchId === branch.id
                         const isBranchRenaming = renamingBranchId === branch.id
