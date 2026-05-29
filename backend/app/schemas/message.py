@@ -12,6 +12,7 @@ from app.models.message import MessageRole, MessageStatus
 class MessageCreateRequest(BaseModel):
     content: str
     parent_id: int | None = None
+    branch_id: int | None = None
     provider: str | None = None
     model: str | None = None
     temperature: Decimal | None = None
@@ -22,6 +23,7 @@ class MessageCreateRequest(BaseModel):
 
 
 class MessageRegenerateRequest(BaseModel):
+    branch_id: int | None = None
     provider: str | None = None
     model: str | None = None
     temperature: Decimal | None = None
@@ -34,6 +36,7 @@ class MessageRegenerateRequest(BaseModel):
 class MessageEditRequest(BaseModel):
     content: str
     mode: Literal["update", "branch"] = "update"
+    branch_id: int | None = None
     context_mode: Literal["full", "root_only"] = "full"
     context_root_message_id: int | None = None
 
@@ -62,12 +65,14 @@ class MessageNodeResponse(BaseModel):
 
 class ConversationMessagesResponse(BaseModel):
     conversation_id: int
+    current_branch_id: int | None = None
     current_leaf_message_id: int | None
     items: list[MessageNodeResponse]
 
 
 class MessageSendResponse(BaseModel):
     conversation_id: int
+    current_branch_id: int | None = None
     current_leaf_message_id: int
     user_message: MessageNodeResponse
     assistant_message: MessageNodeResponse
@@ -75,6 +80,7 @@ class MessageSendResponse(BaseModel):
 
 class MessageRegenerateResponse(BaseModel):
     conversation_id: int
+    current_branch_id: int | None = None
     current_leaf_message_id: int
     replaced_message_id: int
     assistant_message: MessageNodeResponse
@@ -83,4 +89,5 @@ class MessageRegenerateResponse(BaseModel):
 class MessageEditResponse(BaseModel):
     conversation_id: int
     message_id: int
+    current_branch_id: int | None = None
     current_leaf_message_id: int | None

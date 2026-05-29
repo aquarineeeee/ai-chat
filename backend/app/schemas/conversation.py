@@ -23,6 +23,7 @@ class ConversationUpdate(BaseModel):
     temperature: Decimal | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1)
     current_leaf_message_id: int | None = Field(default=None, ge=1)
+    current_branch_id: int | None = Field(default=None, ge=1)
 
 
 class ConversationResponse(BaseModel):
@@ -37,6 +38,7 @@ class ConversationResponse(BaseModel):
     temperature: Decimal | None
     max_tokens: int | None
     current_leaf_message_id: int | None
+    current_branch_id: int | None
     created_at: datetime
     updated_at: datetime
 

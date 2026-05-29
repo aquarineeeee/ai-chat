@@ -7,6 +7,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.models.conversation import Conversation
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
+from app.services.branches import create_main_branch_for_conversation
 from app.services.markdown_import import import_markdown_conversation
 
 
@@ -45,6 +46,8 @@ async def create_conversation(session: AsyncSession, user_id: int, payload: Conv
         max_tokens=payload.max_tokens if payload.max_tokens is not None else settings.default_max_tokens,
     )
     session.add(conversation)
+    await session.flush()
+    await create_main_branch_for_conversation(session=session, conversation=conversation)
     await session.commit()
     await session.refresh(conversation)
     return conversation
@@ -61,6 +64,13 @@ async def update_conversation(
 
     for field, value in update_data.items():
         setattr(conversation, field, value)
+
+    if "current_leaf_message_id" in update_data and conversation.current_branch_id is not None:
+        from app.models.branch import ConversationBranch
+
+        branch = await session.get(ConversationBranch, conversation.current_branch_id)
+        if branch is not None and branch.conversation_id == conversation.id:
+            branch.current_leaf_message_id = conversation.current_leaf_message_id
 
     await session.commit()
     await session.refresh(conversation)

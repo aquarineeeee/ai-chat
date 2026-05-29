@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useEffect } from 'react'
 
+// eslint-disable-next-line react-refresh/only-export-components
 export const PALETTES = [
   { id: 'stone',    label: '暖石' },
   { id: 'lavender', label: '薰衣草' },

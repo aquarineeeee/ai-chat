@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
+from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
 from app.providers import (
@@ -26,6 +27,10 @@ from app.schemas.message import (
     MessageSendResponse,
 )
 from app.services.api_keys import get_preferred_api_key
+from app.services.branches import (
+    repair_branches_after_message_delete,
+    resolve_branch_for_write,
+)
 from app.services.conversations import get_conversation
 
 
@@ -39,6 +44,7 @@ async def list_conversation_messages(
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    selected_branch_id = conversation.current_branch_id
 
     if root_message_id is not None:
         await _ensure_message_belongs_to_conversation(
@@ -61,7 +67,12 @@ async def list_conversation_messages(
     elif root_message_id is not None:
         selected_leaf_message_id = _resolve_branch_leaf_message_id(history, root_message_id)
     else:
-        selected_leaf_message_id = conversation.current_leaf_message_id
+        current_branch = await _load_current_branch(session=session, conversation=conversation)
+        selected_leaf_message_id = (
+            current_branch.current_leaf_message_id
+            if current_branch is not None
+            else conversation.current_leaf_message_id
+        )
 
     sibling_map = _build_sibling_meta_map(history)
     visible_messages = _visible_conversation_messages(
@@ -72,6 +83,7 @@ async def list_conversation_messages(
 
     return ConversationMessagesResponse(
         conversation_id=conversation.id,
+        current_branch_id=selected_branch_id,
         current_leaf_message_id=selected_leaf_message_id,
         items=[_serialize_message_node(item, sibling_map=sibling_map) for item in visible_messages],
     )
@@ -89,7 +101,17 @@ async def activate_message_branch(
     if target_message is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="消息不存在")
 
-    conversation.current_leaf_message_id = _resolve_branch_leaf_message_id(history, target_message.id)
+    selected_leaf_message_id = _resolve_branch_leaf_message_id(history, target_message.id)
+    conversation.current_leaf_message_id = selected_leaf_message_id
+    current_branch = await resolve_branch_for_write(
+        session=session,
+        conversation=conversation,
+        branch_id=None,
+        activate_branch=True,
+    )
+    if current_branch is not None:
+        current_branch.current_leaf_message_id = selected_leaf_message_id
+        conversation.current_branch_id = current_branch.id
     await session.commit()
     await session.refresh(conversation)
     return await list_conversation_messages(session=session, user_id=user_id, conversation_id=conversation_id)
@@ -109,20 +131,22 @@ async def delete_message(
     if target_message.status == MessageStatus.STREAMING:
         raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能删除")
 
-    remaining_message_ids = {item.id for item in history if item.id != target_message.id}
-    if conversation.current_leaf_message_id == target_message.id:
-        if target_message.parent_id in remaining_message_ids:
-            conversation.current_leaf_message_id = target_message.parent_id
-        else:
-            conversation.current_leaf_message_id = _resolve_latest_leaf_message_id(
-                [item for item in history if item.id != target_message.id]
-            )
+    subtree_messages = _subtree_messages(history, target_message.id)
+    if any(item.status == MessageStatus.STREAMING for item in subtree_messages):
+        raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能删除")
 
-    direct_children = [item for item in history if item.parent_id == target_message.id]
-    for child in direct_children:
-        child.parent_id = target_message.parent_id
+    deleted_message_ids = {item.id for item in subtree_messages}
+    remaining_messages = [item for item in history if item.id not in deleted_message_ids]
+    await repair_branches_after_message_delete(
+        session=session,
+        conversation=conversation,
+        deleted_message_ids=deleted_message_ids,
+        target_parent_id=target_message.parent_id,
+        remaining_messages=remaining_messages,
+    )
 
-    await session.delete(target_message)
+    for message in reversed(subtree_messages):
+        await session.delete(message)
     await session.commit()
     await session.refresh(conversation)
 
@@ -158,6 +182,7 @@ async def edit_message(
         return MessageEditResponse(
             conversation_id=conversation.id,
             message_id=target_message.id,
+            current_branch_id=conversation.current_branch_id,
             current_leaf_message_id=conversation.current_leaf_message_id,
         )
 
@@ -168,6 +193,7 @@ async def edit_message(
         payload=MessageCreateRequest(
             content=content,
             parent_id=target_message.parent_id,
+            branch_id=payload.branch_id,
             activate_branch=True,
             context_mode=payload.context_mode,
             context_root_message_id=payload.context_root_message_id,
@@ -176,6 +202,7 @@ async def edit_message(
     return MessageEditResponse(
         conversation_id=response.conversation_id,
         message_id=response.user_message.id,
+        current_branch_id=response.current_branch_id,
         current_leaf_message_id=response.current_leaf_message_id,
     )
 
@@ -204,6 +231,7 @@ async def create_message_pair(
         await _mark_failed(
             session=session,
             conversation=context["conversation"],
+            branch=context["branch"],
             assistant_message=context["assistant_message"],
             message=app_error.message,
             status=MessageStatus.FAILED,
@@ -215,6 +243,7 @@ async def create_message_pair(
     await _finalize_success(
         session=session,
         conversation=context["conversation"],
+        branch=context["branch"],
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
         activate_branch=context["activate_branch"],
@@ -258,6 +287,7 @@ async def create_message_stream(
             await _mark_failed(
                 session=session,
                 conversation=context["conversation"],
+                branch=context["branch"],
                 assistant_message=context["assistant_message"],
                 message=app_error.message,
                 status=status,
@@ -271,6 +301,7 @@ async def create_message_stream(
         await _finalize_success(
             session=session,
             conversation=context["conversation"],
+            branch=context["branch"],
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
             activate_branch=context["activate_branch"],
@@ -310,6 +341,7 @@ async def regenerate_message(
         await _mark_failed(
             session=session,
             conversation=context["conversation"],
+            branch=context["branch"],
             assistant_message=context["assistant_message"],
             message=app_error.message,
             status=MessageStatus.FAILED,
@@ -321,6 +353,7 @@ async def regenerate_message(
     await _finalize_success(
         session=session,
         conversation=context["conversation"],
+        branch=context["branch"],
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
         activate_branch=context["activate_branch"],
@@ -371,6 +404,7 @@ async def regenerate_message_stream(
             await _mark_failed(
                 session=session,
                 conversation=context["conversation"],
+                branch=context["branch"],
                 assistant_message=context["assistant_message"],
                 message=app_error.message,
                 status=status,
@@ -384,6 +418,7 @@ async def regenerate_message_stream(
         await _finalize_success(
             session=session,
             conversation=context["conversation"],
+            branch=context["branch"],
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
             activate_branch=context["activate_branch"],
@@ -400,7 +435,21 @@ async def _prepare_generation(
     payload: MessageCreateRequest,
 ) -> dict[str, object]:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
-    parent_id = payload.parent_id if payload.parent_id is not None else conversation.current_leaf_message_id
+    branch = await resolve_branch_for_write(
+        session=session,
+        conversation=conversation,
+        branch_id=payload.branch_id,
+        activate_branch=payload.activate_branch,
+    )
+    parent_id = (
+        payload.parent_id
+        if payload.parent_id is not None
+        else (
+            branch.current_leaf_message_id
+            if branch is not None
+            else conversation.current_leaf_message_id
+        )
+    )
     if parent_id is not None:
         await _ensure_message_belongs_to_conversation(
             session=session,
@@ -456,6 +505,7 @@ async def _prepare_generation(
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
+        "branch": branch,
         "conversation": conversation,
         "max_tokens": max_tokens,
         "model": model,
@@ -475,6 +525,12 @@ async def _prepare_regeneration(
     payload: MessageRegenerateRequest,
 ) -> dict[str, object]:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    branch = await resolve_branch_for_write(
+        session=session,
+        conversation=conversation,
+        branch_id=payload.branch_id,
+        activate_branch=payload.activate_branch,
+    )
     target_message = await _ensure_message_belongs_to_conversation(
         session=session,
         conversation_id=conversation.id,
@@ -532,6 +588,7 @@ async def _prepare_regeneration(
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
+        "branch": branch,
         "conversation": conversation,
         "max_tokens": max_tokens,
         "model": model,
@@ -638,6 +695,7 @@ async def _finalize_success(
     *,
     session: AsyncSession,
     conversation: Conversation,
+    branch: ConversationBranch | None,
     assistant_message: Message,
     reply_content: str,
     activate_branch: bool,
@@ -645,7 +703,11 @@ async def _finalize_success(
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
     assistant_message.error_message = None
+    if branch is not None:
+        branch.current_leaf_message_id = assistant_message.id
     if activate_branch:
+        if branch is not None:
+            conversation.current_branch_id = branch.id
         conversation.current_leaf_message_id = assistant_message.id
     await session.commit()
     await session.refresh(assistant_message)
@@ -656,6 +718,7 @@ async def _mark_failed(
     *,
     session: AsyncSession,
     conversation: Conversation,
+    branch: ConversationBranch | None,
     assistant_message: Message,
     message: str,
     status: MessageStatus,
@@ -666,7 +729,11 @@ async def _mark_failed(
     assistant_message.content = partial_content
     assistant_message.status = status
     assistant_message.error_message = message
+    if branch is not None:
+        branch.current_leaf_message_id = leaf_message_id
     if activate_branch:
+        if branch is not None:
+            conversation.current_branch_id = branch.id
         conversation.current_leaf_message_id = leaf_message_id
     await session.commit()
     await session.refresh(assistant_message)
@@ -688,6 +755,7 @@ async def _build_send_response(
     sibling_map = _build_sibling_meta_map(history)
     return MessageSendResponse(
         conversation_id=conversation.id,
+        current_branch_id=conversation.current_branch_id,
         current_leaf_message_id=selected_leaf_message_id,
         user_message=_serialize_message_node(user_message, sibling_map=sibling_map),
         assistant_message=_serialize_message_node(assistant_message, sibling_map=sibling_map),
@@ -708,6 +776,7 @@ async def _build_regenerate_response(
     sibling_map = _build_sibling_meta_map(history)
     return MessageRegenerateResponse(
         conversation_id=conversation.id,
+        current_branch_id=conversation.current_branch_id,
         current_leaf_message_id=selected_leaf_message_id,
         replaced_message_id=replaced_message.id,
         assistant_message=_serialize_message_node(assistant_message, sibling_map=sibling_map),
@@ -742,6 +811,43 @@ async def _load_conversation_history(
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
     return list(result.all())
+
+
+async def _load_current_branch(
+    *,
+    session: AsyncSession,
+    conversation: Conversation,
+) -> ConversationBranch | None:
+    if conversation.current_branch_id is None:
+        return None
+    return await session.scalar(
+        select(ConversationBranch).where(
+            ConversationBranch.id == conversation.current_branch_id,
+            ConversationBranch.conversation_id == conversation.id,
+        )
+    )
+
+
+def _subtree_messages(messages: list[Message], root_message_id: int) -> list[Message]:
+    by_id = {item.id: item for item in messages}
+    by_parent: dict[int | None, list[Message]] = defaultdict(list)
+    for message in messages:
+        by_parent[message.parent_id].append(message)
+
+    subtree: list[Message] = []
+    seen: set[int] = set()
+    stack = [root_message_id]
+    while stack:
+        current_id = stack.pop()
+        if current_id in seen or current_id not in by_id:
+            continue
+
+        seen.add(current_id)
+        message = by_id[current_id]
+        subtree.append(message)
+        stack.extend(child.id for child in reversed(by_parent.get(current_id, [])))
+
+    return subtree
 
 
 async def _create_assistant_message(

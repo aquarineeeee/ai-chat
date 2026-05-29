@@ -17,6 +17,7 @@ import {
   Pencil,
   Check,
   X,
+  GitBranch,
 } from 'lucide-react'
 import { PALETTES } from '../ThemeContext'
 
@@ -100,15 +101,20 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
 export default function Sidebar({
   open,
   conversations,
+  branchesByConversation = {},
+  loadingBranches = {},
   activeId,
+  activeBranchId,
   loading,
   importLoading,
   importStatus,
   onSelect,
+  onBranchSelect,
   onNew,
   onImport,
   onDelete,
   onRename,
+  onRenameBranch,
   onClose,
   onToggleTheme,
   palette,
@@ -124,6 +130,10 @@ export default function Sidebar({
   const [editingTitle, setEditingTitle] = useState('')
   const [renamingId, setRenamingId] = useState(null)
   const [renameError, setRenameError] = useState('')
+  const [editingBranchId, setEditingBranchId] = useState(null)
+  const [editingBranchTitle, setEditingBranchTitle] = useState('')
+  const [renamingBranchId, setRenamingBranchId] = useState(null)
+  const [branchRenameError, setBranchRenameError] = useState('')
   const fileInputRef = useRef(null)
 
   function handleDelete(e, id) {
@@ -181,6 +191,52 @@ export default function Sidebar({
       setRenameError(err.message || '重命名失败，请重试')
     } finally {
       setRenamingId(null)
+    }
+  }
+
+  function branchTitle(branch) {
+    return branch?.title || branch?.auto_title || '未命名分支'
+  }
+
+  function startBranchRename(e, conv, branch) {
+    e.stopPropagation()
+    setPendingDelete(null)
+    setBranchRenameError('')
+    setEditingBranchId(branch.id)
+    setEditingBranchTitle(branchTitle(branch))
+  }
+
+  function cancelBranchRename(e) {
+    e?.stopPropagation?.()
+    setEditingBranchId(null)
+    setEditingBranchTitle('')
+    setBranchRenameError('')
+    setRenamingBranchId(null)
+  }
+
+  async function submitBranchRename(e, convId, branchId) {
+    e.preventDefault()
+    e.stopPropagation()
+
+    const nextTitle = editingBranchTitle.trim()
+    if (!nextTitle) {
+      setBranchRenameError('分支名不能为空')
+      return
+    }
+    if (typeof onRenameBranch !== 'function') {
+      cancelBranchRename()
+      return
+    }
+
+    setBranchRenameError('')
+    setRenamingBranchId(branchId)
+    try {
+      await onRenameBranch(convId, branchId, nextTitle)
+      cancelBranchRename()
+    } catch (err) {
+      setBranchRenameError(err.message || '重命名分支失败，请重试')
+    } finally {
+      setRenamingBranchId(null)
     }
   }
 
@@ -330,6 +386,9 @@ export default function Sidebar({
               const isActive = activeId === conv.id
               const isEditing = editingId === conv.id
               const isRenaming = renamingId === conv.id
+              const branches = branchesByConversation[conv.id] || []
+              const isLoadingBranches = !!loadingBranches[conv.id]
+              const showBranches = isActive || branches.length > 0 || isLoadingBranches
 
               return (
                 <li key={conv.id}>
@@ -458,6 +517,119 @@ export default function Sidebar({
                       </div>
                     )}
                   </div>
+                  {showBranches && (
+                    <div className="ml-5 mt-0.5 space-y-0.5">
+                      {isLoadingBranches && branches.length === 0 ? (
+                        <div className="flex items-center gap-2 px-3 py-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          <span>加载分支</span>
+                        </div>
+                      ) : branches.map(branch => {
+                        const isBranchActive = isActive && activeBranchId === branch.id
+                        const isBranchEditing = editingBranchId === branch.id
+                        const isBranchRenaming = renamingBranchId === branch.id
+
+                        return (
+                          <div key={branch.id} className="group/branch relative pl-4">
+                            <span
+                              className="absolute left-0 top-0 h-5 w-3 rounded-bl-md"
+                              style={{ borderLeft: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}
+                            />
+                            {isBranchEditing ? (
+                              <form
+                                onSubmit={e => { void submitBranchRename(e, conv.id, branch.id) }}
+                                className="rounded-lg py-1.5 pl-2 pr-16 text-xs"
+                                style={{ background: 'var(--bg-elevated)' }}
+                              >
+                                <input
+                                  autoFocus
+                                  type="text"
+                                  value={editingBranchTitle}
+                                  maxLength={255}
+                                  disabled={isBranchRenaming}
+                                  placeholder="输入分支名"
+                                  onClick={e => e.stopPropagation()}
+                                  onChange={e => {
+                                    setEditingBranchTitle(e.target.value)
+                                    if (branchRenameError) setBranchRenameError('')
+                                  }}
+                                  onKeyDown={e => {
+                                    if (e.key === 'Escape') cancelBranchRename(e)
+                                  }}
+                                  className="w-full rounded-md px-2 py-1 text-xs outline-none"
+                                  style={{
+                                    background: 'var(--bg-surface)',
+                                    color: 'var(--text-primary)',
+                                    border: `1px solid ${branchRenameError ? 'var(--error-border)' : 'var(--border)'}`,
+                                  }}
+                                />
+                                {branchRenameError && (
+                                  <p className="mt-1" style={{ color: 'var(--error-text)' }}>
+                                    {branchRenameError}
+                                  </p>
+                                )}
+                              </form>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => onBranchSelect?.(conv.id, branch.id)}
+                                className="flex w-full items-center gap-2 rounded-lg py-1.5 pl-2 pr-14 text-left text-xs transition"
+                                style={{
+                                  background: isBranchActive ? 'var(--bg-elevated)' : 'transparent',
+                                  color: isBranchActive ? 'var(--text-primary)' : 'var(--text-muted)',
+                                }}
+                                onMouseEnter={e => {
+                                  if (!isBranchActive) e.currentTarget.style.background = 'var(--bg-elevated)'
+                                }}
+                                onMouseLeave={e => {
+                                  if (!isBranchActive) e.currentTarget.style.background = 'transparent'
+                                }}
+                              >
+                                <GitBranch className="h-3.5 w-3.5 shrink-0 opacity-60" />
+                                <span className="min-w-0 flex-1 truncate">{branchTitle(branch)}</span>
+                              </button>
+                            )}
+                            {isBranchEditing ? (
+                              <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={e => { void submitBranchRename(e, conv.id, branch.id) }}
+                                  disabled={isBranchRenaming}
+                                  className="rounded-md p-1 transition"
+                                  style={{ color: 'var(--text-muted)' }}
+                                  title="保存分支名"
+                                >
+                                  {isBranchRenaming
+                                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                                    : <Check className="h-3 w-3" />}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelBranchRename}
+                                  disabled={isBranchRenaming}
+                                  className="rounded-md p-1 transition"
+                                  style={{ color: 'var(--text-muted)' }}
+                                  title="取消"
+                                >
+                                  <X className="h-3 w-3" />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={e => startBranchRename(e, conv, branch)}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 opacity-0 transition group-hover/branch:opacity-100"
+                                style={{ color: 'var(--text-muted)' }}
+                                title="重命名分支"
+                              >
+                                <Pencil className="h-3 w-3" />
+                              </button>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </li>
               )
             })}

@@ -5,6 +5,7 @@ backend/.env
 __pycache__/
 *.py[cod]
 .venv/
+tests/
 
 # Local environment
 .env
@@ -19,6 +20,8 @@ docs/plan.md
 docs/markdown-conversation-import.md
 docs/conversation-tree-export.md
 docs/devdiary.md
+docs/branch-entity-handoff.md
+tests/
 
 # Build outputs
 /backend/static/

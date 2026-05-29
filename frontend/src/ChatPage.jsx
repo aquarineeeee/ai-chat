@@ -32,9 +32,10 @@ function clampBranchPaneWidth(width, containerWidth) {
   return Math.min(Math.max(width, minWidth), maxWidth)
 }
 
-function createBranchPane(sourceMessage) {
+function createBranchPane(sourceMessage, branch = null) {
   return {
     id: `branch-${sourceMessage.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    branchId: branch?.id ?? null,
     rootMessageId: sourceMessage.id,
     sourceMessage,
     messages: [sourceMessage],
@@ -101,6 +102,8 @@ export default function ChatPage() {
   const [pendingModel, setPendingModel] = useState('')
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
+  const [branchesByConversation, setBranchesByConversation] = useState({})
+  const [loadingBranches, setLoadingBranches] = useState({})
   const [branchPanes, setBranchPanes] = useState([])
   const [branchPaneWidth, setBranchPaneWidth] = useState(() => {
     if (typeof window === 'undefined') return DEFAULT_BRANCH_PANE_WIDTH
@@ -200,16 +203,38 @@ export default function ChatPage() {
     )))
   }, [])
 
+  const loadBranches = useCallback(async (conversationId) => {
+    if (!conversationId) return []
+
+    setLoadingBranches(prev => ({ ...prev, [conversationId]: true }))
+    try {
+      const data = await api.getBranches(conversationId)
+      const items = data || []
+      setBranchesByConversation(prev => ({ ...prev, [conversationId]: items }))
+      return items
+    } finally {
+      setLoadingBranches(prev => ({ ...prev, [conversationId]: false }))
+    }
+  }, [])
+
+  const patchConversationBranchState = useCallback((conversationId, data) => {
+    setConversations(prev => prev.map(conv => (
+      conv.id === conversationId
+        ? {
+          ...conv,
+          current_branch_id: data?.current_branch_id ?? conv.current_branch_id,
+          current_leaf_message_id: data?.current_leaf_message_id ?? conv.current_leaf_message_id,
+        }
+        : conv
+    )))
+  }, [])
+
   const refreshMessages = useCallback(async (conversationId) => {
     const data = await api.getMessages(conversationId)
     setMessages(data?.items || [])
-    setConversations(prev => prev.map(conv => (
-      conv.id === conversationId
-        ? { ...conv, current_leaf_message_id: data?.current_leaf_message_id ?? conv.current_leaf_message_id }
-        : conv
-    )))
+    patchConversationBranchState(conversationId, data)
     return data
-  }, [])
+  }, [patchConversationBranchState])
 
   const refreshBranchPane = useCallback(async (conversationId, paneId, options = {}) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -332,13 +357,16 @@ export default function ChatPage() {
     setLoadingMsgs(true)
     setMessages([])
     try {
-      await refreshMessages(conversationId)
+      await Promise.all([
+        refreshMessages(conversationId),
+        loadBranches(conversationId),
+      ])
     } catch {
       setMessages([])
     } finally {
       setLoadingMsgs(false)
     }
-  }, [refreshMessages, resetMainEdit])
+  }, [loadBranches, refreshMessages, resetMainEdit])
 
   const openKeysModal = useCallback(async () => {
     setKeysOpen(true)
@@ -374,13 +402,17 @@ export default function ChatPage() {
   }, [messages, streamingContent])
 
   useEffect(() => {
-    setPendingModel(activeConv?.model || '')
-    setModelError('')
+    queueMicrotask(() => {
+      setPendingModel(activeConv?.model || '')
+      setModelError('')
+    })
   }, [activeId, activeConv?.model])
 
   useEffect(() => {
     const provider = activeConv?.provider || 'openai'
-    void loadProviderModels(provider)
+    queueMicrotask(() => {
+      void loadProviderModels(provider)
+    })
   }, [activeConv?.provider, loadProviderModels])
 
   const createConversation = useCallback(async (title = '新对话', model = undefined) => {
@@ -445,10 +477,43 @@ export default function ChatPage() {
     return updated
   }, [])
 
+  const activateBranch = useCallback(async (conversationId, branchId) => {
+    setActiveId(conversationId)
+    setBranchPanes([])
+    resetMainEdit()
+    setLoadingMsgs(true)
+    setMessages([])
+    try {
+      const data = await api.activateBranch(conversationId, branchId)
+      setMessages(data?.items || [])
+      patchConversationBranchState(conversationId, data)
+      await loadBranches(conversationId)
+      return data
+    } finally {
+      setLoadingMsgs(false)
+    }
+  }, [loadBranches, patchConversationBranchState, resetMainEdit])
+
+  const renameBranch = useCallback(async (conversationId, branchId, title) => {
+    const updated = await api.updateBranch(conversationId, branchId, { title })
+    setBranchesByConversation(prev => ({
+      ...prev,
+      [conversationId]: (prev[conversationId] || []).map(branch => (
+        branch.id === updated.id ? updated : branch
+      )),
+    }))
+    return updated
+  }, [])
+
   const deleteConversation = useCallback(async (id) => {
     await api.deleteConversation(id)
     const remaining = conversations.filter(c => c.id !== id)
     setConversations(remaining)
+    setBranchesByConversation(prev => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
     if (activeId === id) {
       await selectConversation(remaining[0]?.id ?? null)
     }
@@ -502,6 +567,14 @@ export default function ChatPage() {
     setBranchPanes([nextPane])
 
     try {
+      const sourcePane = paneIdToMark ? branchPanes.find(item => item.id === paneIdToMark) : null
+      const parentBranchId = sourcePane?.branchId ?? activeConv?.current_branch_id ?? null
+      const branch = await api.createBranch(activeId, {
+        ...(parentBranchId ? { parent_branch_id: parentBranchId } : {}),
+        forked_from_message_id: sourceMessage.id,
+      })
+      patchBranchPane(nextPane.id, { branchId: branch.id })
+      await loadBranches(activeId)
       const data = await api.getMessages(activeId, { rootMessageId: sourceMessage.id })
       patchBranchPane(nextPane.id, {
         loading: false,
@@ -521,7 +594,7 @@ export default function ChatPage() {
         setCreatingBranchMessageId(null)
       }
     }
-  }, [activeId, patchBranchPane])
+  }, [activeConv, activeId, branchPanes, loadBranches, patchBranchPane])
 
   const closeBranchPane = useCallback((paneId) => {
     setBranchPanes(prev => prev.filter(pane => pane.id !== paneId))
@@ -553,8 +626,10 @@ export default function ChatPage() {
       await api.editMessage(activeId, messageId, {
         content: editingContent.trim(),
         mode: editingMode,
+        ...(activeConv?.current_branch_id ? { branch_id: activeConv.current_branch_id } : {}),
       })
       await refreshMessages(activeId)
+      await loadBranches(activeId)
       await refreshBranchPanesSnapshot(activeId, panesSnapshot)
       resetMainEdit()
     } catch (e) {
@@ -568,6 +643,8 @@ export default function ChatPage() {
     editingContent,
     editingMode,
     editingSubmittingMessageId,
+    activeConv,
+    loadBranches,
     refreshBranchPanesSnapshot,
     refreshMessages,
     resetMainEdit,
@@ -578,10 +655,12 @@ export default function ChatPage() {
     setError('')
 
     let convId = activeId
+    let branchId = activeConv?.current_branch_id ?? null
     if (!convId) {
       try {
         const conv = await createConversation(content.slice(0, 40), pendingModel || undefined)
         convId = conv.id
+        branchId = conv.current_branch_id ?? null
       } catch {
         setError('鍒涘缓瀵硅瘽澶辫触')
         return
@@ -604,12 +683,13 @@ export default function ChatPage() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, ...(branchId ? { branch_id: branchId } : {}) }),
       })
 
       if (res.status === 404 || res.status === 405) {
-        await api.sendMessage(convId, { content })
+        await api.sendMessage(convId, { content, ...(branchId ? { branch_id: branchId } : {}) })
         await refreshMessages(convId)
+        await loadBranches(convId)
         return
       }
 
@@ -656,6 +736,7 @@ export default function ChatPage() {
 
       setStreamingContent('')
       await refreshMessages(convId)
+      await loadBranches(convId)
       if (!streamError && !accumulated) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '发送失败，请重试')
@@ -664,25 +745,27 @@ export default function ChatPage() {
       setSending(false)
       setStreamingContent('')
     }
-  }, [activeId, createConversation, pendingModel, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, createConversation, loadBranches, pendingModel, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const regenerateMainMessage = useCallback(async (messageId) => {
     if (!activeId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
     setError('')
     setRegeneratingMessageId(messageId)
     setStreamingContent('')
+    const branchId = activeConv?.current_branch_id ?? null
 
     try {
       const res = await fetch(`/api/conversations/${activeId}/messages/${messageId}/regenerate/stream`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
+        body: JSON.stringify(branchId ? { branch_id: branchId } : {}),
       })
 
       if (res.status === 404 || res.status === 405) {
-        await api.regenerateMessage(activeId, messageId, {})
+        await api.regenerateMessage(activeId, messageId, branchId ? { branch_id: branchId } : {})
         await refreshMessages(activeId)
+        await loadBranches(activeId)
         return
       }
 
@@ -728,6 +811,7 @@ export default function ChatPage() {
       }
 
       await refreshMessages(activeId)
+      await loadBranches(activeId)
       if (!streamError && !accumulated) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '閲嶆柊鐢熸垚澶辫触锛岃閲嶈瘯')
@@ -736,7 +820,7 @@ export default function ChatPage() {
       setRegeneratingMessageId(null)
       setStreamingContent('')
     }
-  }, [activeId, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, loadBranches, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const switchMainSibling = useCallback(async (targetMessageId) => {
     if (!activeId || !targetMessageId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -745,12 +829,13 @@ export default function ChatPage() {
     try {
       await api.activateMessageBranch(activeId, targetMessageId)
       await refreshMessages(activeId)
+      await loadBranches(activeId)
     } catch (e) {
       setError(e.message || '鍒囨崲鍒嗘敮澶辫触锛岃閲嶈瘯')
     } finally {
       setSwitchingSiblingMessageId(null)
     }
-  }, [activeId, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeId, loadBranches, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const deleteMainMessage = useCallback(async (messageId) => {
     if (
@@ -769,6 +854,7 @@ export default function ChatPage() {
     try {
       await api.deleteMessage(activeId, messageId)
       await refreshMessages(activeId)
+      await loadBranches(activeId)
       await refreshBranchPanesSnapshot(activeId, panesSnapshot, messageId)
     } catch (e) {
       setError(e.message || '删除消息失败，请重试')
@@ -780,6 +866,7 @@ export default function ChatPage() {
     branchPanes,
     creatingBranchMessageId,
     deletingMessageId,
+    loadBranches,
     refreshBranchPanesSnapshot,
     refreshMessages,
     regeneratingMessageId,
@@ -828,17 +915,19 @@ export default function ChatPage() {
       const res = await api.sendMessage(activeId, {
         content,
         parent_id: pane.currentLeafMessageId,
+        ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         activate_branch: false,
         context_mode: pane.contextMode,
         context_root_message_id: pane.rootMessageId,
       })
       await refreshBranchPane(activeId, paneId, { leafMessageId: res?.current_leaf_message_id })
+      await loadBranches(activeId)
     } catch (e) {
       patchBranchPane(paneId, { error: e.message || '发送失败，请重试' })
     } finally {
       patchBranchPane(paneId, { sending: false })
     }
-  }, [activeId, branchPanes, patchBranchPane, refreshBranchPane])
+  }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPane])
 
   const regenerateBranchMessage = useCallback(async (paneId, messageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -847,17 +936,19 @@ export default function ChatPage() {
     patchBranchPane(paneId, { regeneratingMessageId: messageId, error: '' })
     try {
       const res = await api.regenerateMessage(activeId, messageId, {
+        ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         activate_branch: false,
         context_mode: pane.contextMode,
         context_root_message_id: pane.rootMessageId,
       })
       await refreshBranchPane(activeId, paneId, { leafMessageId: res?.current_leaf_message_id })
+      await loadBranches(activeId)
     } catch (e) {
       patchBranchPane(paneId, { error: e.message || '重新生成失败，请重试' })
     } finally {
       patchBranchPane(paneId, { regeneratingMessageId: null })
     }
-  }, [activeId, branchPanes, patchBranchPane, refreshBranchPane])
+  }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPane])
 
   const switchBranchPaneSibling = useCallback(async (paneId, targetMessageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -894,13 +985,14 @@ export default function ChatPage() {
     try {
       await api.deleteMessage(activeId, messageId)
       await refreshMessages(activeId)
+      await loadBranches(activeId)
       await refreshBranchPanesSnapshot(activeId, panesSnapshot, messageId)
     } catch (e) {
       patchBranchPane(paneId, { error: e.message || '删除消息失败，请重试' })
     } finally {
       patchBranchPane(paneId, { deletingMessageId: null })
     }
-  }, [activeId, branchPanes, patchBranchPane, refreshBranchPanesSnapshot, refreshMessages])
+  }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPanesSnapshot, refreshMessages])
 
   const submitBranchEdit = useCallback(async (paneId, messageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -918,10 +1010,12 @@ export default function ChatPage() {
       const result = await api.editMessage(activeId, messageId, {
         content: pane.editingContent.trim(),
         mode: pane.editingMode,
+        ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         context_mode: pane.contextMode,
         context_root_message_id: pane.rootMessageId,
       })
       await refreshMessages(activeId)
+      await loadBranches(activeId)
       await refreshBranchPane(
         activeId,
         paneId,
@@ -943,6 +1037,7 @@ export default function ChatPage() {
   }, [
     activeId,
     branchPanes,
+    loadBranches,
     patchBranchPane,
     refreshBranchPane,
     refreshBranchPanesSnapshot,
@@ -977,17 +1072,25 @@ export default function ChatPage() {
         <Sidebar
           open={sidebarOpen}
           conversations={conversations}
+          branchesByConversation={branchesByConversation}
+          loadingBranches={loadingBranches}
           activeId={activeId}
+          activeBranchId={activeConv?.current_branch_id ?? null}
           loading={loadingConvs}
           importLoading={importing}
           importStatus={importStatus}
           palette={palette}
           mode={mode}
           onSelect={id => { void selectConversation(id); if (window.innerWidth < 768) setSidebarOpen(false) }}
+          onBranchSelect={(conversationId, branchId) => {
+            void activateBranch(conversationId, branchId)
+            if (window.innerWidth < 768) setSidebarOpen(false)
+          }}
           onNew={createConversation}
           onImport={importConversation}
           onDelete={deleteConversation}
           onRename={renameConversation}
+          onRenameBranch={renameBranch}
           onClose={() => setSidebarOpen(false)}
           onToggleTheme={toggle}
           onSetPalette={setPalette}

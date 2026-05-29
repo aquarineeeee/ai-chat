@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
+from app.services.branches import create_main_branch_for_conversation
 
 
 MAX_IMPORT_FILE_SIZE = 5 * 1024 * 1024
@@ -89,6 +90,11 @@ async def import_markdown_conversation(
             parent_id = message.id
 
         conversation.current_leaf_message_id = parent_id
+        await create_main_branch_for_conversation(
+            session=session,
+            conversation=conversation,
+            current_leaf_message_id=parent_id,
+        )
         await session.commit()
     except SQLAlchemyError as exc:
         await session.rollback()

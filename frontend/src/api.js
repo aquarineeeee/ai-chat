@@ -93,6 +93,12 @@ export const api = {
   updateConversation: (id, data) => request('PUT', `/api/conversations/${id}`, data),
   deleteConversation: (id) => request('DELETE', `/api/conversations/${id}`),
 
+  getBranches: (convId) => request('GET', `/api/conversations/${convId}/branches`),
+  createBranch: (convId, data) => request('POST', `/api/conversations/${convId}/branches`, data),
+  updateBranch: (convId, branchId, data) => request('PUT', `/api/conversations/${convId}/branches/${branchId}`, data),
+  activateBranch: (convId, branchId) => request('POST', `/api/conversations/${convId}/branches/${branchId}/activate`),
+  archiveBranch: (convId, branchId) => request('POST', `/api/conversations/${convId}/branches/${branchId}/archive`),
+
   getMessages: (convId, params = {}) => {
     const search = new URLSearchParams()
     if (params.leafMessageId) search.set('leaf_message_id', params.leafMessageId)

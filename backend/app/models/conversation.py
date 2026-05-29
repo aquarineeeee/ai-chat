@@ -21,6 +21,10 @@ class Conversation(Base):
     temperature: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     max_tokens: Mapped[int | None] = mapped_column(Integer)
     current_leaf_message_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    current_branch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversation_branches.id", ondelete="SET NULL", use_alter=True, name="fk_conversations_current_branch"),
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
