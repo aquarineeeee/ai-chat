@@ -3,6 +3,7 @@ from app.services.conversation_export import export_conversation
 from app.services.branches import (
     activate_conversation_branch,
     create_conversation_branch,
+    delete_conversation_branch,
     list_conversation_branches,
     update_conversation_branch,
 )
@@ -23,6 +24,7 @@ __all__ = [
     "activate_conversation_branch",
     "create_conversation_branch",
     "delete_conversation",
+    "delete_conversation_branch",
     "export_conversation",
     "get_conversation",
     "import_markdown_conversation",

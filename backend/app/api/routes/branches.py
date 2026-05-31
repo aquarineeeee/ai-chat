@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, get_current_user
@@ -11,6 +11,7 @@ from app.services.branches import (
     activate_conversation_branch,
     archive_conversation_branch,
     create_conversation_branch,
+    delete_conversation_branch,
     list_conversation_branches,
     update_conversation_branch,
 )
@@ -105,3 +106,19 @@ async def branches_archive(
         branch_id=branch_id,
     )
     return BranchResponse.model_validate(branch)
+
+
+@router.delete("/conversations/{conversation_id}/branches/{branch_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def branches_delete(
+    conversation_id: int,
+    branch_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> Response:
+    await delete_conversation_branch(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        branch_id=branch_id,
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

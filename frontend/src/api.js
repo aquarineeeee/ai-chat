@@ -98,6 +98,7 @@ export const api = {
   updateBranch: (convId, branchId, data) => request('PUT', `/api/conversations/${convId}/branches/${branchId}`, data),
   activateBranch: (convId, branchId) => request('POST', `/api/conversations/${convId}/branches/${branchId}/activate`),
   archiveBranch: (convId, branchId) => request('POST', `/api/conversations/${convId}/branches/${branchId}/archive`),
+  deleteBranch: (convId, branchId) => request('DELETE', `/api/conversations/${convId}/branches/${branchId}`),
 
   getMessages: (convId, params = {}) => {
     const search = new URLSearchParams()

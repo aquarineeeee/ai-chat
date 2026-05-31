@@ -6,7 +6,11 @@ import unittest
 from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
-from app.services.branches import repair_branches_after_message_delete
+from app.services.branches import (
+    _branch_message_subtree_root_id,
+    _descendant_branch_ids,
+    repair_branches_after_message_delete,
+)
 from app.services.messages import _subtree_messages
 
 
@@ -71,17 +75,44 @@ class BranchRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(branches[2].forked_from_message_id)
         self.assertEqual(conversation.current_leaf_message_id, 1)
 
+    async def test_branch_message_subtree_root_starts_after_fork_point(self) -> None:
+        messages = [
+            MessageTreeTests.make_message(id=1, parent_id=None),
+            MessageTreeTests.make_message(id=2, parent_id=1),
+            MessageTreeTests.make_message(id=3, parent_id=2),
+            MessageTreeTests.make_message(id=4, parent_id=3),
+        ]
+        by_id = {message.id: message for message in messages}
+        branch = self.make_branch(id=10, current_leaf_message_id=4, forked_from_message_id=2)
+
+        subtree_root_id = _branch_message_subtree_root_id(branch=branch, by_id=by_id)
+
+        self.assertEqual(subtree_root_id, 3)
+
+    async def test_descendant_branch_ids_includes_nested_children(self) -> None:
+        branches = [
+            self.make_branch(id=10, current_leaf_message_id=1, forked_from_message_id=None),
+            self.make_branch(id=11, current_leaf_message_id=2, forked_from_message_id=1, parent_branch_id=10),
+            self.make_branch(id=12, current_leaf_message_id=3, forked_from_message_id=2, parent_branch_id=11),
+            self.make_branch(id=13, current_leaf_message_id=4, forked_from_message_id=1, parent_branch_id=10),
+        ]
+
+        branch_ids = _descendant_branch_ids(branches=branches, root_branch_id=11)
+
+        self.assertEqual(branch_ids, {11, 12})
+
     @staticmethod
     def make_branch(
         *,
         id: int,
         current_leaf_message_id: int | None,
         forked_from_message_id: int | None,
+        parent_branch_id: int | None = None,
     ) -> ConversationBranch:
         return ConversationBranch(
             id=id,
             conversation_id=123,
-            parent_branch_id=None,
+            parent_branch_id=parent_branch_id,
             forked_from_message_id=forked_from_message_id,
             current_leaf_message_id=current_leaf_message_id,
             title=None,

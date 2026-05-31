@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.exceptions import AppError
 from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
-from app.models.message import Message, MessageRole
+from app.models.message import Message, MessageRole, MessageStatus
 from app.schemas.branch import BranchCreate, BranchUpdate
 
 
@@ -155,6 +155,59 @@ async def archive_conversation_branch(
     return branch
 
 
+async def delete_conversation_branch(
+    *,
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    branch_id: int,
+) -> None:
+    conversation = await _get_user_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    branch = await get_conversation_branch(
+        session=session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        branch_id=branch_id,
+    )
+    if branch.parent_branch_id is None or branch.forked_from_message_id is None:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不能删除主分支")
+
+    branches = await _load_conversation_branches(session=session, conversation_id=conversation_id)
+    branch_ids_to_delete = _descendant_branch_ids(branches=branches, root_branch_id=branch.id)
+    if conversation.current_branch_id in branch_ids_to_delete:
+        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不能删除当前分支")
+
+    history = await _load_conversation_messages(session=session, conversation_id=conversation_id)
+    by_id = {message.id: message for message in history}
+    subtree_root_id = _branch_message_subtree_root_id(branch=branch, by_id=by_id)
+    subtree_messages = _subtree_messages(history, subtree_root_id) if subtree_root_id is not None else []
+    if any(item.status == MessageStatus.STREAMING for item in subtree_messages):
+        raise AppError(status_code=409, code="CONFLICT", message="分支仍有消息在生成中，暂时不能删除")
+
+    deleted_message_ids = {item.id for item in subtree_messages}
+    if deleted_message_ids:
+        remaining_messages = [item for item in history if item.id not in deleted_message_ids]
+        await repair_branches_after_message_delete(
+            session=session,
+            conversation=conversation,
+            deleted_message_ids=deleted_message_ids,
+            target_parent_id=branch.forked_from_message_id,
+            remaining_messages=remaining_messages,
+        )
+
+    branches_by_id = {item.id: item for item in branches}
+    for target_branch_id in sorted(branch_ids_to_delete, reverse=True):
+        target_branch = branches_by_id.get(target_branch_id)
+        if target_branch is not None:
+            await session.delete(target_branch)
+
+    for message in reversed(subtree_messages):
+        await session.delete(message)
+
+    await session.commit()
+    await session.refresh(conversation)
+
+
 async def get_conversation_branch(
     *,
     session: AsyncSession,
@@ -295,6 +348,15 @@ async def _load_conversation_messages(*, session: AsyncSession, conversation_id:
     return list(result.all())
 
 
+async def _load_conversation_branches(*, session: AsyncSession, conversation_id: int) -> list[ConversationBranch]:
+    result = await session.scalars(
+        select(ConversationBranch)
+        .where(ConversationBranch.conversation_id == conversation_id)
+        .order_by(ConversationBranch.created_at.asc(), ConversationBranch.id.asc())
+    )
+    return list(result.all())
+
+
 def _auto_title_for_branch(*, messages: list[Message], leaf_message_id: int) -> str:
     by_id = {message.id: message for message in messages}
     for message_id in reversed(_lineage_ids(by_id, leaf_message_id)):
@@ -327,6 +389,60 @@ def _lineage_ids(by_id: dict[int, Message], leaf_message_id: int | None) -> list
         cursor = message.parent_id
     lineage_ids.reverse()
     return lineage_ids
+
+
+def _branch_message_subtree_root_id(*, branch: ConversationBranch, by_id: dict[int, Message]) -> int | None:
+    if branch.forked_from_message_id is None or branch.current_leaf_message_id is None:
+        return None
+
+    lineage_ids = _lineage_ids(by_id, branch.current_leaf_message_id)
+    try:
+        fork_index = lineage_ids.index(branch.forked_from_message_id)
+    except ValueError:
+        return None
+
+    child_index = fork_index + 1
+    return lineage_ids[child_index] if child_index < len(lineage_ids) else None
+
+
+def _subtree_messages(messages: list[Message], root_message_id: int) -> list[Message]:
+    by_id = {item.id: item for item in messages}
+    by_parent: dict[int | None, list[Message]] = defaultdict(list)
+    for message in messages:
+        by_parent[message.parent_id].append(message)
+
+    subtree: list[Message] = []
+    seen: set[int] = set()
+    stack = [root_message_id]
+    while stack:
+        current_id = stack.pop()
+        if current_id in seen or current_id not in by_id:
+            continue
+
+        seen.add(current_id)
+        message = by_id[current_id]
+        subtree.append(message)
+        stack.extend(child.id for child in reversed(by_parent.get(current_id, [])))
+
+    return subtree
+
+
+def _descendant_branch_ids(*, branches: list[ConversationBranch], root_branch_id: int) -> set[int]:
+    by_parent: dict[int | None, list[ConversationBranch]] = defaultdict(list)
+    for branch in branches:
+        by_parent[branch.parent_branch_id].append(branch)
+
+    branch_ids: set[int] = set()
+    stack = [root_branch_id]
+    while stack:
+        current_id = stack.pop()
+        if current_id in branch_ids:
+            continue
+
+        branch_ids.add(current_id)
+        stack.extend(child.id for child in by_parent.get(current_id, []))
+
+    return branch_ids
 
 
 def _latest_leaf_id(messages: list[Message]) -> int | None:
