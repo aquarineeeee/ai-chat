@@ -131,6 +131,25 @@ export default function BranchPane({
               isDeleting={pane.deletingMessageId === msg.id}
             />
           ))}
+          {pane.sending && !pane.streamingContent && (
+            <div className="flex gap-3 py-3">
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-bold"
+                style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
+              >
+                AI
+              </div>
+              <div className="flex items-center gap-1 pt-2">
+                {[0, 1, 2].map(i => (
+                  <span
+                    key={i}
+                    className="w-1.5 h-1.5 rounded-full animate-bounce"
+                    style={{ background: 'var(--text-muted)', animationDelay: `${i * 0.15}s` }}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
           {pane.streamingContent && (
             <MessageBubble message={{ role: 'assistant', content: pane.streamingContent, status: 'streaming' }} hideActions />
           )}

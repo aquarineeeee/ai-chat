@@ -955,24 +955,99 @@ export default function ChatPage() {
 
   const sendBranchMessage = useCallback(async (paneId, content) => {
     const pane = branchPanes.find(item => item.id === paneId)
-    if (!activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
+    if (!content.trim() || !activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
 
-    patchBranchPane(paneId, { sending: true, error: '' })
+    const userMsg = {
+      id: Date.now(),
+      role: 'user',
+      content,
+      status: 'completed',
+      created_at: new Date().toISOString(),
+    }
+    const payload = {
+      content,
+      parent_id: pane.currentLeafMessageId,
+      ...(pane.branchId ? { branch_id: pane.branchId } : {}),
+      activate_branch: false,
+      context_mode: pane.contextMode,
+      context_root_message_id: pane.rootMessageId,
+    }
+
+    patchBranchPane(paneId, current => ({
+      ...current,
+      messages: [...current.messages, userMsg],
+      sending: true,
+      streamingContent: '',
+      error: '',
+    }))
     try {
-      const res = await api.sendMessage(activeId, {
-        content,
-        parent_id: pane.currentLeafMessageId,
-        ...(pane.branchId ? { branch_id: pane.branchId } : {}),
-        activate_branch: false,
-        context_mode: pane.contextMode,
-        context_root_message_id: pane.rootMessageId,
+      const res = await fetch(`/api/conversations/${activeId}/messages/stream`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       })
-      await refreshBranchPane(activeId, paneId, { leafMessageId: res?.current_leaf_message_id })
+
+      if (res.status === 404 || res.status === 405) {
+        const fallback = await api.sendMessage(activeId, payload)
+        await refreshBranchPane(activeId, paneId, { leafMessageId: fallback?.current_leaf_message_id })
+        await loadBranches(activeId)
+        return
+      }
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.error?.message || err?.detail || '发送失败')
+      }
+
+      const reader = res.body?.getReader()
+      if (!reader) throw new Error('流式响应不可用')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let accumulated = ''
+      let streamError = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (raw === '[DONE]') continue
+
+          try {
+            const chunk = JSON.parse(raw)
+            if (chunk.content) {
+              accumulated += chunk.content
+              patchBranchPane(paneId, { streamingContent: accumulated })
+            }
+            if (chunk.error) {
+              streamError = chunk.error
+              patchBranchPane(paneId, { error: chunk.error })
+            }
+          } catch {
+            // ignore malformed chunks
+          }
+        }
+      }
+
+      patchBranchPane(paneId, { streamingContent: '' })
+      await refreshBranchPane(activeId, paneId)
       await loadBranches(activeId)
+      if (!streamError && !accumulated) patchBranchPane(paneId, { error: '模型没有返回内容' })
     } catch (e) {
-      patchBranchPane(paneId, { error: e.message || '发送失败，请重试' })
+      patchBranchPane(paneId, current => ({
+        ...current,
+        messages: current.messages.filter(message => message.id !== userMsg.id),
+        error: e.message || '发送失败，请重试',
+      }))
     } finally {
-      patchBranchPane(paneId, { sending: false })
+      patchBranchPane(paneId, { sending: false, streamingContent: '' })
     }
   }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPane])
 
