@@ -5,10 +5,21 @@ backend/.env
 __pycache__/
 *.py[cod]
 .venv/
-tests/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.tox/
+*.egg-info/
+build/
+dist/
 
 # Local environment
 .env
+.env.*
+!.env.example
 
 # IDE / local runtime
 .idea/
@@ -16,12 +27,15 @@ tests/
 .run/
 .tmp/
 *.log
+.eslintcache
+.DS_Store
+Thumbs.db
+Desktop.ini
 docs/plan.md
 docs/markdown-conversation-import.md
 docs/conversation-tree-export.md
 docs/devdiary.md
 docs/branch-entity-handoff.md
-tests/
 
 # Build outputs
 /backend/static/

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from decimal import Decimal
@@ -33,6 +34,13 @@ def _build_headers(api_key: str) -> dict[str, str]:
     }
 
 
+def _http_error_message(prefix: str, exc: httpx.HTTPError) -> str:
+    detail = str(exc).strip()
+    if not detail:
+        detail = repr(exc)
+    return f"{prefix}: {type(exc).__name__}: {detail}"
+
+
 def _stringify_content(content: object) -> str:
     if isinstance(content, str):
         return content
@@ -51,7 +59,7 @@ def _extract_error_message(response: httpx.Response) -> str:
     try:
         payload = response.json()
     except Exception:
-        return response.text or f"涓婃父鏈嶅姟杩斿洖 HTTP {response.status_code}"
+        return response.text or f"上游模型服务返回 HTTP {response.status_code}"
 
     error = payload.get("error")
     if isinstance(error, dict):
@@ -60,7 +68,7 @@ def _extract_error_message(response: httpx.Response) -> str:
             return str(message)
     if isinstance(error, str):
         return error
-    return response.text or f"涓婃父鏈嶅姟杩斿洖 HTTP {response.status_code}"
+    return response.text or f"上游模型服务返回 HTTP {response.status_code}"
 
 
 def _chat_payload(
@@ -110,7 +118,11 @@ async def create_openai_compatible_reply(
         try:
             response = await client.post(url, headers=_build_headers(raw_key), json=payload)
         except httpx.HTTPError as exc:
-            raise AppError(status_code=502, code="MODEL_ERROR", message=f"璇锋眰涓婃父妯″瀷鏈嶅姟澶辫触: {exc}") from exc
+            raise AppError(
+                status_code=502,
+                code="MODEL_ERROR",
+                message=_http_error_message("请求上游模型服务失败", exc),
+            ) from exc
 
     if response.status_code >= 400:
         raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(response))
@@ -124,7 +136,7 @@ async def create_openai_compatible_reply(
         raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型响应格式不正确") from exc
 
     if not content:
-        raise AppError(status_code=502, code="MODEL_ERROR", message="涓婃父妯″瀷杩斿洖浜嗙┖鍐呭")
+        raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
     return content
 
 
@@ -178,7 +190,7 @@ async def stream_openai_compatible_reply(
                     error = data.get("error")
                     if error:
                         if isinstance(error, dict):
-                            message = str(error.get("message") or "涓婃父妯″瀷杩斿洖閿欒")
+                            message = str(error.get("message") or "上游模型返回错误")
                         else:
                             message = str(error)
                         raise AppError(status_code=502, code="MODEL_ERROR", message=message)
@@ -193,7 +205,11 @@ async def stream_openai_compatible_reply(
         except AppError:
             raise
         except httpx.HTTPError as exc:
-            raise AppError(status_code=502, code="MODEL_ERROR", message=f"璇锋眰涓婃父妯″瀷鏈嶅姟澶辫触: {exc}") from exc
+            raise AppError(
+                status_code=502,
+                code="MODEL_ERROR",
+                message=_http_error_message("请求上游模型服务失败", exc),
+            ) from exc
 
 
 async def test_openai_compatible_key(*, api_key: ApiKey) -> tuple[bool, str]:
@@ -209,7 +225,7 @@ async def test_openai_compatible_key(*, api_key: ApiKey) -> tuple[bool, str]:
         try:
             response = await client.get(url, headers=_build_headers(raw_key))
         except httpx.HTTPError as exc:
-            return False, f"连接失败: {exc}"
+            return False, _http_error_message("连接失败", exc)
 
     if response.status_code >= 400:
         return False, _extract_error_message(response)
@@ -226,10 +242,23 @@ async def list_openai_compatible_models(*, api_key: ApiKey) -> list[dict[str, st
         trust_env=False,
         http2=False,
     ) as client:
-        try:
-            response = await client.get(url, headers=_build_headers(raw_key))
-        except httpx.HTTPError as exc:
-            raise AppError(status_code=502, code="MODEL_ERROR", message=f"请求上游模型服务失败: {exc}") from exc
+        last_exc: httpx.HTTPError | None = None
+        for attempt in range(2):
+            try:
+                response = await client.get(url, headers=_build_headers(raw_key))
+                break
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 0:
+                    await asyncio.sleep(0.2)
+                    continue
+        else:
+            assert last_exc is not None
+            raise AppError(
+                status_code=502,
+                code="MODEL_ERROR",
+                message=_http_error_message("请求上游模型服务失败", last_exc),
+            ) from last_exc
 
     if response.status_code >= 400:
         raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(response))

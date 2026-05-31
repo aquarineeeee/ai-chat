@@ -116,6 +116,8 @@ export default function ChatPage() {
   const exportMenuRef = useRef(null)
   const conversationLayoutRef = useRef(null)
   const resizeCleanupRef = useRef(null)
+  const modelLoadSeqRef = useRef(0)
+  const modelLoadInFlightRef = useRef(new Map())
   const activeConv = conversations.find(c => c.id === activeId)
 
   useEffect(() => {
@@ -306,22 +308,50 @@ export default function ChatPage() {
 
   const loadProviderModels = useCallback(async (provider) => {
     if (!provider) {
+      modelLoadSeqRef.current += 1
       setModelOptions([])
+      setModelError('')
+      setLoadingModels(false)
       return []
     }
 
+    const requestSeq = modelLoadSeqRef.current + 1
+    modelLoadSeqRef.current = requestSeq
     setModelError('')
     setLoadingModels(true)
+
+    let request = modelLoadInFlightRef.current.get(provider)
+    if (!request) {
+      request = api.getProviderModels(provider)
+      modelLoadInFlightRef.current.set(provider, request)
+      request.then(() => {
+        if (modelLoadInFlightRef.current.get(provider) === request) {
+          modelLoadInFlightRef.current.delete(provider)
+        }
+      }, () => {
+        if (modelLoadInFlightRef.current.get(provider) === request) {
+          modelLoadInFlightRef.current.delete(provider)
+        }
+      })
+    }
+
     try {
-      const data = await api.getProviderModels(provider)
+      const data = await request
       const items = Array.isArray(data) ? data : []
-      setModelOptions(items)
+      if (modelLoadSeqRef.current === requestSeq) {
+        setModelOptions(items)
+        setModelError('')
+      }
       return items
     } catch (err) {
+      if (modelLoadSeqRef.current === requestSeq) {
       setModelError(err.message || '鍔犺浇妯″瀷澶辫触')
+      }
       return []
     } finally {
-      setLoadingModels(false)
+      if (modelLoadSeqRef.current === requestSeq) {
+        setLoadingModels(false)
+      }
     }
   }, [])
 
