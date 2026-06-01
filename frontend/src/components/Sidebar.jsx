@@ -29,6 +29,28 @@ const PALETTE_COLORS = {
   blue: '#4a72a8',
 }
 
+function buildVisibleBranchTree(branches) {
+  const byParent = new Map()
+  branches.forEach(branch => {
+    const key = branch.parent_branch_id ?? null
+    byParent.set(key, [...(byParent.get(key) || []), branch])
+  })
+
+  const rows = []
+  const visit = (parentId, depth) => {
+    const children = byParent.get(parentId) || []
+    children.forEach(branch => {
+      if (branch.parent_branch_id !== null) {
+        rows.push({ branch, depth })
+      }
+      visit(branch.id, branch.parent_branch_id === null ? 0 : depth + 1)
+    })
+  }
+
+  visit(null, 0)
+  return rows
+}
+
 function DeleteConfirmModal({ title, description, onConfirm, onCancel, deleting, confirmLabel = '删除' }) {
   return (
     <div
@@ -454,9 +476,9 @@ export default function Sidebar({
               const isEditing = editingId === conv.id
               const isRenaming = renamingId === conv.id
               const branches = branchesByConversation[conv.id] || []
-              const visibleBranches = branches.filter(branch => branch.parent_branch_id !== null)
+              const visibleBranchRows = buildVisibleBranchTree(branches)
               const isLoadingBranches = !!loadingBranches[conv.id]
-              const showBranches = visibleBranches.length > 0 || isLoadingBranches
+              const showBranches = visibleBranchRows.length > 0 || isLoadingBranches
 
               return (
                 <li key={conv.id}>
@@ -587,19 +609,25 @@ export default function Sidebar({
                   </div>
                   {showBranches && (
                     <div className="ml-5 mt-0.5 space-y-0.5">
-                      {isLoadingBranches && visibleBranches.length === 0 ? (
+                      {isLoadingBranches && visibleBranchRows.length === 0 ? (
                         <div className="flex items-center gap-2 px-3 py-1.5 text-xs" style={{ color: 'var(--text-muted)' }}>
                           <Loader2 className="h-3 w-3 animate-spin" />
                           <span>加载分支</span>
                         </div>
-                      ) : visibleBranches.map(branch => {
+                      ) : visibleBranchRows.map(({ branch, depth }) => {
                         const isBranchActive = isActive && activeBranchId === branch.id
                         const isBranchEditing = editingBranchId === branch.id
                         const isBranchRenaming = renamingBranchId === branch.id
                         const isBranchMenuOpen = branchMenu?.conversationId === conv.id && branchMenu?.branchId === branch.id
+                        const indent = depth * 14
 
                         return (
-                          <div key={branch.id} ref={isBranchMenuOpen ? branchMenuRef : null} className="group/branch relative pl-4">
+                          <div
+                            key={branch.id}
+                            ref={isBranchMenuOpen ? branchMenuRef : null}
+                            className="group/branch relative pl-4"
+                            style={{ marginLeft: `${indent}px` }}
+                          >
                             <span
                               className="absolute left-0 top-0 h-5 w-3 rounded-bl-md"
                               style={{ borderLeft: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}
@@ -641,12 +669,12 @@ export default function Sidebar({
                             ) : (
                               <button
                                 type="button"
-                              onClick={() => onBranchSelect?.(conv.id, branch.id)}
-                              className="flex w-full items-center gap-2 rounded-lg py-1.5 pl-2 pr-12 text-left text-xs transition"
-                              style={{
-                                background: isBranchActive ? 'var(--bg-elevated)' : 'transparent',
-                                color: isBranchActive ? 'var(--text-primary)' : 'var(--text-muted)',
-                              }}
+                                onClick={() => onBranchSelect?.(conv.id, branch.id)}
+                                className="flex w-full items-center gap-2 rounded-lg py-1.5 pl-2 pr-12 text-left text-xs transition"
+                                style={{
+                                  background: isBranchActive ? 'var(--bg-elevated)' : 'transparent',
+                                  color: isBranchActive ? 'var(--text-primary)' : 'var(--text-muted)',
+                                }}
                                 onMouseEnter={e => {
                                   if (!isBranchActive) e.currentTarget.style.background = 'var(--bg-elevated)'
                                 }}

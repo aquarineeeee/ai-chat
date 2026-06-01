@@ -78,7 +78,7 @@ async def create_conversation_branch(
         forked_from_message_id=fork_message.id,
         current_leaf_message_id=fork_message.id,
         title=title,
-        auto_title=_auto_title_for_branch(messages=history, leaf_message_id=fork_message.id),
+        auto_title=_auto_title_for_branch(fork_message=fork_message),
     )
     session.add(branch)
     await session.commit()
@@ -367,19 +367,10 @@ async def _load_conversation_branches(*, session: AsyncSession, conversation_id:
     return list(result.all())
 
 
-def _auto_title_for_branch(*, messages: list[Message], leaf_message_id: int) -> str:
-    by_id = {message.id: message for message in messages}
-    for message_id in reversed(_lineage_ids(by_id, leaf_message_id)):
-        message = by_id.get(message_id)
-        if message is not None and message.role == MessageRole.USER:
-            title = _message_preview(message.content)
-            if title:
-                return title
-    leaf_message = by_id.get(leaf_message_id)
-    if leaf_message is not None:
-        title = _message_preview(leaf_message.content)
-        if title:
-            return title
+def _auto_title_for_branch(*, fork_message: Message) -> str:
+    title = _message_preview(fork_message.content)
+    if title:
+        return title
     return UNTITLED_BRANCH_AUTO_TITLE
 
 

@@ -79,7 +79,7 @@ export default function BranchPane({
             onEdit={rootMessage.role === 'user' ? () => { void onEdit(rootMessage) } : undefined}
             onRegenerate={rootMessage.role === 'system' ? undefined : () => { void onRegenerate(rootMessage.id) }}
             onDelete={rootMessage.role === 'system' ? undefined : () => { void onDelete(rootMessage.id) }}
-            onCreateBranch={rootMessage.role === 'system' ? undefined : () => { void onCreateBranch(rootMessage) }}
+            onCreateBranch={rootMessage.role === 'assistant' ? () => { void onCreateBranch(rootMessage) } : undefined}
             onPrevSibling={rootMessage.previous_sibling_id ? () => { void onPrevSibling(rootMessage) } : undefined}
             onNextSibling={rootMessage.next_sibling_id ? () => { void onNextSibling(rootMessage) } : undefined}
             isEditing={pane.editingMessageId === rootMessage.id}
@@ -114,7 +114,7 @@ export default function BranchPane({
               onEdit={msg.role === 'user' ? () => { void onEdit(msg) } : undefined}
               onRegenerate={msg.role === 'system' ? undefined : () => { void onRegenerate(msg.id) }}
               onDelete={msg.role === 'system' ? undefined : () => { void onDelete(msg.id) }}
-              onCreateBranch={msg.role === 'system' ? undefined : () => { void onCreateBranch(msg) }}
+              onCreateBranch={msg.role === 'assistant' ? () => { void onCreateBranch(msg) } : undefined}
               onPrevSibling={msg.previous_sibling_id ? () => { void onPrevSibling(msg) } : undefined}
               onNextSibling={msg.next_sibling_id ? () => { void onNextSibling(msg) } : undefined}
               isEditing={pane.editingMessageId === msg.id}

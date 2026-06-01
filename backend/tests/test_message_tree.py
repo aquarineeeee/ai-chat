@@ -8,6 +8,7 @@ from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
 from app.services.branches import (
+    _auto_title_for_branch,
     _branch_message_subtree_root_id,
     _descendant_branch_ids,
     _replacement_branch_after_delete,
@@ -171,6 +172,15 @@ class BranchRepairTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.current_leaf_message_id, 3)
         self.assertIn(target_branch, session.deleted)
         self.assertNotIn(next_branch, session.deleted)
+
+    async def test_auto_title_for_branch_uses_fork_message_content(self) -> None:
+        fork_message = MessageTreeTests.make_message(id=2, parent_id=1)
+        fork_message.role = MessageRole.ASSISTANT
+        fork_message.content = "assistant answer should become the branch title"
+
+        title = _auto_title_for_branch(fork_message=fork_message)
+
+        self.assertEqual(title, "assistant answer should become the branc")
 
     @staticmethod
     def make_branch(

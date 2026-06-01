@@ -636,7 +636,7 @@ export default function ChatPage() {
   }, [activeConv])
 
   const openBranchPane = useCallback(async (sourceMessage, paneIdToMark = null) => {
-    if (!activeId) return
+    if (!activeId || sourceMessage?.role !== 'assistant') return
 
     const nextPane = createBranchPane(sourceMessage)
     if (paneIdToMark) {
@@ -1362,7 +1362,7 @@ export default function ChatPage() {
                           onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
                           onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
                           onDelete={msg.role === 'system' ? undefined : () => { void deleteMainMessage(msg.id) }}
-                          onCreateBranch={msg.role === 'system' ? undefined : () => { void openBranchPane(msg) }}
+                          onCreateBranch={msg.role === 'assistant' ? () => { void openBranchPane(msg) } : undefined}
                           onPrevSibling={msg.previous_sibling_id ? () => { void switchMainSibling(msg.previous_sibling_id) } : undefined}
                           onNextSibling={msg.next_sibling_id ? () => { void switchMainSibling(msg.next_sibling_id) } : undefined}
                           isEditing={editingMessageId === msg.id}
