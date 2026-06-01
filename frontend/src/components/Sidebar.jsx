@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   Plus,
   Trash2,
@@ -18,6 +18,7 @@ import {
   Check,
   X,
   GitBranch,
+  MoreHorizontal,
 } from 'lucide-react'
 import { PALETTES } from '../ThemeContext'
 
@@ -28,7 +29,7 @@ const PALETTE_COLORS = {
   blue: '#4a72a8',
 }
 
-function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
+function DeleteConfirmModal({ title, description, onConfirm, onCancel, deleting, confirmLabel = '删除' }) {
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
@@ -49,10 +50,10 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
           </div>
           <div>
             <p className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>
-              删除对话
+              {title}
             </p>
             <p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-              确定要删除「{conv?.title || '新对话'}」吗？此操作无法撤销。
+              {description}
             </p>
           </div>
         </div>
@@ -90,7 +91,7 @@ function DeleteConfirmModal({ conv, onConfirm, onCancel, deleting }) {
             }}
           >
             {deleting && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            删除
+            {confirmLabel}
           </button>
         </div>
       </div>
@@ -115,6 +116,7 @@ export default function Sidebar({
   onDelete,
   onRename,
   onRenameBranch,
+  onDeleteBranch,
   onClose,
   onToggleTheme,
   palette,
@@ -134,7 +136,34 @@ export default function Sidebar({
   const [editingBranchTitle, setEditingBranchTitle] = useState('')
   const [renamingBranchId, setRenamingBranchId] = useState(null)
   const [branchRenameError, setBranchRenameError] = useState('')
+  const [branchMenu, setBranchMenu] = useState(null)
+  const [pendingBranchDelete, setPendingBranchDelete] = useState(null)
+  const [deletingBranchId, setDeletingBranchId] = useState(null)
+  const branchMenuRef = useRef(null)
   const fileInputRef = useRef(null)
+
+  useEffect(() => {
+    if (!branchMenu) return undefined
+
+    const handlePointerDown = event => {
+      if (branchMenuRef.current && !branchMenuRef.current.contains(event.target)) {
+        setBranchMenu(null)
+      }
+    }
+
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') {
+        setBranchMenu(null)
+      }
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [branchMenu])
 
   function handleDelete(e, id) {
     e.stopPropagation()
@@ -198,12 +227,34 @@ export default function Sidebar({
     return branch?.title || branch?.auto_title || '未命名分支'
   }
 
+  function toggleBranchMenu(e, convId, branchId) {
+    e.stopPropagation()
+    setPendingDelete(null)
+    setBranchMenu(current => (
+      current?.conversationId === convId && current?.branchId === branchId
+        ? null
+        : { conversationId: convId, branchId }
+    ))
+  }
+
   function startBranchRename(e, conv, branch) {
     e.stopPropagation()
     setPendingDelete(null)
+    setBranchMenu(null)
     setBranchRenameError('')
     setEditingBranchId(branch.id)
     setEditingBranchTitle(branchTitle(branch))
+  }
+
+  function promptBranchDelete(e, conv, branch) {
+    e.stopPropagation()
+    setBranchMenu(null)
+    setPendingDelete(null)
+    setPendingBranchDelete({
+      conversationId: conv.id,
+      branchId: branch.id,
+      title: branchTitle(branch),
+    })
   }
 
   function cancelBranchRename(e) {
@@ -237,6 +288,22 @@ export default function Sidebar({
       setBranchRenameError(err.message || '重命名分支失败，请重试')
     } finally {
       setRenamingBranchId(null)
+    }
+  }
+
+  async function confirmBranchDelete() {
+    const target = pendingBranchDelete
+    if (!target || typeof onDeleteBranch !== 'function') {
+      setPendingBranchDelete(null)
+      return
+    }
+
+    setDeletingBranchId(target.branchId)
+    setPendingBranchDelete(null)
+    try {
+      await onDeleteBranch(target.conversationId, target.branchId)
+    } finally {
+      setDeletingBranchId(null)
     }
   }
 
@@ -529,9 +596,10 @@ export default function Sidebar({
                         const isBranchActive = isActive && activeBranchId === branch.id
                         const isBranchEditing = editingBranchId === branch.id
                         const isBranchRenaming = renamingBranchId === branch.id
+                        const isBranchMenuOpen = branchMenu?.conversationId === conv.id && branchMenu?.branchId === branch.id
 
                         return (
-                          <div key={branch.id} className="group/branch relative pl-4">
+                          <div key={branch.id} ref={isBranchMenuOpen ? branchMenuRef : null} className="group/branch relative pl-4">
                             <span
                               className="absolute left-0 top-0 h-5 w-3 rounded-bl-md"
                               style={{ borderLeft: '1px solid var(--border)', borderBottom: '1px solid var(--border)' }}
@@ -573,12 +641,12 @@ export default function Sidebar({
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => onBranchSelect?.(conv.id, branch.id)}
-                                className="flex w-full items-center gap-2 rounded-lg py-1.5 pl-2 pr-14 text-left text-xs transition"
-                                style={{
-                                  background: isBranchActive ? 'var(--bg-elevated)' : 'transparent',
-                                  color: isBranchActive ? 'var(--text-primary)' : 'var(--text-muted)',
-                                }}
+                              onClick={() => onBranchSelect?.(conv.id, branch.id)}
+                              className="flex w-full items-center gap-2 rounded-lg py-1.5 pl-2 pr-12 text-left text-xs transition"
+                              style={{
+                                background: isBranchActive ? 'var(--bg-elevated)' : 'transparent',
+                                color: isBranchActive ? 'var(--text-primary)' : 'var(--text-muted)',
+                              }}
                                 onMouseEnter={e => {
                                   if (!isBranchActive) e.currentTarget.style.background = 'var(--bg-elevated)'
                                 }}
@@ -616,15 +684,53 @@ export default function Sidebar({
                                 </button>
                               </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={e => startBranchRename(e, conv, branch)}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 opacity-0 transition group-hover/branch:opacity-100"
-                                style={{ color: 'var(--text-muted)' }}
-                                title="重命名分支"
-                              >
-                                <Pencil className="h-3 w-3" />
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={e => toggleBranchMenu(e, conv.id, branch.id)}
+                                  className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 transition ${
+                                    isBranchMenuOpen ? 'opacity-100' : 'opacity-0 group-hover/branch:opacity-100'
+                                  }`}
+                                  style={{
+                                    color: 'var(--text-muted)',
+                                    background: isBranchMenuOpen ? 'var(--bg-elevated)' : 'transparent',
+                                  }}
+                                  title="分支菜单"
+                                  aria-label="分支菜单"
+                                >
+                                  <MoreHorizontal className="h-3.5 w-3.5" />
+                                </button>
+                                {isBranchMenuOpen && (
+                                  <div
+                                    className="absolute right-2 top-full z-20 mt-1 w-28 overflow-hidden rounded-xl border shadow-lg"
+                                    style={{ background: 'var(--bg-surface)', borderColor: 'var(--border)' }}
+                                    onClick={e => e.stopPropagation()}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={e => startBranchRename(e, conv, branch)}
+                                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition"
+                                      style={{ color: 'var(--text-secondary)' }}
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                      <span>重命名</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={e => promptBranchDelete(e, conv, branch)}
+                                      className="flex w-full items-center gap-2 border-t px-3 py-2 text-left text-xs transition"
+                                      style={{
+                                        color: 'var(--error-text)',
+                                        borderTopColor: 'var(--border)',
+                                        background: 'transparent',
+                                      }}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5" />
+                                      <span>删除</span>
+                                    </button>
+                                  </div>
+                                )}
+                              </>
                             )}
                           </div>
                         )
@@ -714,10 +820,23 @@ export default function Sidebar({
 
       {pendingDelete && (
         <DeleteConfirmModal
-          conv={conversations.find(c => c.id === pendingDelete)}
+          title="删除对话"
+          description={`确定要删除「${conversations.find(c => c.id === pendingDelete)?.title || '新对话'}」吗？此操作无法撤销。`}
           onConfirm={confirmDelete}
           onCancel={() => setPendingDelete(null)}
           deleting={deletingId === pendingDelete}
+          confirmLabel="删除对话"
+        />
+      )}
+
+      {pendingBranchDelete && (
+        <DeleteConfirmModal
+          title="删除分支"
+          description={`确定要删除「${pendingBranchDelete.title || '未命名分支'}」吗？该分支及其子分支和消息子树都会被删除，此操作无法撤销。`}
+          onConfirm={confirmBranchDelete}
+          onCancel={() => setPendingBranchDelete(null)}
+          deleting={deletingBranchId === pendingBranchDelete.branchId}
+          confirmLabel="删除分支"
         />
       )}
     </aside>

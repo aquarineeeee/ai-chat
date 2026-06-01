@@ -175,7 +175,17 @@ async def delete_conversation_branch(
     branches = await _load_conversation_branches(session=session, conversation_id=conversation_id)
     branch_ids_to_delete = _descendant_branch_ids(branches=branches, root_branch_id=branch.id)
     if conversation.current_branch_id in branch_ids_to_delete:
-        raise AppError(status_code=400, code="VALIDATION_ERROR", message="不能删除当前分支")
+        replacement_branch = _replacement_branch_after_delete(
+            branches=branches,
+            deleted_branch_ids=branch_ids_to_delete,
+            target_branch_id=branch.id,
+        )
+        conversation.current_branch_id = replacement_branch.id if replacement_branch is not None else None
+        conversation.current_leaf_message_id = (
+            replacement_branch.current_leaf_message_id
+            if replacement_branch is not None
+            else branch.forked_from_message_id
+        )
 
     history = await _load_conversation_messages(session=session, conversation_id=conversation_id)
     by_id = {message.id: message for message in history}
@@ -443,6 +453,34 @@ def _descendant_branch_ids(*, branches: list[ConversationBranch], root_branch_id
         stack.extend(child.id for child in by_parent.get(current_id, []))
 
     return branch_ids
+
+
+def _replacement_branch_after_delete(
+    *,
+    branches: list[ConversationBranch],
+    deleted_branch_ids: set[int],
+    target_branch_id: int,
+) -> ConversationBranch | None:
+    active_branches = [branch for branch in branches if branch.archived_at is None]
+    visible_branches = [branch for branch in active_branches if branch.parent_branch_id is not None]
+    visible_index = next((index for index, branch in enumerate(visible_branches) if branch.id == target_branch_id), None)
+
+    if visible_index is not None:
+        for branch in visible_branches[visible_index + 1 :]:
+            if branch.id not in deleted_branch_ids:
+                return branch
+        for branch in reversed(visible_branches[:visible_index]):
+            if branch.id not in deleted_branch_ids:
+                return branch
+
+    return next(
+        (
+            branch
+            for branch in active_branches
+            if branch.parent_branch_id is None and branch.id not in deleted_branch_ids
+        ),
+        None,
+    )
 
 
 def _latest_leaf_id(messages: list[Message]) -> int | None:

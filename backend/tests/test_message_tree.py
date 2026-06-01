@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
@@ -9,6 +10,8 @@ from app.models.message import Message, MessageRole, MessageStatus
 from app.services.branches import (
     _branch_message_subtree_root_id,
     _descendant_branch_ids,
+    _replacement_branch_after_delete,
+    delete_conversation_branch,
     repair_branches_after_message_delete,
 )
 from app.services.messages import _subtree_messages
@@ -101,6 +104,74 @@ class BranchRepairTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(branch_ids, {11, 12})
 
+    async def test_replacement_branch_after_delete_prefers_next_then_previous_then_main(self) -> None:
+        branches = [
+            self.make_branch(id=10, current_leaf_message_id=1, forked_from_message_id=None),
+            self.make_branch(id=11, current_leaf_message_id=2, forked_from_message_id=1, parent_branch_id=10),
+            self.make_branch(id=12, current_leaf_message_id=3, forked_from_message_id=1, parent_branch_id=10),
+            self.make_branch(id=13, current_leaf_message_id=4, forked_from_message_id=1, parent_branch_id=10),
+        ]
+
+        next_branch = _replacement_branch_after_delete(
+            branches=branches,
+            deleted_branch_ids={12},
+            target_branch_id=12,
+        )
+        previous_branch = _replacement_branch_after_delete(
+            branches=branches,
+            deleted_branch_ids={12, 13},
+            target_branch_id=12,
+        )
+        main_branch = _replacement_branch_after_delete(
+            branches=branches,
+            deleted_branch_ids={11, 12, 13},
+            target_branch_id=12,
+        )
+
+        self.assertEqual(next_branch.id, 13)
+        self.assertEqual(previous_branch.id, 11)
+        self.assertEqual(main_branch.id, 10)
+
+    async def test_delete_conversation_branch_switches_current_branch_to_replacement(self) -> None:
+        conversation = Conversation(id=123, user_id=1, title="test", current_branch_id=11, current_leaf_message_id=2)
+        target_branch = self.make_branch(
+            id=11,
+            current_leaf_message_id=2,
+            forked_from_message_id=2,
+            parent_branch_id=10,
+        )
+        next_branch = self.make_branch(
+            id=12,
+            current_leaf_message_id=3,
+            forked_from_message_id=1,
+            parent_branch_id=10,
+        )
+        main_branch = self.make_branch(
+            id=10,
+            current_leaf_message_id=1,
+            forked_from_message_id=None,
+        )
+        session = FakeDeleteSession(branches=[main_branch, target_branch, next_branch], messages=[])
+
+        with (
+            patch("app.services.branches._get_user_conversation", AsyncMock(return_value=conversation)),
+            patch("app.services.branches.get_conversation_branch", AsyncMock(return_value=target_branch)),
+            patch("app.services.branches._load_conversation_branches", AsyncMock(return_value=[main_branch, target_branch, next_branch])),
+            patch("app.services.branches._load_conversation_messages", AsyncMock(return_value=[])),
+            patch("app.services.branches.repair_branches_after_message_delete", AsyncMock()),
+        ):
+            await delete_conversation_branch(
+                session=session,
+                user_id=1,
+                conversation_id=123,
+                branch_id=11,
+            )
+
+        self.assertEqual(conversation.current_branch_id, 12)
+        self.assertEqual(conversation.current_leaf_message_id, 3)
+        self.assertIn(target_branch, session.deleted)
+        self.assertNotIn(next_branch, session.deleted)
+
     @staticmethod
     def make_branch(
         *,
@@ -135,6 +206,22 @@ class FakeSession:
 
     async def scalars(self, _stmt):
         return FakeScalarResult(self.branches)
+
+
+class FakeDeleteSession:
+    def __init__(self, branches, messages):
+        self.branches = branches
+        self.messages = messages
+        self.deleted = []
+
+    async def delete(self, item):
+        self.deleted.append(item)
+
+    async def commit(self):
+        return None
+
+    async def refresh(self, _item):
+        return None
 
 
 if __name__ == "__main__":

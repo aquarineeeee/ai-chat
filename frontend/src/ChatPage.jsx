@@ -32,6 +32,26 @@ function clampBranchPaneWidth(width, containerWidth) {
   return Math.min(Math.max(width, minWidth), maxWidth)
 }
 
+function collectBranchTreeIds(branches, rootBranchId) {
+  const byParent = new Map()
+  branches.forEach(branch => {
+    const key = branch.parent_branch_id ?? null
+    byParent.set(key, [...(byParent.get(key) || []), branch])
+  })
+
+  const ids = new Set()
+  const stack = [rootBranchId]
+  while (stack.length > 0) {
+    const branchId = stack.pop()
+    if (ids.has(branchId)) continue
+
+    ids.add(branchId)
+    const children = byParent.get(branchId) || []
+    children.forEach(child => stack.push(child.id))
+  }
+  return ids
+}
+
 function createBranchPane(sourceMessage, branch = null) {
   return {
     id: `branch-${sourceMessage.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -551,6 +571,20 @@ export default function ChatPage() {
     }))
     return updated
   }, [])
+
+  const deleteBranch = useCallback(async (conversationId, branchId) => {
+    const branches = branchesByConversation[conversationId] || []
+    const deletedBranchIds = collectBranchTreeIds(branches, branchId)
+
+    await api.deleteBranch(conversationId, branchId)
+    setBranchPanes(prev => prev.filter(pane => (
+      pane.branchId === null || !deletedBranchIds.has(pane.branchId)
+    )))
+    await loadBranches(conversationId)
+    if (activeId === conversationId) {
+      await refreshMessages(conversationId)
+    }
+  }, [activeId, branchesByConversation, loadBranches, refreshMessages])
 
   const deleteConversation = useCallback(async (id) => {
     await api.deleteConversation(id)
@@ -1213,6 +1247,7 @@ export default function ChatPage() {
           onDelete={deleteConversation}
           onRename={renameConversation}
           onRenameBranch={renameBranch}
+          onDeleteBranch={deleteBranch}
           onClose={() => setSidebarOpen(false)}
           onToggleTheme={toggle}
           onSetPalette={setPalette}
