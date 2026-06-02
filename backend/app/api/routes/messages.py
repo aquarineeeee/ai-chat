@@ -184,6 +184,7 @@ async def messages_regenerate_stream(
 async def messages_activate_branch(
     conversation_id: int,
     message_id: int,
+    exact: bool = Query(default=False),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
     ) -> ConversationMessagesResponse:
@@ -192,6 +193,7 @@ async def messages_activate_branch(
         user_id=current_user.id,
         conversation_id=conversation_id,
         message_id=message_id,
+        exact=exact,
     )
 
 

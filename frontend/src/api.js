@@ -115,8 +115,12 @@ export const api = {
   sendMessage: (convId, data) => request('POST', `/api/conversations/${convId}/messages`, data),
   regenerateMessage: (convId, messageId, data = {}) =>
     request('POST', `/api/conversations/${convId}/messages/${messageId}/regenerate`, data),
-  activateMessageBranch: (convId, messageId) =>
-    request('POST', `/api/conversations/${convId}/messages/${messageId}/activate`),
+  activateMessageBranch: (convId, messageId, params = {}) => {
+    const search = new URLSearchParams()
+    if (params.exact) search.set('exact', 'true')
+    const qs = search.toString()
+    return request('POST', `/api/conversations/${convId}/messages/${messageId}/activate${qs ? `?${qs}` : ''}`)
+  },
 
   getApiKeys: () => request('GET', '/api/keys'),
   createApiKey: (data) => request('POST', '/api/keys', data),

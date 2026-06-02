@@ -8,7 +8,8 @@ import ChatInput from './components/ChatInput'
 import EmptyState from './components/EmptyState'
 import ApiKeysModal from './components/ApiKeysModal'
 import BranchPane from './components/BranchPane'
-import { Menu, X, Loader2, AlertCircle, Download, ChevronDown } from 'lucide-react'
+import MessageTreePanel from './components/MessageTreePanel'
+import { Menu, X, Loader2, AlertCircle, Download, ChevronDown, Network } from 'lucide-react'
 
 const DEFAULT_BRANCH_PANE_WIDTH = 440
 const MIN_BRANCH_PANE_WIDTH = 280
@@ -125,6 +126,8 @@ export default function ChatPage() {
   const [branchesByConversation, setBranchesByConversation] = useState({})
   const [loadingBranches, setLoadingBranches] = useState({})
   const [branchPanes, setBranchPanes] = useState([])
+  const [messageTreeOpen, setMessageTreeOpen] = useState(false)
+  const [messageTreeRefreshToken, setMessageTreeRefreshToken] = useState(0)
   const [branchPaneWidth, setBranchPaneWidth] = useState(() => {
     if (typeof window === 'undefined') return DEFAULT_BRANCH_PANE_WIDTH
     const storedWidth = Number(window.localStorage.getItem(BRANCH_PANE_WIDTH_STORAGE_KEY))
@@ -255,6 +258,7 @@ export default function ChatPage() {
     const data = await api.getMessages(conversationId)
     setMessages(data?.items || [])
     patchConversationBranchState(conversationId, data)
+    setMessageTreeRefreshToken(token => token + 1)
     return data
   }, [patchConversationBranchState])
 
@@ -918,6 +922,27 @@ export default function ChatPage() {
     }
   }, [activeId, loadBranches, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
+  const activateMessageTreePath = useCallback(async (messageId) => {
+    if (!activeId || !messageId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
+    setError('')
+    setSwitchingSiblingMessageId(messageId)
+    try {
+      await api.activateMessageBranch(activeId, messageId, { exact: true })
+      await refreshMessages(activeId)
+      await loadBranches(activeId)
+    } catch (e) {
+      setError(e.message || '切换 path 失败，请重试')
+      throw e
+    } finally {
+      setSwitchingSiblingMessageId(null)
+    }
+  }, [activeId, loadBranches, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+
+  const openBranchPaneFromTree = useCallback(async (message) => {
+    await openBranchPane(message)
+    setMessageTreeOpen(false)
+  }, [openBranchPane])
+
   const deleteMainMessage = useCallback(async (messageId) => {
     if (
       !activeId
@@ -1290,6 +1315,18 @@ export default function ChatPage() {
                 {activeConv.model}
               </span>
             )}
+            <button
+              type="button"
+              onClick={() => activeConv && setMessageTreeOpen(true)}
+              disabled={!activeConv}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+              style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
+              aria-label="消息树"
+              title="消息树"
+            >
+              <Network className="w-4 h-4" />
+              <span className="hidden text-sm sm:inline">消息树</span>
+            </button>
             <div className="relative shrink-0" ref={exportMenuRef}>
               <button
                 type="button"
@@ -1499,6 +1536,16 @@ export default function ChatPage() {
           </div>
         </div>
       </div>
+
+      <MessageTreePanel
+        open={messageTreeOpen}
+        conversationId={activeId}
+        conversationTitle={activeConv?.title || 'AI Chat'}
+        refreshToken={messageTreeRefreshToken}
+        onClose={() => setMessageTreeOpen(false)}
+        onActivatePath={activateMessageTreePath}
+        onOpenBranch={openBranchPaneFromTree}
+      />
 
       {keysOpen && (
         <ApiKeysModal

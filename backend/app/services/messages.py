@@ -176,6 +176,7 @@ async def activate_message_branch(
     user_id: int,
     conversation_id: int,
     message_id: int,
+    exact: bool = False,
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
@@ -183,7 +184,7 @@ async def activate_message_branch(
     if target_message is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="消息不存在")
 
-    selected_leaf_message_id = _resolve_branch_leaf_message_id(history, target_message.id)
+    selected_leaf_message_id = target_message.id if exact else _resolve_branch_leaf_message_id(history, target_message.id)
     conversation.current_leaf_message_id = selected_leaf_message_id
     current_branch = await resolve_branch_for_write(
         session=session,
