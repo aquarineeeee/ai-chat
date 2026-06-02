@@ -18,9 +18,13 @@ from app.providers import (
 )
 from app.schemas.message import (
     ConversationMessagesResponse,
+    ConversationMessageTreeResponse,
     MessageEditRequest,
     MessageEditResponse,
     MessageCreateRequest,
+    MessageTreeBranchMarkerResponse,
+    MessageTreeEdgeResponse,
+    MessageTreeNodeResponse,
     MessageNodeResponse,
     MessageRegenerateRequest,
     MessageRegenerateResponse,
@@ -32,6 +36,9 @@ from app.services.branches import (
     resolve_branch_for_write,
 )
 from app.services.conversations import get_conversation
+
+
+MESSAGE_TREE_PREVIEW_LENGTH = 100
 
 
 async def list_conversation_messages(
@@ -86,6 +93,81 @@ async def list_conversation_messages(
         current_branch_id=selected_branch_id,
         current_leaf_message_id=selected_leaf_message_id,
         items=[_serialize_message_node(item, sibling_map=sibling_map) for item in visible_messages],
+    )
+
+
+async def get_conversation_message(
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    message_id: int,
+) -> MessageNodeResponse:
+    await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    message = await _ensure_message_belongs_to_conversation(
+        session=session,
+        conversation_id=conversation_id,
+        message_id=message_id,
+    )
+    history = await _load_conversation_history(session=session, conversation_id=conversation_id)
+    sibling_map = _build_sibling_meta_map(history)
+    return _serialize_message_node(message, sibling_map=sibling_map)
+
+
+async def get_conversation_message_tree(
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+) -> ConversationMessageTreeResponse:
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    branches = await _load_conversation_branches(session=session, conversation_id=conversation.id)
+
+    by_id = {message.id: message for message in history}
+    children_by_parent: dict[int | None, list[Message]] = defaultdict(list)
+    for message in history:
+        children_by_parent[message.parent_id].append(message)
+
+    sibling_map = _build_sibling_meta_map(history)
+    active_path = _lineage_ids(by_id, conversation.current_leaf_message_id) if conversation.current_leaf_message_id else []
+    active_path_set = set(active_path)
+    active_edges = {
+        (active_path[index - 1], active_path[index])
+        for index in range(1, len(active_path))
+    }
+    branch_markers = _build_message_tree_branch_markers(
+        branches=branches,
+        current_branch_id=conversation.current_branch_id,
+    )
+
+    nodes = [
+        _serialize_message_tree_node(
+            message,
+            sibling_map=sibling_map,
+            child_count=len(children_by_parent.get(message.id, [])),
+            is_active_path=message.id in active_path_set,
+            is_current_leaf=message.id == conversation.current_leaf_message_id,
+            branch_markers=branch_markers.get(message.id, []),
+        )
+        for message in history
+    ]
+    edges = [
+        MessageTreeEdgeResponse(
+            id=f"edge-{message.parent_id}-{message.id}",
+            source=message.parent_id,
+            target=message.id,
+            is_active_path=(message.parent_id, message.id) in active_edges,
+        )
+        for message in history
+        if message.parent_id is not None and message.parent_id in by_id
+    ]
+
+    return ConversationMessageTreeResponse(
+        conversation_id=conversation.id,
+        current_branch_id=conversation.current_branch_id,
+        current_leaf_message_id=conversation.current_leaf_message_id,
+        active_path=active_path,
+        nodes=nodes,
+        edges=edges,
     )
 
 
@@ -828,6 +910,19 @@ async def _load_current_branch(
     )
 
 
+async def _load_conversation_branches(
+    *,
+    session: AsyncSession,
+    conversation_id: int,
+) -> list[ConversationBranch]:
+    result = await session.scalars(
+        select(ConversationBranch)
+        .where(ConversationBranch.conversation_id == conversation_id)
+        .order_by(ConversationBranch.created_at.asc(), ConversationBranch.id.asc())
+    )
+    return list(result.all())
+
+
 def _subtree_messages(messages: list[Message], root_message_id: int) -> list[Message]:
     by_id = {item.id: item for item in messages}
     by_parent: dict[int | None, list[Message]] = defaultdict(list)
@@ -960,6 +1055,75 @@ def _serialize_message_node(
             "next_sibling_id": next_sibling_id,
         }
     )
+
+
+def _serialize_message_tree_node(
+    message: Message,
+    *,
+    sibling_map: dict[int, tuple[int, int, int | None, int | None]],
+    child_count: int,
+    is_active_path: bool,
+    is_current_leaf: bool,
+    branch_markers: list[MessageTreeBranchMarkerResponse],
+) -> MessageTreeNodeResponse:
+    sibling_index, sibling_count, _, _ = sibling_map.get(message.id, (1, 1, None, None))
+    return MessageTreeNodeResponse(
+        id=message.id,
+        conversation_id=message.conversation_id,
+        parent_id=message.parent_id,
+        role=message.role,
+        preview=_message_tree_preview(message.content),
+        status=message.status,
+        provider=message.provider,
+        model=message.model,
+        created_at=message.created_at,
+        updated_at=message.updated_at,
+        sibling_index=sibling_index,
+        sibling_count=sibling_count,
+        child_count=child_count,
+        is_leaf=child_count == 0,
+        is_active_path=is_active_path,
+        is_current_leaf=is_current_leaf,
+        branch_markers=branch_markers,
+    )
+
+
+def _build_message_tree_branch_markers(
+    *,
+    branches: list[ConversationBranch],
+    current_branch_id: int | None,
+) -> dict[int, list[MessageTreeBranchMarkerResponse]]:
+    markers: dict[int, list[MessageTreeBranchMarkerResponse]] = defaultdict(list)
+    for branch in branches:
+        is_current_branch = branch.id == current_branch_id
+        if branch.forked_from_message_id is not None:
+            markers[branch.forked_from_message_id].append(
+                MessageTreeBranchMarkerResponse(
+                    id=branch.id,
+                    title=branch.title,
+                    auto_title=branch.auto_title,
+                    marker_type="fork",
+                    is_current_branch=is_current_branch,
+                )
+            )
+        if branch.current_leaf_message_id is not None:
+            markers[branch.current_leaf_message_id].append(
+                MessageTreeBranchMarkerResponse(
+                    id=branch.id,
+                    title=branch.title,
+                    auto_title=branch.auto_title,
+                    marker_type="leaf",
+                    is_current_branch=is_current_branch,
+                )
+            )
+    return markers
+
+
+def _message_tree_preview(content: str) -> str:
+    compact = " ".join((content or "").split())
+    if len(compact) <= MESSAGE_TREE_PREVIEW_LENGTH:
+        return compact
+    return compact[:MESSAGE_TREE_PREVIEW_LENGTH]
 
 
 def _resolve_branch_leaf_message_id(messages: list[Message], root_message_id: int) -> int:

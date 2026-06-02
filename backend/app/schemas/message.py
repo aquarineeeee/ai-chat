@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.message import MessageRole, MessageStatus
 
@@ -61,6 +61,50 @@ class MessageNodeResponse(BaseModel):
     sibling_count: int = 1
     previous_sibling_id: int | None = None
     next_sibling_id: int | None = None
+
+
+class MessageTreeBranchMarkerResponse(BaseModel):
+    id: int
+    title: str | None = None
+    auto_title: str | None = None
+    marker_type: Literal["fork", "leaf"]
+    is_current_branch: bool = False
+
+
+class MessageTreeNodeResponse(BaseModel):
+    id: int
+    conversation_id: int
+    parent_id: int | None
+    role: MessageRole
+    preview: str
+    status: MessageStatus
+    provider: str | None
+    model: str | None
+    created_at: datetime
+    updated_at: datetime
+    sibling_index: int = 1
+    sibling_count: int = 1
+    child_count: int = 0
+    is_leaf: bool = True
+    is_active_path: bool = False
+    is_current_leaf: bool = False
+    branch_markers: list[MessageTreeBranchMarkerResponse] = Field(default_factory=list)
+
+
+class MessageTreeEdgeResponse(BaseModel):
+    id: str
+    source: int
+    target: int
+    is_active_path: bool = False
+
+
+class ConversationMessageTreeResponse(BaseModel):
+    conversation_id: int
+    current_branch_id: int | None = None
+    current_leaf_message_id: int | None = None
+    active_path: list[int]
+    nodes: list[MessageTreeNodeResponse]
+    edges: list[MessageTreeEdgeResponse]
 
 
 class ConversationMessagesResponse(BaseModel):

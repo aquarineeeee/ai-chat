@@ -11,8 +11,10 @@ from app.models.user import User
 from app.schemas.message import (
     MessageEditRequest,
     MessageEditResponse,
+    ConversationMessageTreeResponse,
     ConversationMessagesResponse,
     MessageCreateRequest,
+    MessageNodeResponse,
     MessageRegenerateRequest,
     MessageRegenerateResponse,
     MessageSendResponse,
@@ -23,6 +25,8 @@ from app.services.messages import (
     create_message_stream,
     delete_message,
     edit_message,
+    get_conversation_message,
+    get_conversation_message_tree,
     list_conversation_messages,
     regenerate_message,
     regenerate_message_stream,
@@ -48,6 +52,34 @@ async def messages_index(
         leaf_message_id=leaf_message_id,
         root_message_id=root_message_id,
         expand_leaf_descendants=expand_leaf_descendants,
+    )
+
+
+@router.get("/conversations/{conversation_id}/message-tree", response_model=ConversationMessageTreeResponse)
+async def messages_tree(
+    conversation_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> ConversationMessageTreeResponse:
+    return await get_conversation_message_tree(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+    )
+
+
+@router.get("/conversations/{conversation_id}/messages/{message_id}", response_model=MessageNodeResponse)
+async def messages_show(
+    conversation_id: int,
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> MessageNodeResponse:
+    return await get_conversation_message(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        message_id=message_id,
     )
 
 
