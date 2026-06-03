@@ -590,6 +590,15 @@ export default function ChatPage() {
     }
   }, [activeId, branchesByConversation, loadBranches, refreshMessages])
 
+  const archiveBranch = useCallback(async (conversationId, branchId) => {
+    await api.archiveBranch(conversationId, branchId)
+    setBranchPanes(prev => prev.filter(pane => pane.branchId !== branchId))
+    await loadBranches(conversationId)
+    if (activeId === conversationId) {
+      await refreshMessages(conversationId)
+    }
+  }, [activeId, loadBranches, refreshMessages])
+
   const deleteConversation = useCallback(async (id) => {
     await api.deleteConversation(id)
     const remaining = conversations.filter(c => c.id !== id)
@@ -1542,9 +1551,16 @@ export default function ChatPage() {
         conversationId={activeId}
         conversationTitle={activeConv?.title || 'AI Chat'}
         refreshToken={messageTreeRefreshToken}
+        branches={activeId ? (branchesByConversation[activeId] || []) : []}
+        currentBranchId={activeConv?.current_branch_id ?? null}
+        branchesLoading={activeId ? !!loadingBranches[activeId] : false}
         onClose={() => setMessageTreeOpen(false)}
         onActivatePath={activateMessageTreePath}
         onOpenBranch={openBranchPaneFromTree}
+        onActivateBranch={branchId => activateBranch(activeId, branchId)}
+        onRenameBranch={(branchId, title) => renameBranch(activeId, branchId, title)}
+        onArchiveBranch={branchId => archiveBranch(activeId, branchId)}
+        onDeleteBranch={branchId => deleteBranch(activeId, branchId)}
       />
 
       {keysOpen && (

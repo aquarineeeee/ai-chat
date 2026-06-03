@@ -32,6 +32,7 @@ from app.schemas.message import (
 )
 from app.services.api_keys import get_preferred_api_key
 from app.services.branches import (
+    _branch_message_subtree_root_id,
     repair_branches_after_message_delete,
     resolve_branch_for_write,
 )
@@ -39,6 +40,7 @@ from app.services.conversations import get_conversation
 
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
+MESSAGE_TREE_MAX_NODES = 400
 
 
 async def list_conversation_messages(
@@ -51,7 +53,6 @@ async def list_conversation_messages(
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    selected_branch_id = conversation.current_branch_id
 
     if root_message_id is not None:
         await _ensure_message_belongs_to_conversation(
@@ -81,16 +82,30 @@ async def list_conversation_messages(
             else conversation.current_leaf_message_id
         )
 
+    return _build_messages_response(
+        conversation=conversation,
+        history=history,
+        selected_leaf_message_id=selected_leaf_message_id,
+        root_message_id=root_message_id,
+    )
+
+
+def _build_messages_response(
+    *,
+    conversation: Conversation,
+    history: list[Message],
+    selected_leaf_message_id: int | None,
+    root_message_id: int | None = None,
+) -> ConversationMessagesResponse:
     sibling_map = _build_sibling_meta_map(history)
     visible_messages = _visible_conversation_messages(
         history,
         selected_leaf_message_id,
         root_message_id=root_message_id,
     )
-
     return ConversationMessagesResponse(
         conversation_id=conversation.id,
-        current_branch_id=selected_branch_id,
+        current_branch_id=conversation.current_branch_id,
         current_leaf_message_id=selected_leaf_message_id,
         items=[_serialize_message_node(item, sibling_map=sibling_map) for item in visible_messages],
     )
@@ -120,7 +135,11 @@ async def get_conversation_message_tree(
 ) -> ConversationMessageTreeResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    branches = await _load_conversation_branches(session=session, conversation_id=conversation.id)
+    branches = await _load_conversation_branches(
+        session=session,
+        conversation_id=conversation.id,
+        include_archived=False,
+    )
 
     by_id = {message.id: message for message in history}
     children_by_parent: dict[int | None, list[Message]] = defaultdict(list)
@@ -130,6 +149,23 @@ async def get_conversation_message_tree(
     sibling_map = _build_sibling_meta_map(history)
     active_path = _lineage_ids(by_id, conversation.current_leaf_message_id) if conversation.current_leaf_message_id else []
     active_path_set = set(active_path)
+
+    anchor_leaf_ids: set[int] = set(active_path)
+    for branch in branches:
+        if branch.current_leaf_message_id is not None:
+            anchor_leaf_ids.add(branch.current_leaf_message_id)
+        if branch.forked_from_message_id is not None:
+            anchor_leaf_ids.add(branch.forked_from_message_id)
+
+    selected = _select_tree_messages(
+        history,
+        by_id=by_id,
+        max_nodes=MESSAGE_TREE_MAX_NODES,
+        anchor_leaf_ids=anchor_leaf_ids,
+    )
+    selected_ids = {message.id for message in selected}
+    truncated = len(selected) < len(history)
+
     active_edges = {
         (active_path[index - 1], active_path[index])
         for index in range(1, len(active_path))
@@ -148,7 +184,7 @@ async def get_conversation_message_tree(
             is_current_leaf=message.id == conversation.current_leaf_message_id,
             branch_markers=branch_markers.get(message.id, []),
         )
-        for message in history
+        for message in selected
     ]
     edges = [
         MessageTreeEdgeResponse(
@@ -157,8 +193,8 @@ async def get_conversation_message_tree(
             target=message.id,
             is_active_path=(message.parent_id, message.id) in active_edges,
         )
-        for message in history
-        if message.parent_id is not None and message.parent_id in by_id
+        for message in selected
+        if message.parent_id is not None and message.parent_id in selected_ids
     ]
 
     return ConversationMessageTreeResponse(
@@ -168,6 +204,8 @@ async def get_conversation_message_tree(
         active_path=active_path,
         nodes=nodes,
         edges=edges,
+        truncated=truncated,
+        total_node_count=len(history),
     )
 
 
@@ -180,24 +218,43 @@ async def activate_message_branch(
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    target_message = next((item for item in history if item.id == message_id), None)
+    by_id = {item.id: item for item in history}
+    target_message = by_id.get(message_id)
     if target_message is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="消息不存在")
 
     selected_leaf_message_id = target_message.id if exact else _resolve_branch_leaf_message_id(history, target_message.id)
-    conversation.current_leaf_message_id = selected_leaf_message_id
-    current_branch = await resolve_branch_for_write(
+
+    branches = await _load_conversation_branches(
         session=session,
-        conversation=conversation,
-        branch_id=None,
-        activate_branch=True,
+        conversation_id=conversation.id,
+        include_archived=False,
     )
-    if current_branch is not None:
-        current_branch.current_leaf_message_id = selected_leaf_message_id
-        conversation.current_branch_id = current_branch.id
+    owning_branch = _resolve_owning_branch(
+        branches=branches,
+        by_id=by_id,
+        leaf_message_id=selected_leaf_message_id,
+    )
+    if owning_branch is None:
+        owning_branch = await resolve_branch_for_write(
+            session=session,
+            conversation=conversation,
+            branch_id=None,
+            activate_branch=True,
+        )
+
+    if owning_branch is not None:
+        owning_branch.current_leaf_message_id = selected_leaf_message_id
+        conversation.current_branch_id = owning_branch.id
+    conversation.current_leaf_message_id = selected_leaf_message_id
+
     await session.commit()
     await session.refresh(conversation)
-    return await list_conversation_messages(session=session, user_id=user_id, conversation_id=conversation_id)
+    return _build_messages_response(
+        conversation=conversation,
+        history=history,
+        selected_leaf_message_id=selected_leaf_message_id,
+    )
 
 
 async def delete_message(
@@ -337,6 +394,7 @@ async def create_message_pair(
         user_message=context["user_message"],
         assistant_message=context["assistant_message"],
         selected_leaf_message_id=context["assistant_message"].id,
+        history=context["history"],
     )
 
 
@@ -447,6 +505,7 @@ async def regenerate_message(
         replaced_message=context["target_message"],
         assistant_message=context["assistant_message"],
         selected_leaf_message_id=context["assistant_message"].id,
+        history=context["history"],
     )
 
 
@@ -577,6 +636,9 @@ async def _prepare_generation(
         temperature=temperature,
         max_tokens=max_tokens,
     )
+    # Both new messages are flushed above, so this snapshot includes them and can
+    # be reused for the response (expire_on_commit=False keeps the objects live).
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
     prompt_messages = await _build_prompt_messages(
         session=session,
         conversation=conversation,
@@ -584,12 +646,14 @@ async def _prepare_generation(
         user_content=payload.content,
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
+        history=history,
     )
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
         "branch": branch,
         "conversation": conversation,
+        "history": history,
         "max_tokens": max_tokens,
         "model": model,
         "prompt_messages": prompt_messages,
@@ -661,18 +725,23 @@ async def _prepare_regeneration(
         temperature=temperature,
         max_tokens=max_tokens,
     )
+    # Assistant placeholder is flushed above, so this snapshot includes it and can
+    # be reused for the response (expire_on_commit=False keeps the objects live).
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
     prompt_messages = await _build_prompt_messages(
         session=session,
         conversation=conversation,
         parent_id=parent_id,
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
+        history=history,
     )
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
         "branch": branch,
         "conversation": conversation,
+        "history": history,
         "max_tokens": max_tokens,
         "model": model,
         "prompt_messages": prompt_messages,
@@ -690,12 +759,14 @@ async def _build_prompt_messages(
     user_content: str | None = None,
     context_mode: str = "full",
     context_root_message_id: int | None = None,
+    history: list[Message] | None = None,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     if conversation.system_prompt:
         messages.append({"role": "system", "content": conversation.system_prompt})
 
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    if history is None:
+        history = await _load_conversation_history(session=session, conversation_id=conversation.id)
     by_id = {item.id: item for item in history}
 
     if context_mode == "root_only":
@@ -830,11 +901,11 @@ async def _build_send_response(
     user_message: Message,
     assistant_message: Message,
     selected_leaf_message_id: int,
+    history: list[Message],
 ) -> MessageSendResponse:
     await session.refresh(user_message)
     await session.refresh(assistant_message)
     await session.refresh(conversation)
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
     sibling_map = _build_sibling_meta_map(history)
     return MessageSendResponse(
         conversation_id=conversation.id,
@@ -852,10 +923,10 @@ async def _build_regenerate_response(
     replaced_message: Message,
     assistant_message: Message,
     selected_leaf_message_id: int,
+    history: list[Message],
 ) -> MessageRegenerateResponse:
     await session.refresh(assistant_message)
     await session.refresh(conversation)
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
     sibling_map = _build_sibling_meta_map(history)
     return MessageRegenerateResponse(
         conversation_id=conversation.id,
@@ -915,11 +986,13 @@ async def _load_conversation_branches(
     *,
     session: AsyncSession,
     conversation_id: int,
+    include_archived: bool = True,
 ) -> list[ConversationBranch]:
+    stmt = select(ConversationBranch).where(ConversationBranch.conversation_id == conversation_id)
+    if not include_archived:
+        stmt = stmt.where(ConversationBranch.archived_at.is_(None))
     result = await session.scalars(
-        select(ConversationBranch)
-        .where(ConversationBranch.conversation_id == conversation_id)
-        .order_by(ConversationBranch.created_at.asc(), ConversationBranch.id.asc())
+        stmt.order_by(ConversationBranch.created_at.asc(), ConversationBranch.id.asc())
     )
     return list(result.all())
 
@@ -1032,10 +1105,16 @@ def _build_sibling_meta_map(messages: list[Message]) -> dict[int, tuple[int, int
     sibling_map: dict[int, tuple[int, int, int | None, int | None]] = {}
     for siblings in siblings_by_parent.values():
         total = len(siblings)
-        for index, message in enumerate(siblings, start=1):
-            previous_id = siblings[index - 2].id if total > 1 and index > 1 else (siblings[-1].id if total > 1 else None)
-            next_id = siblings[index].id if total > 1 and index < total else (siblings[0].id if total > 1 else None)
-            sibling_map[message.id] = (index, total, previous_id, next_id)
+        for position, message in enumerate(siblings):
+            # prev/next wrap around so sibling navigation is circular; a single
+            # child has no siblings to move to.
+            if total > 1:
+                previous_id = siblings[position - 1].id
+                next_id = siblings[(position + 1) % total].id
+            else:
+                previous_id = None
+                next_id = None
+            sibling_map[message.id] = (position + 1, total, previous_id, next_id)
     return sibling_map
 
 
@@ -1075,6 +1154,7 @@ def _serialize_message_tree_node(
         role=message.role,
         preview=_message_tree_preview(message.content),
         status=message.status,
+        error_message=message.error_message,
         provider=message.provider,
         model=message.model,
         created_at=message.created_at,
@@ -1124,7 +1204,76 @@ def _message_tree_preview(content: str) -> str:
     compact = " ".join((content or "").split())
     if len(compact) <= MESSAGE_TREE_PREVIEW_LENGTH:
         return compact
-    return compact[:MESSAGE_TREE_PREVIEW_LENGTH]
+    return compact[:MESSAGE_TREE_PREVIEW_LENGTH].rstrip() + "…"
+
+
+def _select_tree_messages(
+    messages: list[Message],
+    *,
+    by_id: dict[int, Message],
+    max_nodes: int,
+    anchor_leaf_ids: set[int],
+) -> list[Message]:
+    """Pick at most ``max_nodes`` messages to render in the tree.
+
+    Connectivity wins over the cap: the full ancestor lineage of every anchor
+    leaf (active path, each branch's leaf and fork point) is always kept so no
+    important node ends up detached from a root. Any remaining budget is filled
+    with the most recent messages. The cap may be exceeded only when the anchor
+    lineages alone are larger than it. Output keeps the input ordering.
+    """
+    if len(messages) <= max_nodes:
+        return messages
+
+    keep_ids: set[int] = set()
+    for leaf_id in anchor_leaf_ids:
+        keep_ids.update(_lineage_ids(by_id, leaf_id))
+
+    if len(keep_ids) < max_nodes:
+        for message in reversed(messages):
+            if len(keep_ids) >= max_nodes:
+                break
+            keep_ids.add(message.id)
+
+    return [message for message in messages if message.id in keep_ids]
+
+
+def _resolve_owning_branch(
+    *,
+    branches: list[ConversationBranch],
+    by_id: dict[int, Message],
+    leaf_message_id: int | None,
+) -> ConversationBranch | None:
+    """Find the branch that owns ``leaf_message_id``.
+
+    A non-main branch owns the leaf when the branch's first unique message
+    (the child of its fork point) is an ancestor of the leaf. The deepest such
+    fork point wins, so the most specific branch is chosen. The main branch
+    (no fork point) is the fallback owner when no child branch claims the leaf.
+    """
+    if leaf_message_id is None:
+        return None
+
+    lineage_ids = _lineage_ids(by_id, leaf_message_id)
+    depth_by_message = {message_id: depth for depth, message_id in enumerate(lineage_ids)}
+
+    best_branch: ConversationBranch | None = None
+    best_depth = -1
+    main_branch: ConversationBranch | None = None
+    for branch in branches:
+        if branch.forked_from_message_id is None:
+            if main_branch is None:
+                main_branch = branch
+            continue
+        subtree_root_id = _branch_message_subtree_root_id(branch=branch, by_id=by_id)
+        if subtree_root_id is None:
+            continue
+        depth = depth_by_message.get(subtree_root_id)
+        if depth is not None and depth > best_depth:
+            best_depth = depth
+            best_branch = branch
+
+    return best_branch or main_branch
 
 
 def _resolve_branch_leaf_message_id(messages: list[Message], root_message_id: int) -> int:

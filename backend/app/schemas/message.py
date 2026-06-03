@@ -78,6 +78,7 @@ class MessageTreeNodeResponse(BaseModel):
     role: MessageRole
     preview: str
     status: MessageStatus
+    error_message: str | None = None
     provider: str | None
     model: str | None
     created_at: datetime
@@ -105,6 +106,8 @@ class ConversationMessageTreeResponse(BaseModel):
     active_path: list[int]
     nodes: list[MessageTreeNodeResponse]
     edges: list[MessageTreeEdgeResponse]
+    truncated: bool = False
+    total_node_count: int = 0
 
 
 class ConversationMessagesResponse(BaseModel):
