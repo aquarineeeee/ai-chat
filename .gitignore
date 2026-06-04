@@ -31,11 +31,7 @@ dist/
 .DS_Store
 Thumbs.db
 Desktop.ini
-docs/plan.md
-docs/markdown-conversation-import.md
-docs/conversation-tree-export.md
-docs/devdiary.md
-docs/branch-entity-handoff.md
+docs/local/
 
 # Build outputs
 /backend/static/
