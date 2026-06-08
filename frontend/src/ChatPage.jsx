@@ -83,6 +83,11 @@ const EXPORT_OPTIONS = [
   { key: 'json-all_branches', label: 'JSON · 全部分支', format: 'json', scope: 'all_branches' },
 ]
 
+const PROVIDER_OPTIONS = [
+  { value: 'openai', label: 'OpenAI-compatible' },
+  { value: 'anthropic', label: 'Anthropic' },
+]
+
 function sortConversations(items) {
   return [...items].sort((a, b) => {
     const timeA = new Date(a.updated_at || a.created_at || 0).getTime()
@@ -120,6 +125,7 @@ export default function ChatPage() {
   const [loadingModels, setLoadingModels] = useState(false)
   const [savingModel, setSavingModel] = useState(false)
   const [modelError, setModelError] = useState('')
+  const [pendingProvider, setPendingProvider] = useState('openai')
   const [pendingModel, setPendingModel] = useState('')
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
@@ -474,20 +480,22 @@ export default function ChatPage() {
 
   useEffect(() => {
     queueMicrotask(() => {
+      setPendingProvider(activeConv?.provider || 'openai')
       setPendingModel(activeConv?.model || '')
       setModelError('')
     })
-  }, [activeId, activeConv?.model])
+  }, [activeId, activeConv?.model, activeConv?.provider])
 
   useEffect(() => {
-    const provider = activeConv?.provider || 'openai'
+    const provider = activeConv?.provider || pendingProvider || 'openai'
     queueMicrotask(() => {
       void loadProviderModels(provider)
     })
-  }, [activeConv?.provider, loadProviderModels])
+  }, [activeConv?.provider, loadProviderModels, pendingProvider])
 
-  const createConversation = useCallback(async (title = '新对话', model = undefined) => {
+  const createConversation = useCallback(async (title = '新对话', model = undefined, provider = undefined) => {
     const payload = { title }
+    if (provider) payload.provider = provider
     if (model) payload.model = model
     const conv = await api.createConversation(payload)
     setConversations(prev => [conv, ...prev])
@@ -648,6 +656,29 @@ export default function ChatPage() {
     }
   }, [activeConv])
 
+  const changeConversationProvider = useCallback(async (nextProvider) => {
+    setPendingProvider(nextProvider)
+    setPendingModel('')
+    setModelError('')
+    void loadProviderModels(nextProvider)
+
+    if (!activeConv || !nextProvider || nextProvider === activeConv.provider) {
+      return
+    }
+
+    setSavingModel(true)
+    try {
+      const updated = await api.updateConversation(activeConv.id, { provider: nextProvider, model: null })
+      setConversations(prev => sortConversations(prev.map(conv => (conv.id === updated.id ? updated : conv))))
+    } catch (e) {
+      setPendingProvider(activeConv.provider || 'openai')
+      setPendingModel(activeConv.model || '')
+      setModelError(e.message || '保存 Provider 失败')
+    } finally {
+      setSavingModel(false)
+    }
+  }, [activeConv, loadProviderModels])
+
   const openBranchPane = useCallback(async (sourceMessage, paneIdToMark = null) => {
     if (!activeId || sourceMessage?.role !== 'assistant') return
 
@@ -752,7 +783,7 @@ export default function ChatPage() {
     let branchId = activeConv?.current_branch_id ?? null
     if (!convId) {
       try {
-        const conv = await createConversation(content.slice(0, 40), pendingModel || undefined)
+        const conv = await createConversation(content.slice(0, 40), pendingModel || undefined, pendingProvider || undefined)
         convId = conv.id
         branchId = conv.current_branch_id ?? null
       } catch {
@@ -839,7 +870,7 @@ export default function ChatPage() {
       setSending(false)
       setStreamingContent('')
     }
-  }, [activeConv, activeId, createConversation, loadBranches, pendingModel, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, createConversation, loadBranches, pendingModel, pendingProvider, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const regenerateMainMessage = useCallback(async (messageId) => {
     if (!activeId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -1465,12 +1496,15 @@ export default function ChatPage() {
               <ChatInput
                 onSend={sendMessage}
                 disabled={mainBusy}
+                providerValue={pendingProvider}
+                providerOptions={PROVIDER_OPTIONS}
                 modelValue={pendingModel}
                 modelOptions={modelChoices}
-                modelProvider={activeConv?.provider || 'openai'}
+                modelProvider={pendingProvider}
                 modelLoading={loadingModels}
                 modelSaving={savingModel}
                 modelError={modelError}
+                onProviderChange={changeConversationProvider}
                 onModelChange={changeConversationModel}
               />
             </div>
@@ -1529,12 +1563,15 @@ export default function ChatPage() {
                         onCreateBranch={message => openBranchPane(message, pane.id)}
                         onPrevSibling={message => switchBranchPaneSibling(pane.id, message.previous_sibling_id)}
                         onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}
+                        providerValue={pendingProvider}
+                        providerOptions={PROVIDER_OPTIONS}
                         modelValue={pendingModel}
                         modelOptions={modelChoices}
-                        modelProvider={activeConv?.provider || 'openai'}
+                        modelProvider={pendingProvider}
                         modelLoading={loadingModels}
                         modelSaving={savingModel}
                         modelError={modelError}
+                        onProviderChange={changeConversationProvider}
                         onModelChange={changeConversationModel}
                       />
                     </div>

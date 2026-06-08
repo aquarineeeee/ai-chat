@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -12,8 +13,10 @@ from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
 from app.providers import (
+    create_anthropic_reply,
     create_openai_compatible_reply,
     generate_mock_reply,
+    stream_anthropic_reply,
     stream_openai_compatible_reply,
 )
 from app.schemas.message import (
@@ -37,6 +40,7 @@ from app.services.branches import (
     resolve_branch_for_write,
 )
 from app.services.conversations import get_conversation
+from app.services.memory_mcp import search_memory, write_memory
 
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
@@ -387,6 +391,7 @@ async def create_message_pair(
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
         activate_branch=context["activate_branch"],
+        memory_user_content=context["memory_user_content"],
     )
     return await _build_send_response(
         session=session,
@@ -446,6 +451,7 @@ async def create_message_stream(
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
             activate_branch=context["activate_branch"],
+            memory_user_content=context["memory_user_content"],
         )
 
     return iterator()
@@ -498,6 +504,7 @@ async def regenerate_message(
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
         activate_branch=context["activate_branch"],
+        memory_user_content=context["memory_user_content"],
     )
     return await _build_regenerate_response(
         session=session,
@@ -564,6 +571,7 @@ async def regenerate_message_stream(
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
             activate_branch=context["activate_branch"],
+            memory_user_content=context["memory_user_content"],
         )
 
     return iterator()
@@ -655,6 +663,7 @@ async def _prepare_generation(
         "conversation": conversation,
         "history": history,
         "max_tokens": max_tokens,
+        "memory_user_content": payload.content,
         "model": model,
         "prompt_messages": prompt_messages,
         "provider": provider,
@@ -736,6 +745,7 @@ async def _prepare_regeneration(
         context_root_message_id=context_root_message_id,
         history=history,
     )
+    by_id = {item.id: item for item in history}
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
@@ -743,6 +753,12 @@ async def _prepare_regeneration(
         "conversation": conversation,
         "history": history,
         "max_tokens": max_tokens,
+        "memory_user_content": _resolve_memory_user_content(
+            history=history,
+            by_id=by_id,
+            target_message=target_message,
+            parent_id=parent_id,
+        ),
         "model": model,
         "prompt_messages": prompt_messages,
         "provider": provider,
@@ -764,6 +780,14 @@ async def _build_prompt_messages(
     messages: list[dict[str, str]] = []
     if conversation.system_prompt:
         messages.append({"role": "system", "content": conversation.system_prompt})
+
+    memory_query = user_content.strip() if user_content else None
+    if memory_query is None and history is not None:
+        memory_query = _latest_user_content(history=history, parent_id=parent_id)
+    if memory_query:
+        memory_context = await search_memory(query=memory_query)
+        if memory_context:
+            messages.append({"role": "system", "content": memory_context})
 
     if history is None:
         history = await _load_conversation_history(session=session, conversation_id=conversation.id)
@@ -810,6 +834,15 @@ async def _generate_reply(
             temperature=temperature,
             max_tokens=max_tokens,
         )
+    if provider == "anthropic":
+        api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        return await create_anthropic_reply(
+            api_key=api_key,
+            model=model,
+            messages=prompt_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 
 
@@ -842,6 +875,17 @@ async def _stream_reply(
         ):
             yield chunk
         return
+    if provider == "anthropic":
+        api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        async for chunk in stream_anthropic_reply(
+            api_key=api_key,
+            model=model,
+            messages=prompt_messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            yield chunk
+        return
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 
 
@@ -853,6 +897,7 @@ async def _finalize_success(
     assistant_message: Message,
     reply_content: str,
     activate_branch: bool,
+    memory_user_content: str | None = None,
 ) -> None:
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
@@ -866,6 +911,8 @@ async def _finalize_success(
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
+    if memory_user_content:
+        asyncio.create_task(write_memory(user_content=memory_user_content, assistant_content=reply_content))
 
 
 async def _mark_failed(
@@ -1054,7 +1101,12 @@ def _resolve_generation_options(
     max_tokens,
 ) -> tuple[str, str, object, object]:
     resolved_provider = (provider or conversation.provider or "mock").strip().lower()
-    resolved_model = model or conversation.model or ("mock-model" if resolved_provider == "mock" else "gpt-4.1-mini")
+    default_models = {
+        "anthropic": "claude-sonnet-4-20250514",
+        "mock": "mock-model",
+        "openai": "gpt-4.1-mini",
+    }
+    resolved_model = model or conversation.model or default_models.get(resolved_provider, "gpt-4.1-mini")
     resolved_temperature = temperature if temperature is not None else conversation.temperature
     resolved_max_tokens = max_tokens if max_tokens is not None else conversation.max_tokens
     return resolved_provider, resolved_model, resolved_temperature, resolved_max_tokens
@@ -1321,6 +1373,36 @@ def _prompt_seed_content(prompt_messages: list[dict[str, str]]) -> str:
     if prompt_messages:
         return prompt_messages[-1]["content"]
     return ""
+
+
+def _latest_user_content(*, history: list[Message], parent_id: int | None) -> str | None:
+    if parent_id is None:
+        return None
+
+    by_id = {item.id: item for item in history}
+    for item in reversed(_lineage_messages(by_id, parent_id)):
+        if item.role == MessageRole.USER and item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
+            return item.content
+    return None
+
+
+def _resolve_memory_user_content(
+    *,
+    history: list[Message],
+    by_id: dict[int, Message],
+    target_message: Message,
+    parent_id: int | None,
+) -> str | None:
+    if target_message.role == MessageRole.USER:
+        return target_message.content
+
+    if parent_id is None:
+        return None
+
+    parent_message = by_id.get(parent_id)
+    if parent_message is not None and parent_message.role == MessageRole.USER:
+        return parent_message.content
+    return _latest_user_content(history=history, parent_id=parent_id)
 
 
 def _to_app_error(exc: Exception) -> AppError:

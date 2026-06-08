@@ -4,12 +4,15 @@ import { Loader2, Send, Square } from 'lucide-react'
 export default function ChatInput({
   onSend,
   disabled,
+  providerValue = 'openai',
+  providerOptions = [],
   modelValue = '',
   modelOptions = [],
   modelProvider = 'openai',
   modelLoading = false,
   modelSaving = false,
   modelError = '',
+  onProviderChange,
   onModelChange,
 }) {
   const [value, setValue] = useState('')
@@ -44,6 +47,31 @@ export default function ChatInput({
       <div className="max-w-3xl mx-auto space-y-2">
         <div className="flex items-center justify-between gap-3 px-1">
           <div className="flex items-center gap-2 min-w-0">
+            {providerOptions.length > 0 && (
+              <>
+                <span className="text-xs font-medium shrink-0" style={{ color: 'var(--text-muted)' }}>
+                  Provider
+                </span>
+                <select
+                  value={providerValue || 'openai'}
+                  onChange={e => onProviderChange?.(e.target.value)}
+                  disabled={disabled || modelSaving}
+                  className="text-xs rounded-lg px-2.5 py-1.5 min-w-[44px]"
+                  style={{
+                    background: 'var(--bg-surface)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-primary)',
+                  }}
+                  aria-label="选择 Provider"
+                >
+                  {providerOptions.map(option => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
             <span className="text-xs font-medium shrink-0" style={{ color: 'var(--text-muted)' }}>
               模型
             </span>

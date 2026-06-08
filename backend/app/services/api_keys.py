@@ -8,6 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.encryption import encrypt_text
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
+from app.providers.anthropic import (
+    list_anthropic_models,
+    normalize_anthropic_base_url,
+    test_anthropic_key,
+)
 from app.providers.openai_compatible import (
     list_openai_compatible_models,
     normalize_base_url,
@@ -16,7 +21,7 @@ from app.providers.openai_compatible import (
 from app.schemas.api_key import ApiKeyCreateRequest
 
 
-SUPPORTED_KEY_PROVIDERS = {"openai"}
+SUPPORTED_KEY_PROVIDERS = {"anthropic", "openai"}
 
 
 def _normalize_provider(provider: str) -> str:
@@ -52,12 +57,17 @@ async def create_api_key(session: AsyncSession, user_id: int, payload: ApiKeyCre
     raw_key = payload.api_key.strip()
     if not raw_key:
         raise AppError(status_code=422, code="VALIDATION_ERROR", message="API Key 不能为空")
+    normalized_base_url = (
+        normalize_anthropic_base_url(payload.base_url)
+        if provider == "anthropic"
+        else normalize_base_url(payload.base_url)
+    )
 
     api_key = ApiKey(
         user_id=user_id,
         provider=provider,
         display_name=payload.display_name.strip(),
-        base_url=normalize_base_url(payload.base_url),
+        base_url=normalized_base_url,
         key_encrypted=encrypt_text(raw_key),
         key_last_four=raw_key[-4:] if len(raw_key) >= 4 else raw_key,
     )
@@ -91,7 +101,10 @@ async def get_preferred_api_key(session: AsyncSession, user_id: int, provider: s
 async def test_api_key(session: AsyncSession, user_id: int, api_key_id: int) -> tuple[ApiKey, bool, str]:
     api_key = await get_api_key(session=session, user_id=user_id, api_key_id=api_key_id)
 
-    success, message = await test_openai_compatible_key(api_key=api_key)
+    if api_key.provider == "anthropic":
+        success, message = await test_anthropic_key(api_key=api_key)
+    else:
+        success, message = await test_openai_compatible_key(api_key=api_key)
     api_key.last_tested_at = datetime.now(timezone.utc).replace(tzinfo=None)
     api_key.last_test_status = "success" if success else "failed"
     api_key.last_test_message = message
@@ -105,5 +118,7 @@ async def list_provider_models(session: AsyncSession, user_id: int, provider: st
 
     if api_key.provider == "openai":
         return await list_openai_compatible_models(api_key=api_key)
+    if api_key.provider == "anthropic":
+        return await list_anthropic_models(api_key=api_key)
 
-    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"鏆備笉鏀寔 provider '{api_key.provider}'")
+    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{api_key.provider}'")

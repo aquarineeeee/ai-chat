@@ -33,6 +33,11 @@ class Settings:
     default_model: str
     default_temperature: float
     default_max_tokens: int
+    memory_enabled: bool
+    memory_mcp_url: str
+    memory_timeout_seconds: float
+    memory_max_context_chars: int
+    memory_write_max_chars: int
 
     @property
     def cookie_secure(self) -> bool:
@@ -56,6 +61,13 @@ def _required(name: str, default: str | None = None) -> str:
     return value
 
 
+def _bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings(
@@ -77,4 +89,9 @@ def get_settings() -> Settings:
         default_model=os.getenv("DEFAULT_MODEL", "gpt-4.1-mini"),
         default_temperature=float(os.getenv("DEFAULT_TEMPERATURE", "0.7")),
         default_max_tokens=int(os.getenv("DEFAULT_MAX_TOKENS", "2000")),
+        memory_enabled=_bool("MEMORY_ENABLED", False),
+        memory_mcp_url=os.getenv("MEMORY_MCP_URL", "http://127.0.0.1:8001/mcp"),
+        memory_timeout_seconds=float(os.getenv("MEMORY_TIMEOUT_SECONDS", "5")),
+        memory_max_context_chars=int(os.getenv("MEMORY_MAX_CONTEXT_CHARS", "3000")),
+        memory_write_max_chars=int(os.getenv("MEMORY_WRITE_MAX_CHARS", "6000")),
     )

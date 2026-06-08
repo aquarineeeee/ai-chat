@@ -8,6 +8,19 @@ const INITIAL_FORM = {
   api_key: '',
 }
 
+const PROVIDERS = {
+  openai: {
+    label: 'OpenAI-compatible',
+    displayName: 'OpenAI',
+    defaultBaseUrl: 'https://api.openai.com/v1',
+  },
+  anthropic: {
+    label: 'Anthropic',
+    displayName: 'Anthropic',
+    defaultBaseUrl: 'https://api.anthropic.com/v1',
+  },
+}
+
 export default function ApiKeysModal({
   open,
   onClose,
@@ -73,6 +86,20 @@ export default function ApiKeysModal({
     return new Date(value).toLocaleString('zh-CN')
   }
 
+  function handleProviderChange(provider) {
+    const providerConfig = PROVIDERS[provider]
+    setForm(prev => ({
+      ...prev,
+      provider,
+      display_name: providerConfig && PROVIDERS[prev.provider]?.displayName === prev.display_name
+        ? providerConfig.displayName
+        : prev.display_name,
+      base_url: '',
+    }))
+  }
+
+  const selectedProvider = PROVIDERS[form.provider] || PROVIDERS.openai
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ background: 'var(--overlay)' }}>
       <div
@@ -89,7 +116,7 @@ export default function ApiKeysModal({
             </div>
             <div>
               <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>API Keys</h2>
-              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>当前先支持 OpenAI-compatible 的 `openai` provider</p>
+              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>支持 OpenAI-compatible 与 Anthropic 原生 provider</p>
             </div>
           </div>
           <button
@@ -109,12 +136,16 @@ export default function ApiKeysModal({
             <form onSubmit={handleSubmit} className="space-y-3">
               <div>
                 <label className="block text-xs mb-1.5" style={{ color: 'var(--text-secondary)' }}>Provider</label>
-                <input
+                <select
                   value={form.provider}
-                  onChange={e => setForm(prev => ({ ...prev, provider: e.target.value }))}
+                  onChange={e => handleProviderChange(e.target.value)}
                   className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
                   style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                />
+                >
+                  {Object.entries(PROVIDERS).map(([value, item]) => (
+                    <option key={value} value={value}>{item.label}</option>
+                  ))}
+                </select>
               </div>
 
               <div>
@@ -132,7 +163,7 @@ export default function ApiKeysModal({
                 <input
                   value={form.base_url}
                   onChange={e => setForm(prev => ({ ...prev, base_url: e.target.value }))}
-                  placeholder="留空默认使用 https://api.openai.com/v1"
+                  placeholder={`留空默认使用 ${selectedProvider.defaultBaseUrl}`}
                   className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
                   style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                 />
@@ -203,7 +234,7 @@ export default function ApiKeysModal({
                           </span>
                         </div>
                         <p className="text-xs mt-1 break-all" style={{ color: 'var(--text-secondary)' }}>
-                          {item.base_url || 'https://api.openai.com/v1'}
+                          {item.base_url || PROVIDERS[item.provider]?.defaultBaseUrl || '默认 Base URL'}
                         </p>
                         <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
                           Key 尾号: {item.key_last_four || '未知'}
