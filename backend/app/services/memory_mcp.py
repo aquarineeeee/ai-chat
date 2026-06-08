@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from typing import Any
+
+import httpx
+
+from app.core.config import get_settings
+
+
+logger = logging.getLogger(__name__)
+MEMORY_CONTEXT_PREFIX = "以下是长期记忆检索结果，仅供参考，可能相关，但不保证是当前最新事实。"
+MCP_PROTOCOL_VERSION = "2025-11-25"
+NO_MEMORY_RESULTS = {"未找到相关记忆", "未找到相关记忆。"}
+
+
+def _extract_text(result: Any) -> str | None:
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        if parts:
+            return "\n".join(parts)
+
+    structured = result.get("structuredContent") if isinstance(result, dict) else None
+    if structured:
+        if isinstance(structured, str):
+            return structured.strip() or None
+        return json.dumps(structured, ensure_ascii=False)
+
+    return None
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _normalize_memory_text(text: str) -> str:
+    cleaned_chars: list[str] = []
+    for char in text.replace("\r\n", "\n").replace("\r", "\n"):
+        if char in {"\n", "\t"} or ord(char) >= 32:
+            cleaned_chars.append(char)
+    return "".join(cleaned_chars).strip()
+
+
+def _preview(text: str, limit: int = 120) -> str:
+    return _truncate(text.replace("\n", "\\n"), limit)
+
+
+def _is_no_memory_result(text: str) -> bool:
+    return text.strip() in NO_MEMORY_RESULTS
+
+
+def _http_response_summary(response: httpx.Response, *, limit: int = 500) -> str:
+    content_type = response.headers.get("content-type", "")
+    return (
+        f"status={response.status_code}, "
+        f"content_type={content_type!r}, "
+        f"body_preview={_preview(response.text, limit)!r}"
+    )
+
+
+def _exception_summary(exc: BaseException) -> str:
+    if isinstance(exc, BaseExceptionGroup):
+        parts: list[str] = []
+        for item in exc.exceptions:
+            summary = _exception_summary(item)
+            if summary:
+                parts.append(summary)
+        return " | ".join(parts)
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"{type(exc).__name__}: {exc} ({_http_response_summary(exc.response)})"
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _sse_message_payload(body: str) -> dict[str, Any]:
+    for block in body.split("\n\n"):
+        data_lines = [line[5:] for line in block.splitlines() if line.startswith("data: ")]
+        if not data_lines:
+            continue
+        payload = "\n".join(data_lines).strip()
+        if not payload:
+            continue
+        return json.loads(payload)
+    raise ValueError("MCP SSE response did not contain a data payload")
+
+
+async def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    settings = get_settings()
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    session_id: str | None = None
+
+    async with httpx.AsyncClient(timeout=settings.memory_timeout_seconds) as client:
+        try:
+            initialize_response = await client.post(
+                settings.memory_mcp_url,
+                headers=headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": MCP_PROTOCOL_VERSION,
+                        "capabilities": {},
+                        "clientInfo": {"name": "ai-chat", "version": "0.1.0"},
+                    },
+                },
+            )
+            initialize_response.raise_for_status()
+            session_id = initialize_response.headers.get("mcp-session-id")
+            if not session_id:
+                raise RuntimeError("MCP initialize response did not include mcp-session-id")
+
+            session_headers = {
+                **headers,
+                "mcp-session-id": session_id,
+                "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+            }
+
+            tool_response = await client.post(
+                settings.memory_mcp_url,
+                headers=session_headers,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": tool_name,
+                        "arguments": arguments,
+                    },
+                },
+            )
+            tool_response.raise_for_status()
+
+            payload = _sse_message_payload(tool_response.text)
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise RuntimeError("MCP tool response did not include a result object")
+            return result
+        finally:
+            if session_id:
+                try:
+                    await client.delete(
+                        settings.memory_mcp_url,
+                        headers={
+                            **headers,
+                            "mcp-session-id": session_id,
+                            "mcp-protocol-version": MCP_PROTOCOL_VERSION,
+                        },
+                    )
+                except Exception:
+                    logger.debug("Failed to terminate MCP session %s", session_id, exc_info=True)
+
+
+async def search_memory(*, query: str) -> str | None:
+    settings = get_settings()
+    cleaned_query = _normalize_memory_text(query)
+    if not settings.memory_enabled or not cleaned_query:
+        return None
+
+    try:
+        async with asyncio.timeout(settings.memory_timeout_seconds):
+            result = await _call_mcp_tool(
+                "breath",
+                {
+                    "query": cleaned_query,
+                    "max_tokens": 1500,
+                    "max_results": 8,
+                },
+            )
+    except Exception as exc:
+        logger.exception(
+            "Memory search failed for %s (%s, query_len=%s, query_preview=%r)",
+            settings.memory_mcp_url,
+            _exception_summary(exc),
+            len(cleaned_query),
+            _preview(cleaned_query),
+        )
+        return None
+
+    text = _extract_text(result)
+    if not text or _is_no_memory_result(text):
+        return None
+    return f"{MEMORY_CONTEXT_PREFIX}\n{text[: settings.memory_max_context_chars]}".strip()
+
+
+async def write_memory(*, user_content: str, assistant_content: str) -> None:
+    settings = get_settings()
+    if not settings.memory_enabled:
+        return
+
+    user_text = _normalize_memory_text(user_content)
+    assistant_text = _normalize_memory_text(assistant_content)
+    if not user_text or not assistant_text:
+        return
+
+    content = _truncate(
+        f"用户：{user_text}\n助手：{assistant_text}",
+        settings.memory_write_max_chars,
+    )
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            await _call_mcp_tool("hold", {"content": content})
+            return
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                await asyncio.sleep(0.2)
+                continue
+
+    if last_exc is not None:
+        logger.error(
+            "Memory write failed for %s (%s, content_len=%s, content_preview=%r)",
+            settings.memory_mcp_url,
+            _exception_summary(last_exc),
+            len(content),
+            _preview(content),
+            exc_info=last_exc,
+        )
