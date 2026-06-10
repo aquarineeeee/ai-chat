@@ -198,6 +198,76 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_build_prompt_messages_skips_memory_context_when_disabled(self) -> None:
+        conversation = Conversation(user_id=1, system_prompt="系统提示")
+        now = datetime.now(UTC)
+        history = [
+            Message(
+                id=1,
+                conversation_id=1,
+                parent_id=None,
+                role=MessageRole.USER,
+                content="之前的问题",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+            Message(
+                id=2,
+                conversation_id=1,
+                parent_id=1,
+                role=MessageRole.ASSISTANT,
+                content="之前的回答",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+
+        with patch("app.services.messages.search_memory", AsyncMock(return_value="记忆上下文")) as mock_search:
+            prompt_messages = await messages._build_prompt_messages(
+                session=AsyncMock(),
+                conversation=conversation,
+                parent_id=2,
+                history=history,
+                include_memory_context=False,
+            )
+
+        mock_search.assert_not_called()
+        self.assertEqual(
+            prompt_messages,
+            [
+                {"role": "system", "content": "系统提示"},
+                {"role": "user", "content": "之前的问题"},
+                {"role": "assistant", "content": "之前的回答"},
+            ],
+        )
+
+    async def test_generate_reply_for_openai_uses_memory_search_tool(self) -> None:
+        session = AsyncMock()
+        conversation = Conversation(user_id=1)
+
+        with (
+            patch("app.services.messages.get_preferred_api_key", AsyncMock(return_value="api-key")) as mock_get_key,
+            patch("app.services.messages.create_openai_compatible_reply", AsyncMock(return_value="final answer")) as mock_reply,
+        ):
+            result = await messages._generate_reply(
+                session=session,
+                user_id=1,
+                conversation=conversation,
+                provider="openai",
+                model="gpt-4.1-mini",
+                temperature=None,
+                max_tokens=1000,
+                prompt_messages=[{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(result, "final answer")
+        mock_get_key.assert_awaited_once_with(session=session, user_id=1, provider="openai")
+        _, kwargs = mock_reply.await_args
+        self.assertEqual(kwargs["tools"][0]["function"]["name"], "memory_search")
+        self.assertTrue(callable(kwargs["tool_executor"]))
+
     async def test_finalize_success_writes_memory_when_user_content_present(self) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1)

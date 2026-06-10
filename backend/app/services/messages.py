@@ -41,6 +41,7 @@ from app.services.branches import (
 )
 from app.services.conversations import get_conversation
 from app.services.memory_mcp import search_memory, write_memory
+from app.services.memory_tools import execute_memory_tool_call, memory_search_tools
 
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
@@ -655,6 +656,7 @@ async def _prepare_generation(
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
         history=history,
+        include_memory_context=provider != "openai",
     )
     return {
         "activate_branch": payload.activate_branch,
@@ -744,6 +746,7 @@ async def _prepare_regeneration(
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
         history=history,
+        include_memory_context=provider != "openai",
     )
     by_id = {item.id: item for item in history}
     return {
@@ -776,18 +779,20 @@ async def _build_prompt_messages(
     context_mode: str = "full",
     context_root_message_id: int | None = None,
     history: list[Message] | None = None,
+    include_memory_context: bool = True,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     if conversation.system_prompt:
         messages.append({"role": "system", "content": conversation.system_prompt})
 
-    memory_query = user_content.strip() if user_content else None
-    if memory_query is None and history is not None:
-        memory_query = _latest_user_content(history=history, parent_id=parent_id)
-    if memory_query:
-        memory_context = await search_memory(query=memory_query)
-        if memory_context:
-            messages.append({"role": "system", "content": memory_context})
+    if include_memory_context:
+        memory_query = user_content.strip() if user_content else None
+        if memory_query is None and history is not None:
+            memory_query = _latest_user_content(history=history, parent_id=parent_id)
+        if memory_query:
+            memory_context = await search_memory(query=memory_query)
+            if memory_context:
+                messages.append({"role": "system", "content": memory_context})
 
     if history is None:
         history = await _load_conversation_history(session=session, conversation_id=conversation.id)
@@ -833,6 +838,8 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            tools=memory_search_tools(),
+            tool_executor=execute_memory_tool_call,
         )
     if provider == "anthropic":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
@@ -872,6 +879,8 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            tools=memory_search_tools(),
+            tool_executor=execute_memory_tool_call,
         ):
             yield chunk
         return

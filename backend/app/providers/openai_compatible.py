@@ -126,6 +126,68 @@ def _extract_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
     return tool_calls
 
 
+def _append_tool_call_delta(
+    tool_calls_by_index: dict[int, dict[str, Any]],
+    delta_tool_calls: object,
+) -> None:
+    if not isinstance(delta_tool_calls, list):
+        return
+
+    for item in delta_tool_calls:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        if not isinstance(index, int):
+            index = len(tool_calls_by_index)
+
+        tool_call = tool_calls_by_index.setdefault(
+            index,
+            {"id": None, "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        tool_id = item.get("id")
+        if isinstance(tool_id, str) and tool_id:
+            tool_call["id"] = tool_id
+
+        tool_type = item.get("type")
+        if isinstance(tool_type, str) and tool_type:
+            tool_call["type"] = tool_type
+
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+
+        function_payload = tool_call.setdefault("function", {"name": "", "arguments": ""})
+        name = function.get("name")
+        if isinstance(name, str) and name:
+            function_payload["name"] += name
+        arguments = function.get("arguments")
+        if isinstance(arguments, str) and arguments:
+            function_payload["arguments"] += arguments
+
+
+def _finalize_stream_tool_calls(tool_calls_by_index: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    for index in sorted(tool_calls_by_index):
+        item = tool_calls_by_index[index]
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(arguments, str):
+            continue
+        tool_calls.append(
+            {
+                "id": item.get("id") or f"tool-call-{index}",
+                "type": item.get("type") or "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        )
+    return tool_calls
+
+
 async def _create_completion(
     client: httpx.AsyncClient,
     *,
@@ -159,8 +221,9 @@ async def _run_tool_round(
     message_history: list[dict[str, object]],
     tool_calls: list[dict[str, Any]],
     tool_executor: ToolExecutor,
+    assistant_content: str = "",
 ) -> None:
-    message_history.append(_assistant_history_message({"tool_calls": tool_calls, "content": ""}))
+    message_history.append(_assistant_history_message({"tool_calls": tool_calls, "content": assistant_content}))
     for index, tool_call in enumerate(tool_calls):
         function = tool_call["function"]
         tool_result = await tool_executor(str(function["name"]), str(function["arguments"]))
@@ -171,6 +234,84 @@ async def _run_tool_round(
                 "content": tool_result,
             }
         )
+
+
+async def _stream_completion_round(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    api_key: str,
+    payload: dict[str, object],
+) -> AsyncIterator[dict[str, object]]:
+    try:
+        async with client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
+            if response.status_code >= 400:
+                body = await response.aread()
+                fallback = httpx.Response(
+                    status_code=response.status_code,
+                    headers=response.headers,
+                    content=body,
+                    request=response.request,
+                )
+                raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(fallback))
+
+            accumulated_content = ""
+            tool_calls_by_index: dict[int, dict[str, Any]] = {}
+            saw_tool_calls = False
+
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if raw == "[DONE]":
+                    break
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+
+                error = data.get("error")
+                if error:
+                    if isinstance(error, dict):
+                        message = str(error.get("message") or "上游模型返回错误")
+                    else:
+                        message = str(error)
+                    raise AppError(status_code=502, code="MODEL_ERROR", message=message)
+
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                if not isinstance(choice, dict):
+                    continue
+                delta = choice.get("delta") or {}
+                if not isinstance(delta, dict):
+                    continue
+
+                delta_tool_calls = delta.get("tool_calls")
+                if isinstance(delta_tool_calls, list) and delta_tool_calls:
+                    saw_tool_calls = True
+                    _append_tool_call_delta(tool_calls_by_index, delta_tool_calls)
+
+                content = _stringify_content(delta.get("content"))
+                if content:
+                    accumulated_content += content
+                    if not saw_tool_calls:
+                        yield {"type": "content", "content": content}
+
+            tool_calls = _finalize_stream_tool_calls(tool_calls_by_index)
+            if tool_calls:
+                yield {"type": "tool_calls", "tool_calls": tool_calls, "content": accumulated_content}
+            else:
+                yield {"type": "done", "content": accumulated_content}
+    except AppError:
+        raise
+    except httpx.HTTPError as exc:
+        raise AppError(
+            status_code=502,
+            code="MODEL_ERROR",
+            message=_http_error_message("请求上游模型服务失败", exc),
+        ) from exc
 
 
 async def create_openai_compatible_reply(
@@ -253,16 +394,14 @@ async def stream_openai_compatible_reply(
     messages: list[dict[str, str]],
     temperature: Decimal | None,
     max_tokens: int | None,
+    tools: list[dict[str, object]] | None = None,
+    tool_executor: ToolExecutor | None = None,
+    max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
 ) -> AsyncIterator[str]:
     raw_key = decrypt_text(api_key.key_encrypted)
-    payload = _chat_payload(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=True,
-    )
     url = f"{_resolve_base_url(api_key.base_url)}/chat/completions"
+    if tools and tool_executor is None:
+        raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(90.0, connect=15.0),
@@ -270,52 +409,59 @@ async def stream_openai_compatible_reply(
         trust_env=False,
         http2=False,
     ) as client:
-        try:
-            async with client.stream("POST", url, headers=_build_headers(raw_key), json=payload) as response:
-                if response.status_code >= 400:
-                    body = await response.aread()
-                    fallback = httpx.Response(
-                        status_code=response.status_code,
-                        headers=response.headers,
-                        content=body,
-                        request=response.request,
-                    )
-                    raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(fallback))
+        message_history: list[dict[str, object]] = [dict(message) for message in messages]
+        max_rounds = max_tool_round_trips if tools else 1
+        for _ in range(max_rounds):
+            payload = _chat_payload(
+                model=model,
+                messages=message_history,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=True,
+                tools=tools,
+            )
 
-                async for line in response.aiter_lines():
-                    if not line or not line.startswith("data:"):
-                        continue
-                    raw = line[5:].strip()
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-
-                    error = data.get("error")
-                    if error:
-                        if isinstance(error, dict):
-                            message = str(error.get("message") or "上游模型返回错误")
-                        else:
-                            message = str(error)
-                        raise AppError(status_code=502, code="MODEL_ERROR", message=message)
-
-                    choices = data.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    content = _stringify_content(delta.get("content"))
+            round_content = ""
+            round_tool_calls: list[dict[str, Any]] | None = None
+            async for event in _stream_completion_round(
+                client,
+                url=url,
+                api_key=raw_key,
+                payload=payload,
+            ):
+                event_type = event.get("type")
+                if event_type == "content":
+                    content = str(event.get("content") or "")
                     if content:
+                        round_content += content
                         yield content
-        except AppError:
-            raise
-        except httpx.HTTPError as exc:
-            raise AppError(
-                status_code=502,
-                code="MODEL_ERROR",
-                message=_http_error_message("请求上游模型服务失败", exc),
-            ) from exc
+                elif event_type == "tool_calls":
+                    round_content = str(event.get("content") or round_content)
+                    tool_calls = event.get("tool_calls")
+                    round_tool_calls = tool_calls if isinstance(tool_calls, list) else []
+                elif event_type == "done":
+                    round_content = str(event.get("content") or round_content)
+
+            if round_tool_calls:
+                if tool_executor is None:
+                    raise AppError(
+                        status_code=500,
+                        code="CONFIG_ERROR",
+                        message="收到工具调用但未配置 tool_executor",
+                    )
+                await _run_tool_round(
+                    message_history=message_history,
+                    tool_calls=round_tool_calls,
+                    tool_executor=tool_executor,
+                    assistant_content=round_content,
+                )
+                continue
+
+            if round_content:
+                return
+            raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
+
+    raise AppError(status_code=502, code="MODEL_ERROR", message="模型工具调用次数超出限制")
 
 
 async def test_openai_compatible_key(*, api_key: ApiKey) -> tuple[bool, str]:

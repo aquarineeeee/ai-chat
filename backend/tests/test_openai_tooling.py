@@ -7,7 +7,7 @@ import httpx
 
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
-from app.providers.openai_compatible import create_openai_compatible_reply
+from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
 from app.services.memory_tools import (
     MEMORY_SEARCH_TOOL_NAME,
     execute_memory_tool_call,
@@ -137,6 +137,82 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(ctx.exception.code, "CONFIG_ERROR")
+
+    async def test_stream_reply_handles_tool_round_trip(self) -> None:
+        api_key = ApiKey(provider="openai", key_encrypted="encrypted")
+        first_lines = [
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"memory_search","arguments":"{\\"query\\":\\""}}]}}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"项目约束\\"}"}}]},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+        second_lines = [
+            'data: {"choices":[{"delta":{"content":"最终"}}]}',
+            'data: {"choices":[{"delta":{"content":"回答"}}]}',
+            "data: [DONE]",
+        ]
+
+        class FakeStreamResponse:
+            def __init__(self, lines):
+                self.status_code = 200
+                self.headers = {}
+                self.request = httpx.Request("POST", "https://example.com/v1/chat/completions")
+                self._lines = list(lines)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def aiter_lines(self):
+                for line in self._lines:
+                    yield line
+
+            async def aread(self):
+                return b""
+
+        class FakeClient:
+            def __init__(self, streams):
+                self._streams = list(streams)
+                self.requests: list[dict[str, object]] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, _method, _url, headers=None, json=None):
+                self.requests.append({"headers": headers, "json": json})
+                return self._streams.pop(0)
+
+        fake_client = FakeClient([FakeStreamResponse(first_lines), FakeStreamResponse(second_lines)])
+        tool_executor = AsyncMock(return_value="以下是长期记忆检索结果，仅供参考。\n项目约束")
+
+        with (
+            patch("app.providers.openai_compatible.decrypt_text", return_value="secret"),
+            patch("app.providers.openai_compatible.httpx.AsyncClient", return_value=fake_client),
+        ):
+            chunks = []
+            async for chunk in stream_openai_compatible_reply(
+                api_key=api_key,
+                model="gpt-4.1-mini",
+                messages=[{"role": "user", "content": "继续"}],
+                temperature=None,
+                max_tokens=800,
+                tools=[memory_search_tool_definition()],
+                tool_executor=tool_executor,
+            ):
+                chunks.append(chunk)
+
+        self.assertEqual(chunks, ["最终", "回答"])
+        tool_executor.assert_awaited_once_with(MEMORY_SEARCH_TOOL_NAME, '{"query":"项目约束"}')
+        self.assertEqual(len(fake_client.requests), 2)
+        second_messages = fake_client.requests[1]["json"]["messages"]
+        self.assertEqual(second_messages[1]["role"], "assistant")
+        self.assertEqual(second_messages[1]["tool_calls"][0]["id"], "call-1")
+        self.assertEqual(second_messages[2]["role"], "tool")
+        self.assertEqual(second_messages[2]["content"], "以下是长期记忆检索结果，仅供参考。\n项目约束")
 
 
 if __name__ == "__main__":
