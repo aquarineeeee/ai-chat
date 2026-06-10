@@ -1,6 +1,7 @@
 import { X } from 'lucide-react'
 import MessageBubble from './MessageBubble'
 import ChatInput from './ChatInput'
+import ToolTraceCard from './ToolTraceCard'
 
 export default function BranchPane({
   pane,
@@ -109,6 +110,7 @@ export default function BranchPane({
         </div>
 
         <div className="space-y-1">
+          <ToolTraceCard trace={pane.toolTrace} onToggle={pane.onToggleToolTrace} />
           {branchMessages.map(msg => (
             <MessageBubble
               key={msg.id}

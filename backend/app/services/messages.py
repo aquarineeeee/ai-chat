@@ -409,10 +409,10 @@ async def create_message_stream(
     user_id: int,
     conversation_id: int,
     payload: MessageCreateRequest,
-) -> AsyncIterator[dict[str, str]]:
+) -> AsyncIterator[dict[str, object]]:
     context = await _prepare_generation(session=session, user_id=user_id, conversation_id=conversation_id, payload=payload)
 
-    async def iterator() -> AsyncIterator[dict[str, str]]:
+    async def iterator() -> AsyncIterator[dict[str, object]]:
         accumulated = ""
         try:
             async for chunk in _stream_reply(
@@ -425,8 +425,15 @@ async def create_message_stream(
                 max_tokens=context["max_tokens"],
                 prompt_messages=context["prompt_messages"],
             ):
-                accumulated += chunk
-                yield {"content": chunk}
+                chunk_type = str(chunk.get("type") or "")
+                if chunk_type == "content":
+                    content = str(chunk.get("content") or "")
+                    accumulated += content
+                    yield {"content": content}
+                elif chunk_type == "tool":
+                    tool = chunk.get("tool")
+                    if isinstance(tool, dict):
+                        yield {"tool": tool}
         except Exception as exc:
             app_error = _to_app_error(exc)
             status = MessageStatus.PARTIAL if accumulated else MessageStatus.FAILED
@@ -523,7 +530,7 @@ async def regenerate_message_stream(
     conversation_id: int,
     message_id: int,
     payload: MessageRegenerateRequest,
-) -> AsyncIterator[dict[str, str]]:
+) -> AsyncIterator[dict[str, object]]:
     context = await _prepare_regeneration(
         session=session,
         user_id=user_id,
@@ -532,7 +539,7 @@ async def regenerate_message_stream(
         payload=payload,
     )
 
-    async def iterator() -> AsyncIterator[dict[str, str]]:
+    async def iterator() -> AsyncIterator[dict[str, object]]:
         accumulated = ""
         try:
             async for chunk in _stream_reply(
@@ -545,8 +552,15 @@ async def regenerate_message_stream(
                 max_tokens=context["max_tokens"],
                 prompt_messages=context["prompt_messages"],
             ):
-                accumulated += chunk
-                yield {"content": chunk}
+                chunk_type = str(chunk.get("type") or "")
+                if chunk_type == "content":
+                    content = str(chunk.get("content") or "")
+                    accumulated += content
+                    yield {"content": content}
+                elif chunk_type == "tool":
+                    tool = chunk.get("tool")
+                    if isinstance(tool, dict):
+                        yield {"tool": tool}
         except Exception as exc:
             app_error = _to_app_error(exc)
             status = MessageStatus.PARTIAL if accumulated else MessageStatus.FAILED
@@ -863,16 +877,23 @@ async def _stream_reply(
     temperature,
     max_tokens,
     prompt_messages: list[dict[str, str]],
-) -> AsyncIterator[str]:
+) -> AsyncIterator[dict[str, object]]:
     if provider == "mock":
-        yield generate_mock_reply(
-            conversation=conversation,
-            content=_prompt_seed_content(prompt_messages),
-            model=model,
-        )
+        yield {
+            "type": "content",
+            "content": generate_mock_reply(
+                conversation=conversation,
+                content=_prompt_seed_content(prompt_messages),
+                model=model,
+            ),
+        }
         return
     if provider == "openai":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        async def emit_tool_event(tool: dict[str, object]) -> None:
+            yield_event.append({"type": "tool", "tool": tool})
+
+        yield_event: list[dict[str, object]] = []
         async for chunk in stream_openai_compatible_reply(
             api_key=api_key,
             model=model,
@@ -881,8 +902,13 @@ async def _stream_reply(
             max_tokens=max_tokens,
             tools=memory_search_tools(),
             tool_executor=execute_memory_tool_call,
+            tool_event_callback=emit_tool_event,
         ):
+            while yield_event:
+                yield yield_event.pop(0)
             yield chunk
+        while yield_event:
+            yield yield_event.pop(0)
         return
     if provider == "anthropic":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
@@ -893,7 +919,7 @@ async def _stream_reply(
             temperature=temperature,
             max_tokens=max_tokens,
         ):
-            yield chunk
+            yield {"type": "content", "content": chunk}
         return
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 

@@ -194,6 +194,11 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
             patch("app.providers.openai_compatible.httpx.AsyncClient", return_value=fake_client),
         ):
             chunks = []
+            tool_events = []
+
+            async def on_tool_event(event):
+                tool_events.append(event)
+
             async for chunk in stream_openai_compatible_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
@@ -202,11 +207,29 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
                 max_tokens=800,
                 tools=[memory_search_tool_definition()],
                 tool_executor=tool_executor,
+                tool_event_callback=on_tool_event,
             ):
                 chunks.append(chunk)
 
-        self.assertEqual(chunks, ["最终", "回答"])
+        self.assertEqual(
+            chunks,
+            [
+                {"type": "content", "content": "最终"},
+                {"type": "content", "content": "回答"},
+            ],
+        )
         tool_executor.assert_awaited_once_with(MEMORY_SEARCH_TOOL_NAME, '{"query":"项目约束"}')
+        self.assertEqual(
+            tool_events,
+            [
+                {"name": "memory_search", "status": "running", "arguments": '{"query":"项目约束"}'},
+                {
+                    "name": "memory_search",
+                    "status": "completed",
+                    "content": "以下是长期记忆检索结果，仅供参考。\n项目约束",
+                },
+            ],
+        )
         self.assertEqual(len(fake_client.requests), 2)
         second_messages = fake_client.requests[1]["json"]["messages"]
         self.assertEqual(second_messages[1]["role"], "assistant")

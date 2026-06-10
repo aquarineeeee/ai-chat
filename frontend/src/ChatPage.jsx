@@ -9,6 +9,7 @@ import EmptyState from './components/EmptyState'
 import ApiKeysModal from './components/ApiKeysModal'
 import BranchPane from './components/BranchPane'
 import MessageTreePanel from './components/MessageTreePanel'
+import ToolTraceCard from './components/ToolTraceCard'
 import { Menu, X, Loader2, AlertCircle, Download, ChevronDown, Network } from 'lucide-react'
 
 const DEFAULT_BRANCH_PANE_WIDTH = 440
@@ -72,6 +73,7 @@ function createBranchPane(sourceMessage, branch = null) {
     editingContent: '',
     editingMode: 'update',
     editingSubmittingMessageId: null,
+    toolTrace: null,
     error: '',
     openedAt: Date.now(),
   }
@@ -87,6 +89,16 @@ const PROVIDER_OPTIONS = [
   { value: 'openai', label: 'OpenAI-compatible' },
   { value: 'anthropic', label: 'Anthropic' },
 ]
+
+function buildToolTrace(tool, previousTrace = null) {
+  if (!tool || typeof tool !== 'object') return previousTrace
+  return {
+    name: typeof tool.name === 'string' ? tool.name : previousTrace?.name || '',
+    status: typeof tool.status === 'string' ? tool.status : previousTrace?.status || '',
+    content: typeof tool.content === 'string' ? tool.content : previousTrace?.content || '',
+    expanded: previousTrace?.expanded || false,
+  }
+}
 
 function sortConversations(items) {
   return [...items].sort((a, b) => {
@@ -117,6 +129,7 @@ export default function ChatPage() {
   const [editingMode, setEditingMode] = useState('update')
   const [editingSubmittingMessageId, setEditingSubmittingMessageId] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
+  const [streamToolTrace, setStreamToolTrace] = useState(null)
   const [error, setError] = useState('')
   const [apiKeys, setApiKeys] = useState([])
   const [loadingKeys, setLoadingKeys] = useState(false)
@@ -233,6 +246,19 @@ export default function ChatPage() {
         : pane
     )))
   }, [])
+
+  const toggleMainToolTrace = useCallback(() => {
+    setStreamToolTrace(current => (
+      current ? { ...current, expanded: !current.expanded } : current
+    ))
+  }, [])
+
+  const toggleBranchToolTrace = useCallback((paneId) => {
+    patchBranchPane(paneId, pane => ({
+      ...pane,
+      toolTrace: pane.toolTrace ? { ...pane.toolTrace, expanded: !pane.toolTrace.expanded } : pane.toolTrace,
+    }))
+  }, [patchBranchPane])
 
   const loadBranches = useCallback(async (conversationId) => {
     if (!conversationId) return []
@@ -802,6 +828,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, userMsg])
     setSending(true)
     setStreamingContent('')
+    setStreamToolTrace(null)
 
     try {
       const res = await fetch(`/api/conversations/${convId}/messages/stream`, {
@@ -845,6 +872,9 @@ export default function ChatPage() {
 
           try {
             const chunk = JSON.parse(raw)
+            if (chunk.tool) {
+              setStreamToolTrace(current => buildToolTrace(chunk.tool, current))
+            }
             if (chunk.content) {
               accumulated += chunk.content
               setStreamingContent(accumulated)
@@ -877,6 +907,7 @@ export default function ChatPage() {
     setError('')
     setRegeneratingMessageId(messageId)
     setStreamingContent('')
+    setStreamToolTrace(null)
     const branchId = activeConv?.current_branch_id ?? null
 
     try {
@@ -921,6 +952,9 @@ export default function ChatPage() {
 
           try {
             const chunk = JSON.parse(raw)
+            if (chunk.tool) {
+              setStreamToolTrace(current => buildToolTrace(chunk.tool, current))
+            }
             if (chunk.content) {
               accumulated += chunk.content
               setStreamingContent(accumulated)
@@ -1077,6 +1111,7 @@ export default function ChatPage() {
       messages: [...current.messages, userMsg],
       sending: true,
       streamingContent: '',
+      toolTrace: null,
       error: '',
     }))
     try {
@@ -1121,6 +1156,12 @@ export default function ChatPage() {
 
           try {
             const chunk = JSON.parse(raw)
+            if (chunk.tool) {
+              patchBranchPane(paneId, pane => ({
+                ...pane,
+                toolTrace: buildToolTrace(chunk.tool, pane.toolTrace),
+              }))
+            }
             if (chunk.content) {
               accumulated += chunk.content
               patchBranchPane(paneId, { streamingContent: accumulated })
@@ -1457,6 +1498,7 @@ export default function ChatPage() {
                         />
                       )
                     })}
+                    <ToolTraceCard trace={streamToolTrace} onToggle={toggleMainToolTrace} />
                     {sending && !streamingContent && (
                       <div className="flex gap-3 py-3">
                         <div
@@ -1541,6 +1583,7 @@ export default function ChatPage() {
                       <BranchPane
                         pane={{
                           ...pane,
+                          onToggleToolTrace: () => toggleBranchToolTrace(pane.id),
                           busy: pane.loading
                             || pane.sending
                             || pane.regeneratingMessageId !== null

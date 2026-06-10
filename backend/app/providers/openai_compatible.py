@@ -16,6 +16,7 @@ from app.models.api_key import ApiKey
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MAX_TOOL_ROUND_TRIPS = 3
 ToolExecutor = Callable[[str, str], Awaitable[str]]
+ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
 
 
 def normalize_base_url(base_url: str | None) -> str | None:
@@ -222,11 +223,30 @@ async def _run_tool_round(
     tool_calls: list[dict[str, Any]],
     tool_executor: ToolExecutor,
     assistant_content: str = "",
+    event_callback: ToolEventCallback | None = None,
 ) -> None:
     message_history.append(_assistant_history_message({"tool_calls": tool_calls, "content": assistant_content}))
     for index, tool_call in enumerate(tool_calls):
         function = tool_call["function"]
-        tool_result = await tool_executor(str(function["name"]), str(function["arguments"]))
+        tool_name = str(function["name"])
+        tool_arguments = str(function["arguments"])
+        if event_callback is not None:
+            await event_callback(
+                {
+                    "name": tool_name,
+                    "status": "running",
+                    "arguments": tool_arguments,
+                }
+            )
+        tool_result = await tool_executor(tool_name, tool_arguments)
+        if event_callback is not None:
+            await event_callback(
+                {
+                    "name": tool_name,
+                    "status": "completed",
+                    "content": tool_result,
+                }
+            )
         message_history.append(
             {
                 "role": "tool",
@@ -397,7 +417,8 @@ async def stream_openai_compatible_reply(
     tools: list[dict[str, object]] | None = None,
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
-) -> AsyncIterator[str]:
+    tool_event_callback: ToolEventCallback | None = None,
+) -> AsyncIterator[dict[str, object]]:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/chat/completions"
     if tools and tool_executor is None:
@@ -434,7 +455,7 @@ async def stream_openai_compatible_reply(
                     content = str(event.get("content") or "")
                     if content:
                         round_content += content
-                        yield content
+                        yield {"type": "content", "content": content}
                 elif event_type == "tool_calls":
                     round_content = str(event.get("content") or round_content)
                     tool_calls = event.get("tool_calls")
@@ -454,6 +475,7 @@ async def stream_openai_compatible_reply(
                     tool_calls=round_tool_calls,
                     tool_executor=tool_executor,
                     assistant_content=round_content,
+                    event_callback=tool_event_callback,
                 )
                 continue
 
