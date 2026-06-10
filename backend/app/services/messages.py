@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import asyncio
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -40,12 +38,18 @@ from app.services.branches import (
     resolve_branch_for_write,
 )
 from app.services.conversations import get_conversation
-from app.services.memory_mcp import search_memory, write_memory
-from app.services.memory_tools import execute_memory_tool_call, memory_search_tools
+from app.services.memory_mcp import search_memory
+from app.services.memory_tools import execute_memory_tool_call, memory_tool_definitions
 
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
 MESSAGE_TREE_MAX_NODES = 400
+MEMORY_TOOL_GUIDANCE = (
+    "你可以按需使用长期记忆工具：当回答依赖跨会话背景、用户偏好或历史约束时，调用 memory_search；"
+    "当发现值得长期保留的信息时，可以调用 memory_write。memory_write 的 content 应该是一条提炼后的记忆，"
+    "不要原样转录整段对话；tags、importance、pinned、feel、source_bucket、valence、arousal 仅在确有必要时填写。"
+    "不是每轮都必须写记忆。"
+)
 
 
 async def list_conversation_messages(
@@ -392,7 +396,6 @@ async def create_message_pair(
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
         activate_branch=context["activate_branch"],
-        memory_user_content=context["memory_user_content"],
     )
     return await _build_send_response(
         session=session,
@@ -459,7 +462,6 @@ async def create_message_stream(
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
             activate_branch=context["activate_branch"],
-            memory_user_content=context["memory_user_content"],
         )
 
     return iterator()
@@ -512,7 +514,6 @@ async def regenerate_message(
         assistant_message=context["assistant_message"],
         reply_content=reply_content,
         activate_branch=context["activate_branch"],
-        memory_user_content=context["memory_user_content"],
     )
     return await _build_regenerate_response(
         session=session,
@@ -586,7 +587,6 @@ async def regenerate_message_stream(
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
             activate_branch=context["activate_branch"],
-            memory_user_content=context["memory_user_content"],
         )
 
     return iterator()
@@ -671,6 +671,7 @@ async def _prepare_generation(
         context_root_message_id=context_root_message_id,
         history=history,
         include_memory_context=provider != "openai",
+        include_memory_tool_guidance=provider == "openai",
     )
     return {
         "activate_branch": payload.activate_branch,
@@ -679,7 +680,6 @@ async def _prepare_generation(
         "conversation": conversation,
         "history": history,
         "max_tokens": max_tokens,
-        "memory_user_content": payload.content,
         "model": model,
         "prompt_messages": prompt_messages,
         "provider": provider,
@@ -761,8 +761,8 @@ async def _prepare_regeneration(
         context_root_message_id=context_root_message_id,
         history=history,
         include_memory_context=provider != "openai",
+        include_memory_tool_guidance=provider == "openai",
     )
-    by_id = {item.id: item for item in history}
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
@@ -770,12 +770,6 @@ async def _prepare_regeneration(
         "conversation": conversation,
         "history": history,
         "max_tokens": max_tokens,
-        "memory_user_content": _resolve_memory_user_content(
-            history=history,
-            by_id=by_id,
-            target_message=target_message,
-            parent_id=parent_id,
-        ),
         "model": model,
         "prompt_messages": prompt_messages,
         "provider": provider,
@@ -794,10 +788,13 @@ async def _build_prompt_messages(
     context_root_message_id: int | None = None,
     history: list[Message] | None = None,
     include_memory_context: bool = True,
+    include_memory_tool_guidance: bool = False,
 ) -> list[dict[str, str]]:
     messages: list[dict[str, str]] = []
     if conversation.system_prompt:
         messages.append({"role": "system", "content": conversation.system_prompt})
+    if include_memory_tool_guidance:
+        messages.append({"role": "system", "content": MEMORY_TOOL_GUIDANCE})
 
     if include_memory_context:
         memory_query = user_content.strip() if user_content else None
@@ -852,7 +849,7 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_search_tools(),
+            tools=memory_tool_definitions(),
             tool_executor=execute_memory_tool_call,
         )
     if provider == "anthropic":
@@ -900,7 +897,7 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_search_tools(),
+            tools=memory_tool_definitions(),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
         ):
@@ -932,7 +929,6 @@ async def _finalize_success(
     assistant_message: Message,
     reply_content: str,
     activate_branch: bool,
-    memory_user_content: str | None = None,
 ) -> None:
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
@@ -946,8 +942,6 @@ async def _finalize_success(
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
-    if memory_user_content:
-        asyncio.create_task(write_memory(user_content=memory_user_content, assistant_content=reply_content))
 
 
 async def _mark_failed(
@@ -1419,25 +1413,6 @@ def _latest_user_content(*, history: list[Message], parent_id: int | None) -> st
         if item.role == MessageRole.USER and item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
             return item.content
     return None
-
-
-def _resolve_memory_user_content(
-    *,
-    history: list[Message],
-    by_id: dict[int, Message],
-    target_message: Message,
-    parent_id: int | None,
-) -> str | None:
-    if target_message.role == MessageRole.USER:
-        return target_message.content
-
-    if parent_id is None:
-        return None
-
-    parent_message = by_id.get(parent_id)
-    if parent_message is not None and parent_message.role == MessageRole.USER:
-        return parent_message.content
-    return _latest_user_content(history=history, parent_id=parent_id)
 
 
 def _to_app_error(exc: Exception) -> AppError:

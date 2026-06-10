@@ -197,25 +197,86 @@ async def search_memory(*, query: str) -> str | None:
     return f"{MEMORY_CONTEXT_PREFIX}\n{text[: settings.memory_max_context_chars]}".strip()
 
 
-async def write_memory(*, user_content: str, assistant_content: str) -> None:
+def _memory_write_result(
+    *,
+    content: str,
+    tags: str,
+    importance: int,
+    pinned: bool,
+    feel: bool,
+    source_bucket: str,
+    valence: float,
+    arousal: float,
+) -> str:
+    lines = [
+        "记忆写入成功。",
+        f"正文：{_preview(content, 200)}",
+    ]
+    if tags:
+        lines.append(f"标签：{tags}")
+    if importance != 5:
+        lines.append(f"重要度：{importance}")
+    if pinned:
+        lines.append("钉选：true")
+    if feel:
+        lines.append("feel：true")
+    if source_bucket:
+        lines.append(f"源记忆桶：{source_bucket}")
+    if 0 <= valence <= 1:
+        lines.append(f"valence：{valence}")
+    if 0 <= arousal <= 1:
+        lines.append(f"arousal：{arousal}")
+    return "\n".join(lines)
+
+
+async def write_memory(
+    *,
+    content: str,
+    tags: str = "",
+    importance: int = 5,
+    pinned: bool = False,
+    feel: bool = False,
+    source_bucket: str = "",
+    valence: float = -1,
+    arousal: float = -1,
+) -> str:
     settings = get_settings()
     if not settings.memory_enabled:
-        return
+        return "记忆库未启用，未写入记忆。"
 
-    user_text = _normalize_memory_text(user_content)
-    assistant_text = _normalize_memory_text(assistant_content)
-    if not user_text or not assistant_text:
-        return
+    cleaned_content = _normalize_memory_text(content)
+    if not cleaned_content:
+        return "记忆正文为空，未写入记忆。"
 
-    content = _truncate(
-        f"用户：{user_text}\n助手：{assistant_text}",
-        settings.memory_write_max_chars,
-    )
+    cleaned_tags = _normalize_memory_text(tags)
+    cleaned_source_bucket = _normalize_memory_text(source_bucket)
+    payload = {
+        "content": _truncate(cleaned_content, settings.memory_write_max_chars),
+        "tags": cleaned_tags,
+        "importance": importance,
+        "pinned": pinned,
+        "feel": feel,
+        "source_bucket": cleaned_source_bucket,
+        "valence": valence,
+        "arousal": arousal,
+    }
     last_exc: Exception | None = None
     for attempt in range(2):
         try:
-            await _call_mcp_tool("hold", {"content": content}, timeout=settings.memory_write_timeout_seconds)
-            return
+            result = await _call_mcp_tool("hold", payload, timeout=settings.memory_write_timeout_seconds)
+            text = _extract_text(result)
+            if text:
+                return text
+            return _memory_write_result(
+                content=payload["content"],
+                tags=cleaned_tags,
+                importance=importance,
+                pinned=pinned,
+                feel=feel,
+                source_bucket=cleaned_source_bucket,
+                valence=valence,
+                arousal=arousal,
+            )
         except Exception as exc:
             last_exc = exc
             if attempt == 0:
@@ -227,7 +288,8 @@ async def write_memory(*, user_content: str, assistant_content: str) -> None:
             "Memory write failed for %s (%s, content_len=%s, content_preview=%r)",
             settings.memory_mcp_url,
             _exception_summary(last_exc),
-            len(content),
-            _preview(content),
+            len(payload["content"]),
+            _preview(payload["content"]),
             exc_info=last_exc,
         )
+        raise last_exc

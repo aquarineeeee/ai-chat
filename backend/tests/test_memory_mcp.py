@@ -104,7 +104,7 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(formatted)
 
-    async def test_write_memory_swallows_transport_errors(self) -> None:
+    async def test_write_memory_logs_and_raises_after_retries_fail(self) -> None:
         settings = types.SimpleNamespace(
             memory_enabled=True,
             memory_timeout_seconds=5.0,
@@ -119,7 +119,8 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
             patch("app.services.memory_mcp._call_mcp_tool", AsyncMock(side_effect=RuntimeError("offline"))),
             patch("app.services.memory_mcp.logger.error"),
         ):
-            await memory_mcp.write_memory(user_content="u", assistant_content="a")
+            with self.assertRaises(RuntimeError):
+                await memory_mcp.write_memory(content="u")
 
     async def test_write_memory_retries_once_before_logging(self) -> None:
         settings = types.SimpleNamespace(
@@ -144,10 +145,11 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
             patch("app.services.memory_mcp._call_mcp_tool", AsyncMock(side_effect=fake_call)),
             patch("app.services.memory_mcp.logger.error") as mock_error,
         ):
-            await memory_mcp.write_memory(user_content="u", assistant_content="a")
+            result = await memory_mcp.write_memory(content="u")
 
         self.assertEqual(attempts, 2)
         mock_error.assert_not_called()
+        self.assertEqual(result, '{"result": "ok"}')
 
     async def test_search_and_write_do_not_use_shared_lock(self) -> None:
         self.assertFalse(hasattr(memory_mcp, "_MCP_SESSION_LOCK"))
@@ -243,7 +245,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_generate_reply_for_openai_uses_memory_search_tool(self) -> None:
+    async def test_generate_reply_for_openai_uses_memory_tools(self) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1)
 
@@ -265,10 +267,43 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "final answer")
         mock_get_key.assert_awaited_once_with(session=session, user_id=1, provider="openai")
         _, kwargs = mock_reply.await_args
-        self.assertEqual(kwargs["tools"][0]["function"]["name"], "memory_search")
+        self.assertEqual(
+            [tool["function"]["name"] for tool in kwargs["tools"]],
+            ["memory_search", "memory_write"],
+        )
         self.assertTrue(callable(kwargs["tool_executor"]))
 
-    async def test_finalize_success_writes_memory_when_user_content_present(self) -> None:
+    async def test_build_prompt_messages_includes_memory_tool_guidance_for_openai(self) -> None:
+        session = AsyncMock()
+        conversation = Conversation(user_id=1, system_prompt="系统提示")
+        now = datetime.now(UTC)
+        history = [
+            Message(
+                id=1,
+                conversation_id=1,
+                parent_id=None,
+                role=MessageRole.USER,
+                content="之前的问题",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+
+        prompt_messages = await messages._build_prompt_messages(
+            session=session,
+            conversation=conversation,
+            parent_id=1,
+            history=history,
+            include_memory_context=False,
+            include_memory_tool_guidance=True,
+        )
+
+        self.assertEqual(prompt_messages[0], {"role": "system", "content": "系统提示"})
+        self.assertEqual(prompt_messages[1], {"role": "system", "content": messages.MEMORY_TOOL_GUIDANCE})
+        self.assertEqual(prompt_messages[2], {"role": "user", "content": "之前的问题"})
+
+    async def test_finalize_success_marks_message_completed_without_memory_write(self) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1)
         now = datetime.now(UTC)
@@ -283,30 +318,18 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             updated_at=now,
         )
 
-        created_coroutines = []
+        await messages._finalize_success(
+            session=session,
+            conversation=conversation,
+            branch=None,
+            assistant_message=assistant_message,
+            reply_content="新的回答",
+            activate_branch=True,
+        )
 
-        def fake_create_task(coro):
-            created_coroutines.append(coro)
-            coro.close()
-            return None
-
-        with (
-            patch("app.services.messages.write_memory", AsyncMock()) as mock_write_memory,
-            patch("app.services.messages.asyncio.create_task", side_effect=fake_create_task) as mock_create_task,
-        ):
-            await messages._finalize_success(
-                session=session,
-                conversation=conversation,
-                branch=None,
-                assistant_message=assistant_message,
-                reply_content="新的回答",
-                activate_branch=True,
-                memory_user_content="原始问题",
-            )
-
-        mock_write_memory.assert_called_once_with(user_content="原始问题", assistant_content="新的回答")
-        mock_create_task.assert_called_once()
-        self.assertEqual(len(created_coroutines), 1)
+        self.assertEqual(assistant_message.content, "新的回答")
+        self.assertEqual(assistant_message.status, MessageStatus.COMPLETED)
+        session.commit.assert_awaited_once()
 
 
 if __name__ == "__main__":

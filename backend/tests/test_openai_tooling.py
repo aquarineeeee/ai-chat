@@ -10,8 +10,10 @@ from app.models.api_key import ApiKey
 from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
 from app.services.memory_tools import (
     MEMORY_SEARCH_TOOL_NAME,
+    MEMORY_WRITE_TOOL_NAME,
     execute_memory_tool_call,
     memory_search_tool_definition,
+    memory_write_tool_definition,
 )
 
 
@@ -24,6 +26,14 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool["function"]["parameters"]["required"], ["query"])
         self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
 
+    def test_memory_write_tool_definition_exposes_required_content(self) -> None:
+        tool = memory_write_tool_definition()
+
+        self.assertEqual(tool["type"], "function")
+        self.assertEqual(tool["function"]["name"], MEMORY_WRITE_TOOL_NAME)
+        self.assertEqual(tool["function"]["parameters"]["required"], ["content"])
+        self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
+
     async def test_execute_memory_tool_call_returns_search_result(self) -> None:
         with patch(
             "app.services.memory_tools.search_memory",
@@ -34,10 +44,40 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "以下是长期记忆检索结果，仅供参考。\n记忆命中")
         mock_search.assert_awaited_once_with(query="用户偏好")
 
+    async def test_execute_memory_tool_call_writes_memory_with_full_hold_parameters(self) -> None:
+        with patch(
+            "app.services.memory_tools.write_memory",
+            AsyncMock(return_value="记忆写入成功。"),
+        ) as mock_write:
+            result = await execute_memory_tool_call(
+                MEMORY_WRITE_TOOL_NAME,
+                (
+                    '{"content":"用户最近在重构记忆库","tags":"memory,backend","importance":8,'
+                    '"pinned":true,"feel":false,"source_bucket":"bucket-1","valence":0.6,"arousal":0.4}'
+                ),
+            )
+
+        self.assertEqual(result, "记忆写入成功。")
+        mock_write.assert_awaited_once_with(
+            content="用户最近在重构记忆库",
+            tags="memory,backend",
+            importance=8,
+            pinned=True,
+            feel=False,
+            source_bucket="bucket-1",
+            valence=0.6,
+            arousal=0.4,
+        )
+
     async def test_execute_memory_tool_call_rejects_invalid_arguments(self) -> None:
         result = await execute_memory_tool_call(MEMORY_SEARCH_TOOL_NAME, '{"query":""}')
 
         self.assertEqual(result, "工具执行失败：query 不能为空")
+
+    async def test_execute_memory_tool_call_rejects_invalid_write_arguments(self) -> None:
+        result = await execute_memory_tool_call(MEMORY_WRITE_TOOL_NAME, '{"content":"","importance":5}')
+
+        self.assertEqual(result, "工具执行失败：content 不能为空")
 
 
 class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):

@@ -1,9 +1,12 @@
-import { ChevronDown, Loader2, Search } from 'lucide-react'
+import { ChevronDown, Database, Loader2, Search } from 'lucide-react'
 
 function summaryLabel(trace) {
   if (!trace) return ''
   if (trace.name === 'memory_search') {
     return trace.status === 'running' ? '正在检索记忆…' : '已检索记忆'
+  }
+  if (trace.name === 'memory_write') {
+    return trace.status === 'running' ? '正在写入记忆…' : '已写入记忆'
   }
   return trace.status === 'running' ? '工具执行中…' : '工具执行完成'
 }
@@ -14,6 +17,7 @@ export default function ToolTraceCard({ trace, onToggle }) {
   const expanded = !!trace.expanded
   const hasContent = !!(trace.content && String(trace.content).trim())
   const canToggle = hasContent && trace.status !== 'running'
+  const CompletedIcon = trace.name === 'memory_write' ? Database : Search
 
   return (
     <div
@@ -33,7 +37,7 @@ export default function ToolTraceCard({ trace, onToggle }) {
         {trace.status === 'running' ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
         ) : (
-          <Search className="w-3.5 h-3.5 shrink-0" />
+          <CompletedIcon className="w-3.5 h-3.5 shrink-0" />
         )}
         <span className="text-xs flex-1">{summaryLabel(trace)}</span>
         {canToggle && (
