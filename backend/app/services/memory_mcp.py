@@ -93,15 +93,17 @@ def _sse_message_payload(body: str) -> dict[str, Any]:
     raise ValueError("MCP SSE response did not contain a data payload")
 
 
-async def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+async def _call_mcp_tool(tool_name: str, arguments: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
     settings = get_settings()
+    effective_timeout = timeout if timeout is not None else settings.memory_timeout_seconds
     headers = {
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     }
     session_id: str | None = None
 
-    async with httpx.AsyncClient(timeout=settings.memory_timeout_seconds) as client:
+    transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+    async with httpx.AsyncClient(timeout=effective_timeout, transport=transport) as client:
         try:
             initialize_response = await client.post(
                 settings.memory_mcp_url,
@@ -212,7 +214,7 @@ async def write_memory(*, user_content: str, assistant_content: str) -> None:
     last_exc: Exception | None = None
     for attempt in range(2):
         try:
-            await _call_mcp_tool("hold", {"content": content})
+            await _call_mcp_tool("hold", {"content": content}, timeout=settings.memory_write_timeout_seconds)
             return
         except Exception as exc:
             last_exc = exc

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import types
 import unittest
 from datetime import UTC, datetime
@@ -61,6 +60,7 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
         settings = types.SimpleNamespace(
             memory_enabled=True,
             memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
             memory_max_context_chars=3000,
             memory_write_max_chars=6000,
             memory_mcp_url="http://127.0.0.1:8001/mcp",
@@ -87,6 +87,7 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
         settings = types.SimpleNamespace(
             memory_enabled=True,
             memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
             memory_max_context_chars=3000,
             memory_write_max_chars=6000,
             memory_mcp_url="http://127.0.0.1:8001/mcp",
@@ -107,6 +108,7 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
         settings = types.SimpleNamespace(
             memory_enabled=True,
             memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
             memory_max_context_chars=3000,
             memory_write_max_chars=6000,
             memory_mcp_url="http://127.0.0.1:8001/mcp",
@@ -123,6 +125,7 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
         settings = types.SimpleNamespace(
             memory_enabled=True,
             memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
             memory_max_context_chars=3000,
             memory_write_max_chars=6000,
             memory_mcp_url="http://127.0.0.1:8001/mcp",
@@ -146,9 +149,8 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(attempts, 2)
         mock_error.assert_not_called()
 
-    async def test_search_and_write_use_shared_lock(self) -> None:
-        self.assertTrue(hasattr(memory_mcp, "_MCP_SESSION_LOCK"))
-        self.assertIsInstance(memory_mcp._MCP_SESSION_LOCK, asyncio.Lock)
+    async def test_search_and_write_do_not_use_shared_lock(self) -> None:
+        self.assertFalse(hasattr(memory_mcp, "_MCP_SESSION_LOCK"))
 
 
 class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -211,7 +213,17 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             updated_at=now,
         )
 
-        with patch("app.services.messages.write_memory", AsyncMock()) as mock_write_memory:
+        created_coroutines = []
+
+        def fake_create_task(coro):
+            created_coroutines.append(coro)
+            coro.close()
+            return None
+
+        with (
+            patch("app.services.messages.write_memory", AsyncMock()) as mock_write_memory,
+            patch("app.services.messages.asyncio.create_task", side_effect=fake_create_task) as mock_create_task,
+        ):
             await messages._finalize_success(
                 session=session,
                 conversation=conversation,
@@ -222,7 +234,9 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 memory_user_content="原始问题",
             )
 
-        mock_write_memory.assert_awaited_once_with(user_content="原始问题", assistant_content="新的回答")
+        mock_write_memory.assert_called_once_with(user_content="原始问题", assistant_content="新的回答")
+        mock_create_task.assert_called_once()
+        self.assertEqual(len(created_coroutines), 1)
 
 
 if __name__ == "__main__":

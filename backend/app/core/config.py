@@ -36,6 +36,7 @@ class Settings:
     memory_enabled: bool
     memory_mcp_url: str
     memory_timeout_seconds: float
+    memory_write_timeout_seconds: float
     memory_max_context_chars: int
     memory_write_max_chars: int
 
@@ -92,6 +93,7 @@ def get_settings() -> Settings:
         memory_enabled=_bool("MEMORY_ENABLED", False),
         memory_mcp_url=os.getenv("MEMORY_MCP_URL", "http://127.0.0.1:8001/mcp"),
         memory_timeout_seconds=float(os.getenv("MEMORY_TIMEOUT_SECONDS", "5")),
+        memory_write_timeout_seconds=float(os.getenv("MEMORY_WRITE_TIMEOUT_SECONDS", "15")),
         memory_max_context_chars=int(os.getenv("MEMORY_MAX_CONTEXT_CHARS", "3000")),
         memory_write_max_chars=int(os.getenv("MEMORY_WRITE_MAX_CHARS", "6000")),
     )

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from decimal import Decimal
+from typing import Any
 
 import httpx
 
@@ -13,6 +14,8 @@ from app.models.api_key import ApiKey
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_MAX_TOOL_ROUND_TRIPS = 3
+ToolExecutor = Callable[[str, str], Awaitable[str]]
 
 
 def normalize_base_url(base_url: str | None) -> str | None:
@@ -74,10 +77,11 @@ def _extract_error_message(response: httpx.Response) -> str:
 def _chat_payload(
     *,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, object]],
     temperature: Decimal | None,
     max_tokens: int | None,
     stream: bool,
+    tools: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "model": model,
@@ -88,7 +92,85 @@ def _chat_payload(
         payload["temperature"] = float(temperature)
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     return payload
+
+
+def _response_message(data: dict[str, Any]) -> dict[str, Any]:
+    choice = (data.get("choices") or [None])[0]
+    message = choice.get("message") if isinstance(choice, dict) else None
+    if not isinstance(message, dict):
+        raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型响应格式不正确")
+    return message
+
+
+def _extract_tool_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_tool_calls = message.get("tool_calls")
+    if not isinstance(raw_tool_calls, list):
+        return []
+
+    tool_calls: list[dict[str, Any]] = []
+    for item in raw_tool_calls:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if not isinstance(name, str) or not isinstance(arguments, str):
+            continue
+        tool_calls.append(item)
+    return tool_calls
+
+
+async def _create_completion(
+    client: httpx.AsyncClient,
+    *,
+    url: str,
+    api_key: str,
+    payload: dict[str, object],
+) -> httpx.Response:
+    try:
+        return await client.post(url, headers=_build_headers(api_key), json=payload)
+    except httpx.HTTPError as exc:
+        raise AppError(
+            status_code=502,
+            code="MODEL_ERROR",
+            message=_http_error_message("请求上游模型服务失败", exc),
+        ) from exc
+
+
+def _assistant_history_message(message: dict[str, Any]) -> dict[str, object]:
+    history_message: dict[str, object] = {
+        "role": "assistant",
+        "content": message.get("content") if message.get("content") is not None else "",
+    }
+    tool_calls = _extract_tool_calls(message)
+    if tool_calls:
+        history_message["tool_calls"] = tool_calls
+    return history_message
+
+
+async def _run_tool_round(
+    *,
+    message_history: list[dict[str, object]],
+    tool_calls: list[dict[str, Any]],
+    tool_executor: ToolExecutor,
+) -> None:
+    message_history.append(_assistant_history_message({"tool_calls": tool_calls, "content": ""}))
+    for index, tool_call in enumerate(tool_calls):
+        function = tool_call["function"]
+        tool_result = await tool_executor(str(function["name"]), str(function["arguments"]))
+        message_history.append(
+            {
+                "role": "tool",
+                "tool_call_id": str(tool_call.get("id") or f"tool-call-{index}"),
+                "content": tool_result,
+            }
+        )
 
 
 async def create_openai_compatible_reply(
@@ -98,16 +180,14 @@ async def create_openai_compatible_reply(
     messages: list[dict[str, str]],
     temperature: Decimal | None,
     max_tokens: int | None,
+    tools: list[dict[str, object]] | None = None,
+    tool_executor: ToolExecutor | None = None,
+    max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
 ) -> str:
     raw_key = decrypt_text(api_key.key_encrypted)
-    payload = _chat_payload(
-        model=model,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        stream=False,
-    )
     url = f"{_resolve_base_url(api_key.base_url)}/chat/completions"
+    if tools and tool_executor is None:
+        raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(90.0, connect=15.0),
@@ -115,29 +195,55 @@ async def create_openai_compatible_reply(
         trust_env=False,
         http2=False,
     ) as client:
-        try:
-            response = await client.post(url, headers=_build_headers(raw_key), json=payload)
-        except httpx.HTTPError as exc:
-            raise AppError(
-                status_code=502,
-                code="MODEL_ERROR",
-                message=_http_error_message("请求上游模型服务失败", exc),
-            ) from exc
+        message_history: list[dict[str, object]] = [dict(message) for message in messages]
+        max_rounds = max_tool_round_trips if tools else 1
+        for _ in range(max_rounds):
+            payload = _chat_payload(
+                model=model,
+                messages=message_history,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=False,
+                tools=tools,
+            )
+            response = await _create_completion(
+                client,
+                url=url,
+                api_key=raw_key,
+                payload=payload,
+            )
+            if response.status_code >= 400:
+                raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(response))
 
-    if response.status_code >= 400:
-        raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(response))
+            try:
+                data = response.json()
+                message = _response_message(data)
+            except AppError:
+                raise
+            except Exception as exc:
+                raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型响应格式不正确") from exc
 
-    try:
-        data = response.json()
-        choice = (data.get("choices") or [])[0]
-        message = choice.get("message") or {}
-        content = _stringify_content(message.get("content"))
-    except Exception as exc:
-        raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型响应格式不正确") from exc
+            tool_calls = _extract_tool_calls(message)
+            if tool_calls:
+                if tool_executor is None:
+                    raise AppError(
+                        status_code=500,
+                        code="CONFIG_ERROR",
+                        message="收到工具调用但未配置 tool_executor",
+                    )
+                await _run_tool_round(
+                    message_history=message_history,
+                    tool_calls=tool_calls,
+                    tool_executor=tool_executor,
+                )
+                continue
 
-    if not content:
-        raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
-    return content
+            content = _stringify_content(message.get("content"))
+            if content:
+                return content
+            raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
+
+    raise AppError(status_code=502, code="MODEL_ERROR", message="模型工具调用次数超出限制")
 
 
 async def stream_openai_compatible_reply(
