@@ -273,6 +273,34 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(callable(kwargs["tool_executor"]))
 
+    async def test_generate_reply_for_anthropic_uses_memory_tools(self) -> None:
+        session = AsyncMock()
+        conversation = Conversation(user_id=1)
+
+        with (
+            patch("app.services.messages.get_preferred_api_key", AsyncMock(return_value="api-key")) as mock_get_key,
+            patch("app.services.messages.create_anthropic_reply", AsyncMock(return_value="final answer")) as mock_reply,
+        ):
+            result = await messages._generate_reply(
+                session=session,
+                user_id=1,
+                conversation=conversation,
+                provider="anthropic",
+                model="claude-sonnet-4-20250514",
+                temperature=None,
+                max_tokens=1000,
+                prompt_messages=[{"role": "user", "content": "hello"}],
+            )
+
+        self.assertEqual(result, "final answer")
+        mock_get_key.assert_awaited_once_with(session=session, user_id=1, provider="anthropic")
+        _, kwargs = mock_reply.await_args
+        self.assertEqual(
+            [tool["function"]["name"] for tool in kwargs["tools"]],
+            ["memory_search", "memory_write"],
+        )
+        self.assertTrue(callable(kwargs["tool_executor"]))
+
     async def test_build_prompt_messages_includes_memory_tool_guidance_for_openai(self) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1, system_prompt="系统提示")

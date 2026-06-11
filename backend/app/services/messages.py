@@ -44,6 +44,7 @@ from app.services.memory_tools import execute_memory_tool_call, memory_tool_defi
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
 MESSAGE_TREE_MAX_NODES = 400
+MEMORY_TOOL_PROVIDERS = {"openai", "anthropic"}
 MEMORY_TOOL_GUIDANCE = (
     "你可以按需使用长期记忆工具：当回答依赖跨会话背景、用户偏好或历史约束时，调用 memory_search；"
     "当发现值得长期保留的信息时，可以调用 memory_write。memory_write 的 content 应该是一条提炼后的记忆，"
@@ -670,8 +671,8 @@ async def _prepare_generation(
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
         history=history,
-        include_memory_context=provider != "openai",
-        include_memory_tool_guidance=provider == "openai",
+        include_memory_context=provider not in MEMORY_TOOL_PROVIDERS,
+        include_memory_tool_guidance=provider in MEMORY_TOOL_PROVIDERS,
     )
     return {
         "activate_branch": payload.activate_branch,
@@ -760,8 +761,8 @@ async def _prepare_regeneration(
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
         history=history,
-        include_memory_context=provider != "openai",
-        include_memory_tool_guidance=provider == "openai",
+        include_memory_context=provider not in MEMORY_TOOL_PROVIDERS,
+        include_memory_tool_guidance=provider in MEMORY_TOOL_PROVIDERS,
     )
     return {
         "activate_branch": payload.activate_branch,
@@ -860,6 +861,8 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            tools=memory_tool_definitions(),
+            tool_executor=execute_memory_tool_call,
         )
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 
@@ -909,14 +912,25 @@ async def _stream_reply(
         return
     if provider == "anthropic":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        async def emit_tool_event(tool: dict[str, object]) -> None:
+            yield_event.append({"type": "tool", "tool": tool})
+
+        yield_event: list[dict[str, object]] = []
         async for chunk in stream_anthropic_reply(
             api_key=api_key,
             model=model,
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            tools=memory_tool_definitions(),
+            tool_executor=execute_memory_tool_call,
+            tool_event_callback=emit_tool_event,
         ):
+            while yield_event:
+                yield yield_event.pop(0)
             yield {"type": "content", "content": chunk}
+        while yield_event:
+            yield yield_event.pop(0)
         return
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 
