@@ -165,10 +165,20 @@ async def _call_mcp_tool(tool_name: str, arguments: dict[str, Any], *, timeout: 
                     logger.debug("Failed to terminate MCP session %s", session_id, exc_info=True)
 
 
-async def search_memory(*, query: str) -> str | None:
+async def search_memory(
+    *,
+    query: str = "",
+    max_tokens: int = 1500,
+    domain: str = "",
+    valence: float = -1,
+    arousal: float = -1,
+    max_results: int = 8,
+    importance_min: int = -1,
+) -> str | None:
     settings = get_settings()
     cleaned_query = _normalize_memory_text(query)
-    if not settings.memory_enabled or not cleaned_query:
+    cleaned_domain = _normalize_memory_text(domain)
+    if not settings.memory_enabled:
         return None
 
     try:
@@ -177,8 +187,12 @@ async def search_memory(*, query: str) -> str | None:
                 "breath",
                 {
                     "query": cleaned_query,
-                    "max_tokens": 1500,
-                    "max_results": 8,
+                    "max_tokens": max_tokens,
+                    "domain": cleaned_domain,
+                    "valence": valence,
+                    "arousal": arousal,
+                    "max_results": max_results,
+                    "importance_min": importance_min,
                 },
             )
     except Exception as exc:

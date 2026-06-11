@@ -16,6 +16,7 @@ from app.models.api_key import ApiKey
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_MAX_TOKENS = 2000
+DEFAULT_CACHE_CONTROL = {"type": "ephemeral"}
 DEFAULT_MAX_TOOL_ROUND_TRIPS = 3
 ToolExecutor = Callable[[str, str], Awaitable[str]]
 ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
@@ -230,6 +231,7 @@ def _messages_payload(
         "messages": anthropic_messages,
         "max_tokens": max_tokens or DEFAULT_ANTHROPIC_MAX_TOKENS,
         "stream": stream,
+        "cache_control": dict(DEFAULT_CACHE_CONTROL),
     }
     if system:
         payload["system"] = system

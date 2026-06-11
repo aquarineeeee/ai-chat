@@ -83,6 +83,46 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
             "以下是长期记忆检索结果，仅供参考，可能相关，但不保证是当前最新事实。\n记忆一\n记忆二",
         )
 
+    async def test_search_memory_forwards_full_breath_payload(self) -> None:
+        settings = types.SimpleNamespace(
+            memory_enabled=True,
+            memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
+            memory_max_context_chars=3000,
+            memory_write_max_chars=6000,
+            memory_mcp_url="http://127.0.0.1:8001/mcp",
+        )
+
+        with (
+            patch("app.services.memory_mcp.get_settings", return_value=settings),
+            patch(
+                "app.services.memory_mcp._call_mcp_tool",
+                AsyncMock(return_value={"content": [{"text": "记忆一"}]}),
+            ) as mock_call,
+        ):
+            await memory_mcp.search_memory(
+                query="  项目约束  ",
+                max_tokens=2000,
+                domain="  编程,项目  ",
+                valence=0.6,
+                arousal=0.4,
+                max_results=6,
+                importance_min=3,
+            )
+
+        mock_call.assert_awaited_once_with(
+            "breath",
+            {
+                "query": "项目约束",
+                "max_tokens": 2000,
+                "domain": "编程,项目",
+                "valence": 0.6,
+                "arousal": 0.4,
+                "max_results": 6,
+                "importance_min": 3,
+            },
+        )
+
     async def test_search_memory_returns_none_for_no_results_text(self) -> None:
         settings = types.SimpleNamespace(
             memory_enabled=True,
@@ -330,6 +370,9 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prompt_messages[0], {"role": "system", "content": "系统提示"})
         self.assertEqual(prompt_messages[1], {"role": "system", "content": messages.MEMORY_TOOL_GUIDANCE})
         self.assertEqual(prompt_messages[2], {"role": "user", "content": "之前的问题"})
+        self.assertIn("domain", messages.MEMORY_TOOL_GUIDANCE)
+        self.assertIn("importance_min", messages.MEMORY_TOOL_GUIDANCE)
+        self.assertIn("query 为空", messages.MEMORY_TOOL_GUIDANCE)
 
     async def test_finalize_success_marks_message_completed_without_memory_write(self) -> None:
         session = AsyncMock()

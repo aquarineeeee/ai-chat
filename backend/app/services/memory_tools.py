@@ -24,10 +24,34 @@ MEMORY_SEARCH_TOOL_DEFINITION: dict[str, Any] = {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "用于检索长期记忆的简洁查询语句。",
-                }
+                    "description": "用于检索长期记忆的简洁查询语句，允许留空以触发自动浮现。",
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "breath 最多返回的 token 数，默认 10000。",
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "逗号分隔的记忆领域筛选。",
+                },
+                "valence": {
+                    "type": "number",
+                    "description": "情绪效价，-1 表示忽略，0~1 表示过滤。",
+                },
+                "arousal": {
+                    "type": "number",
+                    "description": "情绪唤醒，-1 表示忽略，0~1 表示过滤。",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "最多返回记忆数，默认 20，最大 50。",
+                },
+                "importance_min": {
+                    "type": "integer",
+                    "description": "最低重要度，-1 表示忽略。",
+                },
             },
-            "required": ["query"],
+            "required": [],
             "additionalProperties": False,
         },
     },
@@ -69,11 +93,11 @@ MEMORY_WRITE_TOOL_DEFINITION: dict[str, Any] = {
                 },
                 "valence": {
                     "type": "number",
-                    "description": "情绪效价，0-1 有效。",
+                    "description": "情绪效价，-1 有效。",
                 },
                 "arousal": {
                     "type": "number",
-                    "description": "情绪唤醒，0-1 有效。",
+                    "description": "情绪唤醒，-1 有效。",
                 },
             },
             "required": ["content"],
@@ -121,6 +145,14 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_optional_unit_interval(value: float) -> bool:
+    return value == -1 or 0 <= value <= 1
+
+
 async def execute_memory_tool_call(tool_name: str, arguments_json: str) -> str:
     try:
         payload = _parse_tool_arguments(arguments_json)
@@ -128,16 +160,53 @@ async def execute_memory_tool_call(tool_name: str, arguments_json: str) -> str:
         return _tool_error(str(exc))
 
     if tool_name == MEMORY_SEARCH_TOOL_NAME:
-        query = payload.get("query")
+        query = payload.get("query", "")
         if not isinstance(query, str):
             return _tool_error("query 必须是字符串")
 
+        max_tokens = payload.get("max_tokens", 10000)
+        if not _is_int(max_tokens) or max_tokens <= 0:
+            return _tool_error("max_tokens 必须是正整数")
+
+        domain = payload.get("domain", "")
+        if not isinstance(domain, str):
+            return _tool_error("domain 必须是字符串")
+
+        valence = payload.get("valence", -1)
+        if not _is_number(valence):
+            return _tool_error("valence 必须是数字")
+        valence = float(valence)
+        if not _is_optional_unit_interval(valence):
+            return _tool_error("valence 必须为 -1 或 0~1")
+
+        arousal = payload.get("arousal", -1)
+        if not _is_number(arousal):
+            return _tool_error("arousal 必须是数字")
+        arousal = float(arousal)
+        if not _is_optional_unit_interval(arousal):
+            return _tool_error("arousal 必须为 -1 或 0~1")
+
+        max_results = payload.get("max_results", 20)
+        if not _is_int(max_results) or not 1 <= max_results <= 50:
+            return _tool_error("max_results 必须是 1~50 的整数")
+
+        importance_min = payload.get("importance_min", -1)
+        if not _is_int(importance_min) or importance_min < -1:
+            return _tool_error("importance_min 必须是大于等于 -1 的整数")
+
         cleaned_query = _normalize_memory_text(query)
-        if not cleaned_query:
-            return _tool_error("query 不能为空")
+        cleaned_domain = _normalize_memory_text(domain)
 
         try:
-            result = await search_memory(query=cleaned_query)
+            result = await search_memory(
+                query=cleaned_query,
+                max_tokens=max_tokens,
+                domain=cleaned_domain,
+                valence=valence,
+                arousal=arousal,
+                max_results=max_results,
+                importance_min=importance_min,
+            )
         except Exception:
             logger.exception("Memory search tool execution failed for query=%r", cleaned_query)
             return _tool_error("记忆检索异常")

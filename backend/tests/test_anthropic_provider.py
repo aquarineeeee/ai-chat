@@ -26,6 +26,7 @@ class AnthropicProviderTests(unittest.TestCase):
 
         self.assertEqual(payload["model"], "claude-sonnet-4-20250514")
         self.assertEqual(payload["max_tokens"], 1000)
+        self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
         self.assertEqual(payload["messages"], [{"role": "user", "content": "Hello"}])
         self.assertEqual(
             payload["system"],
@@ -49,16 +50,18 @@ class AnthropicProviderTests(unittest.TestCase):
 
         self.assertEqual(payload["max_tokens"], 2000)
         self.assertTrue(payload["stream"])
+        self.assertEqual(payload["cache_control"], {"type": "ephemeral"})
         self.assertNotIn("system", payload)
 
     def test_messages_payload_adapts_openai_function_tools(self) -> None:
+        tool = memory_search_tool_definition()
         payload = _messages_payload(
             model="claude-sonnet-4-20250514",
             messages=[{"role": "user", "content": "Hello"}],
             temperature=None,
             max_tokens=1000,
             stream=False,
-            tools=[memory_search_tool_definition()],
+            tools=[tool],
         )
 
         self.assertEqual(
@@ -66,15 +69,16 @@ class AnthropicProviderTests(unittest.TestCase):
             [
                 {
                     "name": MEMORY_SEARCH_TOOL_NAME,
-                    "description": memory_search_tool_definition()["function"]["description"],
-                    "input_schema": memory_search_tool_definition()["function"]["parameters"],
+                    "description": tool["function"]["description"],
+                    "input_schema": tool["function"]["parameters"],
                 }
             ],
         )
+        self.assertIn("importance_min", payload["tools"][0]["input_schema"]["properties"])
 
 
 class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_create_reply_handles_tool_round_trip(self) -> None:
+    async def test_create_reply_handles_tool_round_trip_with_full_breath_arguments(self) -> None:
         api_key = ApiKey(provider="anthropic", key_encrypted="encrypted")
         first_response = httpx.Response(
             status_code=200,
@@ -84,7 +88,15 @@ class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
                         "type": "tool_use",
                         "id": "toolu-1",
                         "name": MEMORY_SEARCH_TOOL_NAME,
-                        "input": {"query": "项目约束"},
+                        "input": {
+                            "query": "项目约束",
+                            "max_tokens": 2000,
+                            "domain": "编程,项目",
+                            "valence": 0.6,
+                            "arousal": 0.4,
+                            "max_results": 6,
+                            "importance_min": 3,
+                        },
                     }
                 ]
             },
@@ -134,7 +146,10 @@ class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result, "我查到了之前的项目约束，现在继续回答。")
-        tool_executor.assert_awaited_once_with(MEMORY_SEARCH_TOOL_NAME, '{"query":"项目约束"}')
+        tool_executor.assert_awaited_once_with(
+            MEMORY_SEARCH_TOOL_NAME,
+            '{"query":"项目约束","max_tokens":2000,"domain":"编程,项目","valence":0.6,"arousal":0.4,"max_results":6,"importance_min":3}',
+        )
         self.assertEqual(len(fake_client.requests), 2)
 
         second_messages = fake_client.requests[1]["json"]["messages"]
@@ -163,7 +178,7 @@ class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
         api_key = ApiKey(provider="anthropic", key_encrypted="encrypted")
         first_lines = [
             'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu-1","name":"memory_search","input":{}}}',
-            'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"项目约束\\"}"}}',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"项目约束\\",\\"max_tokens\\":2000,\\"domain\\":\\"编程,项目\\",\\"valence\\":0.6,\\"arousal\\":0.4,\\"max_results\\":6,\\"importance_min\\":3}"}}',
             'data: {"type":"message_stop"}',
         ]
         second_lines = [
@@ -234,17 +249,24 @@ class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
                 chunks.append(chunk)
 
         self.assertEqual(chunks, ["最终", "回答"])
-        tool_executor.assert_awaited_once_with(MEMORY_SEARCH_TOOL_NAME, '{"query":"项目约束"}')
         self.assertEqual(
             tool_events,
             [
-                {"name": "memory_search", "status": "running", "arguments": '{"query":"项目约束"}'},
+                {
+                    "name": "memory_search",
+                    "status": "running",
+                    "arguments": '{"query":"项目约束","max_tokens":2000,"domain":"编程,项目","valence":0.6,"arousal":0.4,"max_results":6,"importance_min":3}',
+                },
                 {
                     "name": "memory_search",
                     "status": "completed",
                     "content": "以下是长期记忆检索结果，仅供参考。\n项目约束",
                 },
             ],
+        )
+        tool_executor.assert_awaited_once_with(
+            MEMORY_SEARCH_TOOL_NAME,
+            '{"query":"项目约束","max_tokens":2000,"domain":"编程,项目","valence":0.6,"arousal":0.4,"max_results":6,"importance_min":3}',
         )
         self.assertEqual(len(fake_client.requests), 2)
         second_messages = fake_client.requests[1]["json"]["messages"]

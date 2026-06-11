@@ -47,6 +47,8 @@ MESSAGE_TREE_MAX_NODES = 400
 MEMORY_TOOL_PROVIDERS = {"openai", "anthropic"}
 MEMORY_TOOL_GUIDANCE = (
     "你可以按需使用长期记忆工具：当回答依赖跨会话背景、用户偏好或历史约束时，调用 memory_search；"
+    "memory_search 支持按需传入 query、domain、valence、arousal、max_results、importance_min、max_tokens；"
+    "当 query 为空时，可用于自动浮现相关记忆。"
     "当发现值得长期保留的信息时，可以调用 memory_write。memory_write 的 content 应该是一条提炼后的记忆，"
     "不要原样转录整段对话；tags、importance、pinned、feel、source_bucket、valence、arousal 仅在确有必要时填写。"
     "不是每轮都必须写记忆。"

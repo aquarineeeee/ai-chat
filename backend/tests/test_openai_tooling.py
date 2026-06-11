@@ -18,13 +18,18 @@ from app.services.memory_tools import (
 
 
 class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
-    def test_memory_search_tool_definition_exposes_required_query(self) -> None:
+    def test_memory_search_tool_definition_exposes_full_breath_parameters(self) -> None:
         tool = memory_search_tool_definition()
+        parameters = tool["function"]["parameters"]
 
         self.assertEqual(tool["type"], "function")
         self.assertEqual(tool["function"]["name"], MEMORY_SEARCH_TOOL_NAME)
-        self.assertEqual(tool["function"]["parameters"]["required"], ["query"])
-        self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
+        self.assertEqual(
+            set(parameters["properties"]),
+            {"query", "max_tokens", "domain", "valence", "arousal", "max_results", "importance_min"},
+        )
+        self.assertEqual(parameters["required"], [])
+        self.assertFalse(parameters["additionalProperties"])
 
     def test_memory_write_tool_definition_exposes_required_content(self) -> None:
         tool = memory_write_tool_definition()
@@ -39,10 +44,24 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
             "app.services.memory_tools.search_memory",
             AsyncMock(return_value="以下是长期记忆检索结果，仅供参考。\n记忆命中"),
         ) as mock_search:
-            result = await execute_memory_tool_call(MEMORY_SEARCH_TOOL_NAME, '{"query":"用户偏好"}')
+            result = await execute_memory_tool_call(
+                MEMORY_SEARCH_TOOL_NAME,
+                (
+                    '{"query":"用户偏好","max_tokens":2000,"domain":"编程,产品","valence":0.6,'
+                    '"arousal":0.4,"max_results":6,"importance_min":3}'
+                ),
+            )
 
         self.assertEqual(result, "以下是长期记忆检索结果，仅供参考。\n记忆命中")
-        mock_search.assert_awaited_once_with(query="用户偏好")
+        mock_search.assert_awaited_once_with(
+            query="用户偏好",
+            max_tokens=2000,
+            domain="编程,产品",
+            valence=0.6,
+            arousal=0.4,
+            max_results=6,
+            importance_min=3,
+        )
 
     async def test_execute_memory_tool_call_writes_memory_with_full_hold_parameters(self) -> None:
         with patch(
@@ -69,10 +88,28 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
             arousal=0.4,
         )
 
-    async def test_execute_memory_tool_call_rejects_invalid_arguments(self) -> None:
-        result = await execute_memory_tool_call(MEMORY_SEARCH_TOOL_NAME, '{"query":""}')
+    async def test_execute_memory_tool_call_rejects_invalid_search_arguments(self) -> None:
+        result = await execute_memory_tool_call(MEMORY_SEARCH_TOOL_NAME, '{"max_results":51}')
 
-        self.assertEqual(result, "工具执行失败：query 不能为空")
+        self.assertEqual(result, "工具执行失败：max_results 必须是 1~50 的整数")
+
+    async def test_execute_memory_tool_call_allows_empty_query_for_auto_recall(self) -> None:
+        with patch(
+            "app.services.memory_tools.search_memory",
+            AsyncMock(return_value="以下是长期记忆检索结果，仅供参考。\n自动浮现"),
+        ) as mock_search:
+            result = await execute_memory_tool_call(MEMORY_SEARCH_TOOL_NAME, "{}")
+
+        self.assertEqual(result, "以下是长期记忆检索结果，仅供参考。\n自动浮现")
+        mock_search.assert_awaited_once_with(
+            query="",
+            max_tokens=10000,
+            domain="",
+            valence=-1.0,
+            arousal=-1.0,
+            max_results=20,
+            importance_min=-1,
+        )
 
     async def test_execute_memory_tool_call_rejects_invalid_write_arguments(self) -> None:
         result = await execute_memory_tool_call(MEMORY_WRITE_TOOL_NAME, '{"content":"","importance":5}')
