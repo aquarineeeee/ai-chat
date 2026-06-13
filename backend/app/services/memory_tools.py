@@ -4,21 +4,21 @@ import json
 import logging
 from typing import Any
 
-from app.services.memory_mcp import NO_MEMORY_RESULTS, _normalize_memory_text, search_memory, write_memory
+from app.services.memory_mcp import NO_MEMORY_RESULTS, _normalize_memory_text, grow_memory, search_memory, update_memory, write_memory
 
 
 logger = logging.getLogger(__name__)
 MEMORY_SEARCH_TOOL_NAME = "memory_search"
 MEMORY_WRITE_TOOL_NAME = "memory_write"
+MEMORY_GROW_TOOL_NAME = "memory_grow"
+MEMORY_UPDATE_TOOL_NAME = "memory_update"
 TOOL_ERROR_PREFIX = "工具执行失败："
 
 MEMORY_SEARCH_TOOL_DEFINITION: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": MEMORY_SEARCH_TOOL_NAME,
-        "description": (
-            "检索与当前用户相关的长期记忆。仅在问题依赖跨会话偏好、历史约束或长期背景时调用。"
-        ),
+        "description": "检索与当前用户相关的长期记忆。仅在问题依赖跨会话偏好、历史约束或长期背景时调用。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -61,9 +61,7 @@ MEMORY_WRITE_TOOL_DEFINITION: dict[str, Any] = {
     "type": "function",
     "function": {
         "name": MEMORY_WRITE_TOOL_NAME,
-        "description": (
-            "写入一条长期记忆。仅在信息值得跨会话保留时调用，content 应为提炼后的单条记忆，而不是整段对话转录。"
-        ),
+        "description": "写入一条长期记忆。仅在信息值得跨会话保留时调用，content 应为提炼后的单条记忆，而不是整段对话转录。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -106,6 +104,88 @@ MEMORY_WRITE_TOOL_DEFINITION: dict[str, Any] = {
     },
 }
 
+MEMORY_GROW_TOOL_DEFINITION: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": MEMORY_GROW_TOOL_NAME,
+        "description": "Import a longer note and let the memory service split it into multiple long-term memories.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The long-form text to import.",
+                },
+            },
+            "required": ["content"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+MEMORY_UPDATE_TOOL_DEFINITION: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": MEMORY_UPDATE_TOOL_NAME,
+        "description": "更新或删除已有长期记忆。用于修正文案、标签、领域、重要度，或标记 resolved、pinned、digested。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bucket_id": {
+                    "type": "string",
+                    "description": "要更新的记忆桶 ID，必填。",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "新的标题或名称。",
+                },
+                "domain": {
+                    "type": "string",
+                    "description": "逗号分隔的领域字符串。",
+                },
+                "valence": {
+                    "type": "number",
+                    "description": "情绪效价，-1 表示不改，0~1 表示更新。",
+                },
+                "arousal": {
+                    "type": "number",
+                    "description": "情绪唤醒，-1 表示不改，0~1 表示更新。",
+                },
+                "importance": {
+                    "type": "integer",
+                    "description": "重要度，-1 表示不改。",
+                },
+                "tags": {
+                    "type": "string",
+                    "description": "逗号分隔的标签字符串。",
+                },
+                "resolved": {
+                    "type": "integer",
+                    "description": "1 设为已解决，0 取消，-1 不改。",
+                },
+                "pinned": {
+                    "type": "integer",
+                    "description": "1 设为钉选，0 取消，-1 不改。",
+                },
+                "digested": {
+                    "type": "integer",
+                    "description": "1 设为已消化，0 取消，-1 不改。",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "更新后的正文。",
+                },
+                "delete": {
+                    "type": "boolean",
+                    "description": "是否删除该记忆。",
+                },
+            },
+            "required": ["bucket_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 def memory_search_tool_definition() -> dict[str, Any]:
     return json.loads(json.dumps(MEMORY_SEARCH_TOOL_DEFINITION))
@@ -115,11 +195,23 @@ def memory_write_tool_definition() -> dict[str, Any]:
     return json.loads(json.dumps(MEMORY_WRITE_TOOL_DEFINITION))
 
 
-def memory_tool_definitions() -> list[dict[str, Any]]:
-    return [
+def memory_update_tool_definition() -> dict[str, Any]:
+    return json.loads(json.dumps(MEMORY_UPDATE_TOOL_DEFINITION))
+
+
+def memory_grow_tool_definition() -> dict[str, Any]:
+    return json.loads(json.dumps(MEMORY_GROW_TOOL_DEFINITION))
+
+
+def memory_tool_definitions(*, include_grow: bool = False) -> list[dict[str, Any]]:
+    tools = [
         memory_search_tool_definition(),
         memory_write_tool_definition(),
     ]
+    if include_grow:
+        tools.append(memory_grow_tool_definition())
+    tools.append(memory_update_tool_definition())
+    return tools
 
 
 def memory_search_tools() -> list[dict[str, Any]]:
@@ -151,6 +243,10 @@ def _is_int(value: Any) -> bool:
 
 def _is_optional_unit_interval(value: float) -> bool:
     return value == -1 or 0 <= value <= 1
+
+
+def _is_optional_trace_toggle(value: int) -> bool:
+    return value in {-1, 0, 1}
 
 
 async def execute_memory_tool_call(tool_name: str, arguments_json: str) -> str:
@@ -229,7 +325,7 @@ async def execute_memory_tool_call(tool_name: str, arguments_json: str) -> str:
             return _tool_error("tags 必须是字符串")
 
         importance = payload.get("importance", 5)
-        if not isinstance(importance, int) or isinstance(importance, bool):
+        if not _is_int(importance):
             return _tool_error("importance 必须是整数")
 
         pinned = payload.get("pinned", False)
@@ -266,5 +362,98 @@ async def execute_memory_tool_call(tool_name: str, arguments_json: str) -> str:
         except Exception:
             logger.exception("Memory write tool execution failed for content=%r", cleaned_content)
             return _tool_error("记忆写入异常")
+
+    if tool_name == MEMORY_GROW_TOOL_NAME:
+        content = payload.get("content")
+        if not isinstance(content, str):
+            return _tool_error("content 蹇呴』鏄瓧绗︿覆")
+
+        cleaned_content = _normalize_memory_text(content)
+        if not cleaned_content:
+            return _tool_error("content 涓嶈兘涓虹┖")
+
+        try:
+            return await grow_memory(content=cleaned_content)
+        except Exception:
+            logger.exception("Memory grow tool execution failed for content=%r", cleaned_content)
+            return _tool_error("Memory import failed")
+
+    if tool_name == MEMORY_UPDATE_TOOL_NAME:
+        bucket_id = payload.get("bucket_id")
+        if not isinstance(bucket_id, str):
+            return _tool_error("bucket_id 必须是字符串")
+
+        cleaned_bucket_id = _normalize_memory_text(bucket_id)
+        if not cleaned_bucket_id:
+            return _tool_error("bucket_id 不能为空")
+
+        name = payload.get("name", "")
+        if not isinstance(name, str):
+            return _tool_error("name 必须是字符串")
+
+        domain = payload.get("domain", "")
+        if not isinstance(domain, str):
+            return _tool_error("domain 必须是字符串")
+
+        valence = payload.get("valence", -1)
+        if not _is_number(valence):
+            return _tool_error("valence 必须是数字")
+        valence = float(valence)
+        if not _is_optional_unit_interval(valence):
+            return _tool_error("valence 必须为 -1 或 0~1")
+
+        arousal = payload.get("arousal", -1)
+        if not _is_number(arousal):
+            return _tool_error("arousal 必须是数字")
+        arousal = float(arousal)
+        if not _is_optional_unit_interval(arousal):
+            return _tool_error("arousal 必须为 -1 或 0~1")
+
+        importance = payload.get("importance", -1)
+        if not _is_int(importance) or importance < -1:
+            return _tool_error("importance 必须是大于等于 -1 的整数")
+
+        tags = payload.get("tags", "")
+        if not isinstance(tags, str):
+            return _tool_error("tags 必须是字符串")
+
+        resolved = payload.get("resolved", -1)
+        if not _is_int(resolved) or not _is_optional_trace_toggle(resolved):
+            return _tool_error("resolved 必须为 -1、0 或 1")
+
+        pinned = payload.get("pinned", -1)
+        if not _is_int(pinned) or not _is_optional_trace_toggle(pinned):
+            return _tool_error("pinned 必须为 -1、0 或 1")
+
+        digested = payload.get("digested", -1)
+        if not _is_int(digested) or not _is_optional_trace_toggle(digested):
+            return _tool_error("digested 必须为 -1、0 或 1")
+
+        content = payload.get("content", "")
+        if not isinstance(content, str):
+            return _tool_error("content 必须是字符串")
+
+        delete = payload.get("delete", False)
+        if not isinstance(delete, bool):
+            return _tool_error("delete 必须是布尔值")
+
+        try:
+            return await update_memory(
+                bucket_id=cleaned_bucket_id,
+                name=_normalize_memory_text(name),
+                domain=_normalize_memory_text(domain),
+                valence=valence,
+                arousal=arousal,
+                importance=importance,
+                tags=_normalize_memory_text(tags),
+                resolved=resolved,
+                pinned=pinned,
+                digested=digested,
+                content=_normalize_memory_text(content),
+                delete=delete,
+            )
+        except Exception:
+            logger.exception("Memory update tool execution failed for bucket_id=%r", cleaned_bucket_id)
+            return _tool_error("记忆更新异常")
 
     return _tool_error(f"未知工具 {tool_name!r}")

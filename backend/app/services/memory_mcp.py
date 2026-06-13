@@ -243,6 +243,51 @@ def _memory_write_result(
     return "\n".join(lines)
 
 
+def _memory_update_result(
+    *,
+    bucket_id: str,
+    name: str,
+    domain: str,
+    valence: float,
+    arousal: float,
+    importance: int,
+    tags: str,
+    resolved: int,
+    pinned: int,
+    digested: int,
+    content: str,
+    delete: bool,
+) -> str:
+    lines = [
+        "记忆更新成功。",
+        f"bucket_id：{bucket_id}",
+    ]
+    if delete:
+        lines.append("delete：true")
+        return "\n".join(lines)
+    if name:
+        lines.append(f"name：{name}")
+    if domain:
+        lines.append(f"domain：{domain}")
+    if 0 <= valence <= 1:
+        lines.append(f"valence：{valence}")
+    if 0 <= arousal <= 1:
+        lines.append(f"arousal：{arousal}")
+    if importance >= 0:
+        lines.append(f"importance：{importance}")
+    if tags:
+        lines.append(f"tags：{tags}")
+    if resolved >= 0:
+        lines.append(f"resolved：{resolved}")
+    if pinned >= 0:
+        lines.append(f"pinned：{pinned}")
+    if digested >= 0:
+        lines.append(f"digested：{digested}")
+    if content:
+        lines.append(f"content：{_preview(content, 200)}")
+    return "\n".join(lines)
+
+
 async def write_memory(
     *,
     content: str,
@@ -303,6 +348,134 @@ async def write_memory(
             settings.memory_mcp_url,
             _exception_summary(last_exc),
             len(payload["content"]),
+            _preview(payload["content"]),
+            exc_info=last_exc,
+        )
+        raise last_exc
+
+
+def _memory_grow_result(*, content: str) -> str:
+    return "\n".join(
+        [
+            "Memory import succeeded.",
+            f"content={_preview(content, 200)}",
+        ]
+    )
+
+
+async def grow_memory(*, content: str) -> str:
+    settings = get_settings()
+    if not settings.memory_enabled:
+        return "Memory store disabled; skipped import."
+
+    cleaned_content = _normalize_memory_text(content)
+    if not cleaned_content:
+        return "Memory content is empty; skipped import."
+
+    payload = {
+        "content": _truncate(cleaned_content, settings.memory_write_max_chars),
+    }
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            result = await _call_mcp_tool("grow", payload, timeout=settings.memory_write_timeout_seconds)
+            text = _extract_text(result)
+            if text:
+                return text
+            return _memory_grow_result(content=payload["content"])
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                await asyncio.sleep(0.2)
+                continue
+
+    if last_exc is not None:
+        logger.error(
+            "Memory grow failed for %s (%s, content_len=%s, content_preview=%r)",
+            settings.memory_mcp_url,
+            _exception_summary(last_exc),
+            len(payload["content"]),
+            _preview(payload["content"]),
+            exc_info=last_exc,
+        )
+        raise last_exc
+
+
+async def update_memory(
+    *,
+    bucket_id: str,
+    name: str = "",
+    domain: str = "",
+    valence: float = -1,
+    arousal: float = -1,
+    importance: int = -1,
+    tags: str = "",
+    resolved: int = -1,
+    pinned: int = -1,
+    digested: int = -1,
+    content: str = "",
+    delete: bool = False,
+) -> str:
+    settings = get_settings()
+    if not settings.memory_enabled:
+        return "记忆库未启用，未更新记忆。"
+
+    cleaned_bucket_id = _normalize_memory_text(bucket_id)
+    if not cleaned_bucket_id:
+        return "bucket_id 不能为空"
+
+    cleaned_name = _normalize_memory_text(name)
+    cleaned_domain = _normalize_memory_text(domain)
+    cleaned_tags = _normalize_memory_text(tags)
+    cleaned_content = _normalize_memory_text(content)
+    payload = {
+        "bucket_id": cleaned_bucket_id,
+        "name": cleaned_name,
+        "domain": cleaned_domain,
+        "valence": valence,
+        "arousal": arousal,
+        "importance": importance,
+        "tags": cleaned_tags,
+        "resolved": resolved,
+        "pinned": pinned,
+        "digested": digested,
+        "content": _truncate(cleaned_content, settings.memory_write_max_chars),
+        "delete": delete,
+    }
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            result = await _call_mcp_tool("trace", payload, timeout=settings.memory_write_timeout_seconds)
+            text = _extract_text(result)
+            if text:
+                return text
+            return _memory_update_result(
+                bucket_id=cleaned_bucket_id,
+                name=cleaned_name,
+                domain=cleaned_domain,
+                valence=valence,
+                arousal=arousal,
+                importance=importance,
+                tags=cleaned_tags,
+                resolved=resolved,
+                pinned=pinned,
+                digested=digested,
+                content=payload["content"],
+                delete=delete,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt == 0:
+                await asyncio.sleep(0.2)
+                continue
+
+    if last_exc is not None:
+        logger.error(
+            "Memory update failed for %s (%s, bucket_id=%r, delete=%s, content_preview=%r)",
+            settings.memory_mcp_url,
+            _exception_summary(last_exc),
+            cleaned_bucket_id,
+            delete,
             _preview(payload["content"]),
             exc_info=last_exc,
         )

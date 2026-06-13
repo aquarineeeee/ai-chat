@@ -9,10 +9,14 @@ from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
 from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
 from app.services.memory_tools import (
+    MEMORY_GROW_TOOL_NAME,
     MEMORY_SEARCH_TOOL_NAME,
+    MEMORY_UPDATE_TOOL_NAME,
     MEMORY_WRITE_TOOL_NAME,
     execute_memory_tool_call,
+    memory_grow_tool_definition,
     memory_search_tool_definition,
+    memory_update_tool_definition,
     memory_write_tool_definition,
 )
 
@@ -38,6 +42,40 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool["function"]["name"], MEMORY_WRITE_TOOL_NAME)
         self.assertEqual(tool["function"]["parameters"]["required"], ["content"])
         self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
+
+    def test_memory_grow_tool_definition_exposes_required_content(self) -> None:
+        tool = memory_grow_tool_definition()
+
+        self.assertEqual(tool["type"], "function")
+        self.assertEqual(tool["function"]["name"], MEMORY_GROW_TOOL_NAME)
+        self.assertEqual(tool["function"]["parameters"]["required"], ["content"])
+        self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
+
+    def test_memory_update_tool_definition_exposes_required_bucket_id(self) -> None:
+        tool = memory_update_tool_definition()
+        parameters = tool["function"]["parameters"]
+
+        self.assertEqual(tool["type"], "function")
+        self.assertEqual(tool["function"]["name"], MEMORY_UPDATE_TOOL_NAME)
+        self.assertEqual(
+            set(parameters["properties"]),
+            {
+                "bucket_id",
+                "name",
+                "domain",
+                "valence",
+                "arousal",
+                "importance",
+                "tags",
+                "resolved",
+                "pinned",
+                "digested",
+                "content",
+                "delete",
+            },
+        )
+        self.assertEqual(parameters["required"], ["bucket_id"])
+        self.assertFalse(parameters["additionalProperties"])
 
     async def test_execute_memory_tool_call_returns_search_result(self) -> None:
         with patch(
@@ -115,6 +153,54 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         result = await execute_memory_tool_call(MEMORY_WRITE_TOOL_NAME, '{"content":"","importance":5}')
 
         self.assertEqual(result, "工具执行失败：content 不能为空")
+
+    async def test_execute_memory_tool_call_grows_memory(self) -> None:
+        with patch(
+            "app.services.memory_tools.grow_memory",
+            AsyncMock(return_value="Memory import succeeded."),
+        ) as mock_grow:
+            result = await execute_memory_tool_call(
+                MEMORY_GROW_TOOL_NAME,
+                '{"content":"meeting notes"}',
+            )
+
+        self.assertEqual(result, "Memory import succeeded.")
+        mock_grow.assert_awaited_once_with(content="meeting notes")
+
+    async def test_execute_memory_tool_call_updates_memory_with_full_trace_parameters(self) -> None:
+        with patch(
+            "app.services.memory_tools.update_memory",
+            AsyncMock(return_value="记忆更新成功。"),
+        ) as mock_update:
+            result = await execute_memory_tool_call(
+                MEMORY_UPDATE_TOOL_NAME,
+                (
+                    '{"bucket_id":"bucket-1","name":"项目约束","domain":"编程,项目","valence":0.6,"arousal":0.4,'
+                    '"importance":8,"tags":"调试,已完成","resolved":1,"pinned":0,"digested":-1,'
+                    '"content":"已修正正文","delete":false}'
+                ),
+            )
+
+        self.assertEqual(result, "记忆更新成功。")
+        mock_update.assert_awaited_once_with(
+            bucket_id="bucket-1",
+            name="项目约束",
+            domain="编程,项目",
+            valence=0.6,
+            arousal=0.4,
+            importance=8,
+            tags="调试,已完成",
+            resolved=1,
+            pinned=0,
+            digested=-1,
+            content="已修正正文",
+            delete=False,
+        )
+
+    async def test_execute_memory_tool_call_rejects_invalid_update_arguments(self) -> None:
+        result = await execute_memory_tool_call(MEMORY_UPDATE_TOOL_NAME, '{"bucket_id":"bucket-1","resolved":2}')
+
+        self.assertEqual(result, "工具执行失败：resolved 必须为 -1、0 或 1")
 
 
 class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):

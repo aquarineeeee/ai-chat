@@ -50,8 +50,16 @@ MEMORY_TOOL_GUIDANCE = (
     "memory_search 支持按需传入 query、domain、valence、arousal、max_results、importance_min、max_tokens；"
     "当 query 为空时，可用于自动浮现相关记忆。"
     "当发现值得长期保留的信息时，可以调用 memory_write。memory_write 的 content 应该是一条提炼后的记忆，"
+    "当需要修正、标记或删除已有记忆时，可以调用 memory_update；"
+    "memory_update 支持 bucket_id、name、domain、valence、arousal、importance、tags、resolved、pinned、digested、content、delete。"
     "不要原样转录整段对话；tags、importance、pinned、feel、source_bucket、valence、arousal 仅在确有必要时填写。"
     "不是每轮都必须写记忆。"
+)
+
+
+MEMORY_TOOL_GUIDANCE += (
+    "If the user provides a long journal entry, meeting notes, or a work log and wants it split into multiple memories, "
+    "you may call memory_grow with content only."
 )
 
 
@@ -852,7 +860,7 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(),
+            tools=memory_tool_definitions(include_grow=True),
             tool_executor=execute_memory_tool_call,
         )
     if provider == "anthropic":
@@ -902,7 +910,7 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(),
+            tools=memory_tool_definitions(include_grow=True),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
         ):

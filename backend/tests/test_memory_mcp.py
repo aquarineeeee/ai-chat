@@ -191,6 +191,86 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
         mock_error.assert_not_called()
         self.assertEqual(result, '{"result": "ok"}')
 
+    async def test_grow_memory_forwards_full_payload(self) -> None:
+        settings = types.SimpleNamespace(
+            memory_enabled=True,
+            memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
+            memory_max_context_chars=3000,
+            memory_write_max_chars=6000,
+            memory_mcp_url="http://127.0.0.1:8001/mcp",
+        )
+
+        with (
+            patch("app.services.memory_mcp.get_settings", return_value=settings),
+            patch(
+                "app.services.memory_mcp._call_mcp_tool",
+                AsyncMock(return_value={"content": [{"text": "imported"}]}),
+            ) as mock_call,
+        ):
+            result = await memory_mcp.grow_memory(content="  long memory text  ")
+
+        self.assertEqual(result, "imported")
+        mock_call.assert_awaited_once_with(
+            "grow",
+            {
+                "content": "long memory text",
+            },
+            timeout=15.0,
+        )
+
+    async def test_update_memory_forwards_full_trace_payload(self) -> None:
+        settings = types.SimpleNamespace(
+            memory_enabled=True,
+            memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
+            memory_max_context_chars=3000,
+            memory_write_max_chars=6000,
+            memory_mcp_url="http://127.0.0.1:8001/mcp",
+        )
+
+        with (
+            patch("app.services.memory_mcp.get_settings", return_value=settings),
+            patch(
+                "app.services.memory_mcp._call_mcp_tool",
+                AsyncMock(return_value={"content": [{"text": "已更新"}]}),
+            ) as mock_call,
+        ):
+            result = await memory_mcp.update_memory(
+                bucket_id="  bucket-1  ",
+                name="  项目约束  ",
+                domain="  编程,项目  ",
+                valence=0.6,
+                arousal=0.4,
+                importance=8,
+                tags="  调试,已完成  ",
+                resolved=1,
+                pinned=0,
+                digested=-1,
+                content="  已修正正文  ",
+                delete=False,
+            )
+
+        self.assertEqual(result, "已更新")
+        mock_call.assert_awaited_once_with(
+            "trace",
+            {
+                "bucket_id": "bucket-1",
+                "name": "项目约束",
+                "domain": "编程,项目",
+                "valence": 0.6,
+                "arousal": 0.4,
+                "importance": 8,
+                "tags": "调试,已完成",
+                "resolved": 1,
+                "pinned": 0,
+                "digested": -1,
+                "content": "已修正正文",
+                "delete": False,
+            },
+            timeout=15.0,
+        )
+
     async def test_search_and_write_do_not_use_shared_lock(self) -> None:
         self.assertFalse(hasattr(memory_mcp, "_MCP_SESSION_LOCK"))
 
@@ -309,7 +389,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_reply.await_args
         self.assertEqual(
             [tool["function"]["name"] for tool in kwargs["tools"]],
-            ["memory_search", "memory_write"],
+            ["memory_search", "memory_write", "memory_grow", "memory_update"],
         )
         self.assertTrue(callable(kwargs["tool_executor"]))
 
@@ -337,7 +417,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_reply.await_args
         self.assertEqual(
             [tool["function"]["name"] for tool in kwargs["tools"]],
-            ["memory_search", "memory_write"],
+            ["memory_search", "memory_write", "memory_update"],
         )
         self.assertTrue(callable(kwargs["tool_executor"]))
 
@@ -373,6 +453,9 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("domain", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("importance_min", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("query 为空", messages.MEMORY_TOOL_GUIDANCE)
+        self.assertIn("memory_grow", messages.MEMORY_TOOL_GUIDANCE)
+        self.assertIn("memory_update", messages.MEMORY_TOOL_GUIDANCE)
+        self.assertIn("resolved", messages.MEMORY_TOOL_GUIDANCE)
 
     async def test_finalize_success_marks_message_completed_without_memory_write(self) -> None:
         session = AsyncMock()
