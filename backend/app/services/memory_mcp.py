@@ -211,6 +211,38 @@ async def search_memory(
     return f"{MEMORY_CONTEXT_PREFIX}\n{text[: settings.memory_max_context_chars]}".strip()
 
 
+def _memory_pulse_result(*, include_archive: bool) -> str:
+    lines = ["Memory status fetched."]
+    if include_archive:
+        lines.append("include_archive=true")
+    return "\n".join(lines)
+
+
+async def pulse_memory(*, include_archive: bool = False) -> str:
+    settings = get_settings()
+    if not settings.memory_enabled:
+        return "Memory store disabled; skipped pulse."
+
+    payload = {
+        "include_archive": include_archive,
+    }
+    try:
+        result = await _call_mcp_tool("pulse", payload, timeout=settings.memory_timeout_seconds)
+        text = _extract_text(result)
+        if text:
+            return text
+        return _memory_pulse_result(include_archive=include_archive)
+    except Exception as exc:
+        logger.error(
+            "Memory pulse failed for %s (%s, include_archive=%s)",
+            settings.memory_mcp_url,
+            _exception_summary(exc),
+            include_archive,
+            exc_info=exc,
+        )
+        raise
+
+
 def _memory_write_result(
     *,
     content: str,

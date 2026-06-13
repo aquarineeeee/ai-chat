@@ -48,6 +48,8 @@ MEMORY_TOOL_PROVIDERS = {"openai", "anthropic"}
 MEMORY_TOOL_GUIDANCE = (
     "你可以按需使用长期记忆工具：当回答依赖跨会话背景、用户偏好或历史约束时，调用 memory_search；"
     "memory_search 支持按需传入 query、domain、valence、arousal、max_results、importance_min、max_tokens；"
+    "当需要查看当前记忆系统状态、记忆桶列表，或在修改前先浏览全局状态时，可以调用 memory_pulse；"
+    "memory_pulse 支持 include_archive。"
     "当 query 为空时，可用于自动浮现相关记忆。"
     "当发现值得长期保留的信息时，可以调用 memory_write。memory_write 的 content 应该是一条提炼后的记忆，"
     "当需要修正、标记或删除已有记忆时，可以调用 memory_update；"
@@ -860,7 +862,7 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True),
+            tools=memory_tool_definitions(include_grow=True, include_pulse=True),
             tool_executor=execute_memory_tool_call,
         )
     if provider == "anthropic":
@@ -910,7 +912,7 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True),
+            tools=memory_tool_definitions(include_grow=True, include_pulse=True),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
         ):

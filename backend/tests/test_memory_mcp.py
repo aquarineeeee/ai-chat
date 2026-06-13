@@ -144,6 +144,34 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(formatted)
 
+    async def test_pulse_memory_forwards_full_payload(self) -> None:
+        settings = types.SimpleNamespace(
+            memory_enabled=True,
+            memory_timeout_seconds=5.0,
+            memory_write_timeout_seconds=15.0,
+            memory_max_context_chars=3000,
+            memory_write_max_chars=6000,
+            memory_mcp_url="http://127.0.0.1:8001/mcp",
+        )
+
+        with (
+            patch("app.services.memory_mcp.get_settings", return_value=settings),
+            patch(
+                "app.services.memory_mcp._call_mcp_tool",
+                AsyncMock(return_value={"content": [{"text": "status"}]}),
+            ) as mock_call,
+        ):
+            result = await memory_mcp.pulse_memory(include_archive=True)
+
+        self.assertEqual(result, "status")
+        mock_call.assert_awaited_once_with(
+            "pulse",
+            {
+                "include_archive": True,
+            },
+            timeout=5.0,
+        )
+
     async def test_write_memory_logs_and_raises_after_retries_fail(self) -> None:
         settings = types.SimpleNamespace(
             memory_enabled=True,
@@ -389,7 +417,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_reply.await_args
         self.assertEqual(
             [tool["function"]["name"] for tool in kwargs["tools"]],
-            ["memory_search", "memory_write", "memory_grow", "memory_update"],
+            ["memory_search", "memory_pulse", "memory_write", "memory_grow", "memory_update"],
         )
         self.assertTrue(callable(kwargs["tool_executor"]))
 
@@ -453,6 +481,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("domain", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("importance_min", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("query 为空", messages.MEMORY_TOOL_GUIDANCE)
+        self.assertIn("memory_pulse", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("memory_grow", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("memory_update", messages.MEMORY_TOOL_GUIDANCE)
         self.assertIn("resolved", messages.MEMORY_TOOL_GUIDANCE)

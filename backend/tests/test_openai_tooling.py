@@ -10,11 +10,13 @@ from app.models.api_key import ApiKey
 from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
 from app.services.memory_tools import (
     MEMORY_GROW_TOOL_NAME,
+    MEMORY_PULSE_TOOL_NAME,
     MEMORY_SEARCH_TOOL_NAME,
     MEMORY_UPDATE_TOOL_NAME,
     MEMORY_WRITE_TOOL_NAME,
     execute_memory_tool_call,
     memory_grow_tool_definition,
+    memory_pulse_tool_definition,
     memory_search_tool_definition,
     memory_update_tool_definition,
     memory_write_tool_definition,
@@ -42,6 +44,16 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool["function"]["name"], MEMORY_WRITE_TOOL_NAME)
         self.assertEqual(tool["function"]["parameters"]["required"], ["content"])
         self.assertFalse(tool["function"]["parameters"]["additionalProperties"])
+
+    def test_memory_pulse_tool_definition_exposes_optional_include_archive(self) -> None:
+        tool = memory_pulse_tool_definition()
+        parameters = tool["function"]["parameters"]
+
+        self.assertEqual(tool["type"], "function")
+        self.assertEqual(tool["function"]["name"], MEMORY_PULSE_TOOL_NAME)
+        self.assertEqual(set(parameters["properties"]), {"include_archive"})
+        self.assertEqual(parameters["required"], [])
+        self.assertFalse(parameters["additionalProperties"])
 
     def test_memory_grow_tool_definition_exposes_required_content(self) -> None:
         tool = memory_grow_tool_definition()
@@ -148,6 +160,19 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
             max_results=20,
             importance_min=-1,
         )
+
+    async def test_execute_memory_tool_call_pulses_memory(self) -> None:
+        with patch(
+            "app.services.memory_tools.pulse_memory",
+            AsyncMock(return_value="Memory status fetched."),
+        ) as mock_pulse:
+            result = await execute_memory_tool_call(
+                MEMORY_PULSE_TOOL_NAME,
+                '{"include_archive":true}',
+            )
+
+        self.assertEqual(result, "Memory status fetched.")
+        mock_pulse.assert_awaited_once_with(include_archive=True)
 
     async def test_execute_memory_tool_call_rejects_invalid_write_arguments(self) -> None:
         result = await execute_memory_tool_call(MEMORY_WRITE_TOOL_NAME, '{"content":"","importance":5}')
