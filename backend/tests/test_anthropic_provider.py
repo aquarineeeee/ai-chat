@@ -8,7 +8,16 @@ import httpx
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
 from app.providers.anthropic import _messages_payload, create_anthropic_reply, list_anthropic_models, stream_anthropic_reply
-from app.services.memory_tools import MEMORY_GROW_TOOL_NAME, MEMORY_SEARCH_TOOL_NAME, memory_grow_tool_definition, memory_search_tool_definition
+from app.services.memory_tools import (
+    MEMORY_DREAM_TOOL_NAME,
+    MEMORY_GROW_TOOL_NAME,
+    MEMORY_PULSE_TOOL_NAME,
+    MEMORY_SEARCH_TOOL_NAME,
+    memory_dream_tool_definition,
+    memory_grow_tool_definition,
+    memory_pulse_tool_definition,
+    memory_search_tool_definition,
+)
 
 
 class AnthropicProviderTests(unittest.TestCase):
@@ -98,6 +107,52 @@ class AnthropicProviderTests(unittest.TestCase):
             ],
         )
         self.assertEqual(payload["tools"][0]["input_schema"]["required"], ["content"])
+
+    def test_messages_payload_adapts_memory_pulse_tool(self) -> None:
+        tool = memory_pulse_tool_definition()
+        payload = _messages_payload(
+            model="claude-sonnet-4-20250514",
+            messages=[{"role": "user", "content": "Hello"}],
+            temperature=None,
+            max_tokens=1000,
+            stream=False,
+            tools=[tool],
+        )
+
+        self.assertEqual(
+            payload["tools"],
+            [
+                {
+                    "name": MEMORY_PULSE_TOOL_NAME,
+                    "description": tool["function"]["description"],
+                    "input_schema": tool["function"]["parameters"],
+                }
+            ],
+        )
+        self.assertIn("include_archive", payload["tools"][0]["input_schema"]["properties"])
+
+    def test_messages_payload_adapts_memory_dream_tool(self) -> None:
+        tool = memory_dream_tool_definition()
+        payload = _messages_payload(
+            model="claude-sonnet-4-20250514",
+            messages=[{"role": "user", "content": "Hello"}],
+            temperature=None,
+            max_tokens=1000,
+            stream=False,
+            tools=[tool],
+        )
+
+        self.assertEqual(
+            payload["tools"],
+            [
+                {
+                    "name": MEMORY_DREAM_TOOL_NAME,
+                    "description": tool["function"]["description"],
+                    "input_schema": tool["function"]["parameters"],
+                }
+            ],
+        )
+        self.assertEqual(payload["tools"][0]["input_schema"]["properties"], {})
 
 
 class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):

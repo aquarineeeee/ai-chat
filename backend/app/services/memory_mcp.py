@@ -243,6 +243,31 @@ async def pulse_memory(*, include_archive: bool = False) -> str:
         raise
 
 
+def _memory_dream_result() -> str:
+    return "Recent memories fetched."
+
+
+async def dream_memory() -> str:
+    settings = get_settings()
+    if not settings.memory_enabled:
+        return "Memory store disabled; skipped dream."
+
+    try:
+        result = await _call_mcp_tool("dream", {}, timeout=settings.memory_timeout_seconds)
+        text = _extract_text(result)
+        if text:
+            return text
+        return _memory_dream_result()
+    except Exception as exc:
+        logger.error(
+            "Memory dream failed for %s (%s)",
+            settings.memory_mcp_url,
+            _exception_summary(exc),
+            exc_info=exc,
+        )
+        raise
+
+
 def _memory_write_result(
     *,
     content: str,

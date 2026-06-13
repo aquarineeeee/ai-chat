@@ -63,6 +63,9 @@ MEMORY_TOOL_GUIDANCE += (
     "If the user provides a long journal entry, meeting notes, or a work log and wants it split into multiple memories, "
     "you may call memory_grow with content only."
 )
+MEMORY_TOOL_GUIDANCE += (
+    "When available, you may call memory_dream to review recently added memories before deciding whether to keep organizing them."
+)
 
 
 async def list_conversation_messages(
@@ -862,7 +865,7 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True, include_pulse=True),
+            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=execute_memory_tool_call,
         )
     if provider == "anthropic":
@@ -873,7 +876,7 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True),
+            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=execute_memory_tool_call,
         )
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
@@ -912,7 +915,7 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True, include_pulse=True),
+            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
         ):
@@ -934,7 +937,7 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True),
+            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
         ):

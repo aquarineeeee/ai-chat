@@ -4,12 +4,13 @@ import json
 import logging
 from typing import Any
 
-from app.services.memory_mcp import NO_MEMORY_RESULTS, _normalize_memory_text, grow_memory, pulse_memory, search_memory, update_memory, write_memory
+from app.services.memory_mcp import NO_MEMORY_RESULTS, _normalize_memory_text, dream_memory, grow_memory, pulse_memory, search_memory, update_memory, write_memory
 
 
 logger = logging.getLogger(__name__)
 MEMORY_SEARCH_TOOL_NAME = "memory_search"
 MEMORY_PULSE_TOOL_NAME = "memory_pulse"
+MEMORY_DREAM_TOOL_NAME = "memory_dream"
 MEMORY_WRITE_TOOL_NAME = "memory_write"
 MEMORY_GROW_TOOL_NAME = "memory_grow"
 MEMORY_UPDATE_TOOL_NAME = "memory_update"
@@ -124,6 +125,20 @@ MEMORY_PULSE_TOOL_DEFINITION: dict[str, Any] = {
     },
 }
 
+MEMORY_DREAM_TOOL_DEFINITION: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": MEMORY_DREAM_TOOL_NAME,
+        "description": "Fetch recently added memories for review or reflection.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    },
+}
+
 MEMORY_GROW_TOOL_DEFINITION: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -219,6 +234,10 @@ def memory_pulse_tool_definition() -> dict[str, Any]:
     return json.loads(json.dumps(MEMORY_PULSE_TOOL_DEFINITION))
 
 
+def memory_dream_tool_definition() -> dict[str, Any]:
+    return json.loads(json.dumps(MEMORY_DREAM_TOOL_DEFINITION))
+
+
 def memory_update_tool_definition() -> dict[str, Any]:
     return json.loads(json.dumps(MEMORY_UPDATE_TOOL_DEFINITION))
 
@@ -227,12 +246,19 @@ def memory_grow_tool_definition() -> dict[str, Any]:
     return json.loads(json.dumps(MEMORY_GROW_TOOL_DEFINITION))
 
 
-def memory_tool_definitions(*, include_grow: bool = False, include_pulse: bool = False) -> list[dict[str, Any]]:
+def memory_tool_definitions(
+    *,
+    include_grow: bool = False,
+    include_pulse: bool = False,
+    include_dream: bool = False,
+) -> list[dict[str, Any]]:
     tools = [
         memory_search_tool_definition(),
     ]
     if include_pulse:
         tools.append(memory_pulse_tool_definition())
+    if include_dream:
+        tools.append(memory_dream_tool_definition())
     tools.extend([
         memory_write_tool_definition(),
     ])
@@ -349,6 +375,16 @@ async def execute_memory_tool_call(tool_name: str, arguments_json: str) -> str:
         except Exception:
             logger.exception("Memory pulse tool execution failed with include_archive=%r", include_archive)
             return _tool_error("记忆状态查询异常")
+
+    if tool_name == MEMORY_DREAM_TOOL_NAME:
+        if payload:
+            return _tool_error("memory_dream 不接受参数")
+
+        try:
+            return await dream_memory()
+        except Exception:
+            logger.exception("Memory dream tool execution failed")
+            return _tool_error("最近记忆读取异常")
 
     if tool_name == MEMORY_WRITE_TOOL_NAME:
         content = payload.get("content")

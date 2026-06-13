@@ -9,12 +9,14 @@ from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
 from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
 from app.services.memory_tools import (
+    MEMORY_DREAM_TOOL_NAME,
     MEMORY_GROW_TOOL_NAME,
     MEMORY_PULSE_TOOL_NAME,
     MEMORY_SEARCH_TOOL_NAME,
     MEMORY_UPDATE_TOOL_NAME,
     MEMORY_WRITE_TOOL_NAME,
     execute_memory_tool_call,
+    memory_dream_tool_definition,
     memory_grow_tool_definition,
     memory_pulse_tool_definition,
     memory_search_tool_definition,
@@ -52,6 +54,16 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tool["type"], "function")
         self.assertEqual(tool["function"]["name"], MEMORY_PULSE_TOOL_NAME)
         self.assertEqual(set(parameters["properties"]), {"include_archive"})
+        self.assertEqual(parameters["required"], [])
+        self.assertFalse(parameters["additionalProperties"])
+
+    def test_memory_dream_tool_definition_exposes_no_arguments(self) -> None:
+        tool = memory_dream_tool_definition()
+        parameters = tool["function"]["parameters"]
+
+        self.assertEqual(tool["type"], "function")
+        self.assertEqual(tool["function"]["name"], MEMORY_DREAM_TOOL_NAME)
+        self.assertEqual(parameters["properties"], {})
         self.assertEqual(parameters["required"], [])
         self.assertFalse(parameters["additionalProperties"])
 
@@ -173,6 +185,19 @@ class MemoryToolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "Memory status fetched.")
         mock_pulse.assert_awaited_once_with(include_archive=True)
+
+    async def test_execute_memory_tool_call_dreams_memory(self) -> None:
+        with patch(
+            "app.services.memory_tools.dream_memory",
+            AsyncMock(return_value="Recent memories fetched."),
+        ) as mock_dream:
+            result = await execute_memory_tool_call(
+                MEMORY_DREAM_TOOL_NAME,
+                "{}",
+            )
+
+        self.assertEqual(result, "Recent memories fetched.")
+        mock_dream.assert_awaited_once_with()
 
     async def test_execute_memory_tool_call_rejects_invalid_write_arguments(self) -> None:
         result = await execute_memory_tool_call(MEMORY_WRITE_TOOL_NAME, '{"content":"","importance":5}')
