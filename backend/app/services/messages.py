@@ -871,7 +871,7 @@ async def _generate_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(),
+            tools=memory_tool_definitions(include_grow=True),
             tool_executor=execute_memory_tool_call,
         )
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
@@ -932,7 +932,7 @@ async def _stream_reply(
             messages=prompt_messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(),
+            tools=memory_tool_definitions(include_grow=True),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
         ):

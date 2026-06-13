@@ -417,7 +417,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         _, kwargs = mock_reply.await_args
         self.assertEqual(
             [tool["function"]["name"] for tool in kwargs["tools"]],
-            ["memory_search", "memory_write", "memory_update"],
+            ["memory_search", "memory_write", "memory_grow", "memory_update"],
         )
         self.assertTrue(callable(kwargs["tool_executor"]))
 
