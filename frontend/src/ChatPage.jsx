@@ -127,6 +127,152 @@ function buildToolTrace(tool, previousTrace = []) {
   return nextTrace
 }
 
+function cloneParts(parts) {
+  if (!Array.isArray(parts)) return []
+  return parts.map(part => ({ ...part }))
+}
+
+function aggregateTextFromParts(parts) {
+  if (!Array.isArray(parts)) return ''
+  return parts
+    .filter(part => part?.type === 'text')
+    .map(part => part?.text || '')
+    .join('')
+}
+
+function applyRunEventToParts(parts, event) {
+  const nextParts = cloneParts(parts)
+  const type = event?.type || ''
+  const payload = event?.payload || {}
+  const toolCallRef = event?.tool_call_ref || null
+
+  if (type === 'message.text.delta') {
+    const text = payload?.text || ''
+    if (!text) return nextParts
+    const lastPart = nextParts[nextParts.length - 1]
+    if (lastPart?.type === 'text') {
+      lastPart.text = `${lastPart.text || ''}${text}`
+    } else {
+      nextParts.push({ type: 'text', text })
+    }
+    return nextParts
+  }
+
+  if (type === 'tool_call.created') {
+    nextParts.push({
+      type: 'tool_call',
+      tool_call_id: toolCallRef,
+      tool_name: payload?.tool_name || '',
+      status: 'pending',
+      arguments_preview: payload?.display_input_preview || '',
+    })
+    return nextParts
+  }
+
+  if (type === 'tool_call.arguments.completed') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.arguments_preview = payload?.display_input_preview || ''
+    return nextParts
+  }
+
+  if (type === 'tool_call.started') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.status = 'running'
+    return nextParts
+  }
+
+  if (type === 'tool_call.completed') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.status = 'completed'
+    nextParts.push({
+      type: 'tool_result',
+      tool_call_id: toolCallRef,
+      tool_name: payload?.tool_name || '',
+      status: 'completed',
+      content: payload?.display_output_preview || '',
+    })
+    return nextParts
+  }
+
+  if (type === 'tool_call.failed') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.status = 'error'
+    nextParts.push({
+      type: 'error',
+      tool_call_id: toolCallRef,
+      tool_name: payload?.tool_name || '',
+      message: payload?.error_message || '',
+    })
+    return nextParts
+  }
+
+  if ((type === 'run.failed' || type === 'run.cancelled') && payload?.error_message) {
+    nextParts.push({ type: 'error', message: payload.error_message })
+  }
+
+  return nextParts
+}
+
+function rebuildMessageFromEvents(message, run, events) {
+  if (!Array.isArray(events) || events.length === 0) return message
+
+  let parts = []
+  for (const event of events) {
+    parts = applyRunEventToParts(parts, event)
+  }
+
+  const lastFailureEvent = [...events].reverse().find(event => event?.type === 'run.failed' || event?.type === 'run.cancelled')
+  const completed = events.some(event => event?.type === 'message.completed')
+
+  return {
+    ...message,
+    parts,
+    content: aggregateTextFromParts(parts),
+    status: lastFailureEvent
+      ? 'failed'
+      : completed
+        ? 'completed'
+        : run?.status === 'running'
+          ? 'streaming'
+          : message.status,
+    error_message: lastFailureEvent?.payload?.error_message || message.error_message,
+  }
+}
+
+async function recoverMessagesFromRuns(conversationId, messages) {
+  if (!conversationId || !Array.isArray(messages) || messages.length === 0) return messages
+  try {
+    const runsData = await api.getAgentRuns(conversationId, { status: 'running' })
+    const runs = runsData?.items || []
+    if (runs.length === 0) return messages
+
+    const recoveries = await Promise.all(
+      runs
+        .filter(run => run?.assistant_message_id)
+        .map(async run => {
+          const eventsData = await api.getRunEvents(conversationId, run.id, { afterSequence: 0 })
+          return {
+            assistantMessageId: run.assistant_message_id,
+            run,
+            events: eventsData?.items || [],
+          }
+        }),
+    )
+
+    const recoveryByMessageId = new Map(
+      recoveries.map(item => [item.assistantMessageId, item]),
+    )
+
+    return messages.map(message => {
+      const recovery = recoveryByMessageId.get(message.id)
+      if (!recovery) return message
+      return rebuildMessageFromEvents(message, recovery.run, recovery.events)
+    })
+  } catch {
+    return messages
+  }
+}
+
 function sortConversations(items) {
   return [...items].sort((a, b) => {
     const timeA = new Date(a.updated_at || a.created_at || 0).getTime()
@@ -323,10 +469,11 @@ export default function ChatPage() {
 
   const refreshMessages = useCallback(async (conversationId) => {
     const data = await api.getMessages(conversationId)
-    setMessages(data?.items || [])
+    const recoveredItems = await recoverMessagesFromRuns(conversationId, data?.items || [])
+    setMessages(recoveredItems)
     patchConversationBranchState(conversationId, data)
     setMessageTreeRefreshToken(token => token + 1)
-    return data
+    return { ...data, items: recoveredItems }
   }, [patchConversationBranchState])
 
   const refreshBranchPane = useCallback(async (conversationId, paneId, options = {}) => {
@@ -338,15 +485,16 @@ export default function ChatPage() {
       leafMessageId: options.leafMessageId,
       expandLeaf: options.expandLeaf,
     })
+    const recoveredItems = await recoverMessagesFromRuns(conversationId, data?.items || [])
 
     patchBranchPane(paneId, current => ({
       ...current,
       loading: false,
-      messages: data?.items || [],
+      messages: recoveredItems,
       currentLeafMessageId: data?.current_leaf_message_id ?? current.currentLeafMessageId,
       error: '',
     }))
-    return data
+    return { ...data, items: recoveredItems }
   }, [branchPanes, patchBranchPane])
 
   const refreshBranchPanesSnapshot = useCallback(async (conversationId, panesSnapshot, deletedMessageId = null) => {
@@ -363,7 +511,8 @@ export default function ChatPage() {
 
       try {
         const data = await api.getMessages(conversationId, { rootMessageId: pane.rootMessageId })
-        updates.push({ paneId: pane.id, data })
+        const recoveredItems = await recoverMessagesFromRuns(conversationId, data?.items || [])
+        updates.push({ paneId: pane.id, data: { ...data, items: recoveredItems } })
       } catch {
         idsToClose.push(pane.id)
       }
@@ -930,7 +1079,16 @@ export default function ChatPage() {
       if (!streamError && !accumulated) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '发送失败，请重试')
-      setMessages(prev => prev.filter(m => m.id !== userMsg.id))
+      if (convId) {
+        try {
+          await refreshMessages(convId)
+          await loadBranches(convId)
+        } catch {
+          setMessages(prev => prev.filter(m => m.id !== userMsg.id))
+        }
+      } else {
+        setMessages(prev => prev.filter(m => m.id !== userMsg.id))
+      }
     } finally {
       setSending(false)
       setStreamingContent('')
