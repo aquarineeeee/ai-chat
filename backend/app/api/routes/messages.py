@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, get_current_user
 from app.models.user import User
+from app.schemas.agent_run import AgentRunListResponse, AgentRunResponse, RunEventListResponse, RunEventResponse
 from app.schemas.message import (
     MessageEditRequest,
     MessageEditResponse,
@@ -28,12 +29,54 @@ from app.services.messages import (
     get_conversation_message,
     get_conversation_message_tree,
     list_conversation_messages,
+    list_agent_runs_for_conversation,
+    list_run_events_for_conversation_run,
     regenerate_message,
     regenerate_message_stream,
+    serialize_agent_run,
+    serialize_run_event,
 )
 
 
 router = APIRouter()
+
+
+@router.get("/conversations/{conversation_id}/runs", response_model=AgentRunListResponse)
+async def conversation_runs_index(
+    conversation_id: int,
+    status: str | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> AgentRunListResponse:
+    items = await list_agent_runs_for_conversation(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        status=status,
+    )
+    return AgentRunListResponse(items=[AgentRunResponse.model_validate(serialize_agent_run(item)) for item in items])
+
+
+@router.get("/conversations/{conversation_id}/runs/{run_id}/events", response_model=RunEventListResponse)
+async def conversation_run_events_index(
+    conversation_id: int,
+    run_id: int,
+    after_sequence: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> RunEventListResponse:
+    items = await list_run_events_for_conversation_run(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        after_sequence=after_sequence,
+    )
+    return RunEventListResponse(
+        run_id=run_id,
+        after_sequence=after_sequence,
+        items=[RunEventResponse.model_validate(serialize_run_event(item)) for item in items],
+    )
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)

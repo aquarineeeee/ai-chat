@@ -160,6 +160,54 @@ async def list_conversation_messages(
     )
 
 
+async def list_agent_runs_for_conversation(
+    *,
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    status: str | None = None,
+) -> list[AgentRun]:
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    stmt = (
+        select(AgentRun)
+        .where(AgentRun.conversation_id == conversation.id)
+        .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+    )
+    if status is not None:
+        stmt = stmt.where(AgentRun.status == status)
+    result = await session.scalars(stmt)
+    return list(result.all())
+
+
+async def list_run_events_for_conversation_run(
+    *,
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    run_id: int,
+    after_sequence: int = 0,
+) -> list[RunEvent]:
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    agent_run = await session.scalar(
+        select(AgentRun).where(
+            AgentRun.id == run_id,
+            AgentRun.conversation_id == conversation.id,
+        )
+    )
+    if agent_run is None:
+        raise AppError(status_code=404, code="NOT_FOUND", message="run 不存在")
+
+    result = await session.scalars(
+        select(RunEvent)
+        .where(
+            RunEvent.run_id == agent_run.id,
+            RunEvent.sequence > after_sequence,
+        )
+        .order_by(RunEvent.sequence.asc(), RunEvent.id.asc())
+    )
+    return list(result.all())
+
+
 def _build_messages_response(
     *,
     conversation: Conversation,
@@ -1770,6 +1818,41 @@ def _serialize_message_tree_node(
         is_current_leaf=is_current_leaf,
         branch_markers=branch_markers,
     )
+
+
+def serialize_agent_run(run: AgentRun) -> dict[str, Any]:
+    return {
+        "id": run.id,
+        "conversation_id": run.conversation_id,
+        "user_message_id": run.user_message_id,
+        "assistant_message_id": run.assistant_message_id,
+        "provider": run.provider,
+        "model": run.model,
+        "status": run.status,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "last_sequence": run.last_sequence,
+        "resume_token": run.resume_token,
+        "error_message": run.error_message,
+        "created_at": run.created_at,
+        "updated_at": run.updated_at,
+    }
+
+
+def serialize_run_event(event: RunEvent) -> dict[str, Any]:
+    payload = json_loads(event.payload_json, default={})
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "event_id": event.event_id,
+        "type": event.event_type,
+        "run_id": event.run_id,
+        "sequence": event.sequence,
+        "assistant_message_id": event.assistant_message_id,
+        "tool_call_ref": event.tool_call_ref,
+        "created_at": event.created_at,
+        "payload": payload,
+    }
 
 
 def _build_message_tree_branch_markers(

@@ -108,6 +108,18 @@ export const api = {
     const qs = search.toString()
     return request('GET', `/api/conversations/${convId}/messages${qs ? `?${qs}` : ''}`)
   },
+  getAgentRuns: (convId, params = {}) => {
+    const search = new URLSearchParams()
+    if (params.status) search.set('status', params.status)
+    const qs = search.toString()
+    return request('GET', `/api/conversations/${convId}/runs${qs ? `?${qs}` : ''}`)
+  },
+  getRunEvents: (convId, runId, params = {}) => {
+    const search = new URLSearchParams()
+    if (Number.isFinite(params.afterSequence)) search.set('after_sequence', String(params.afterSequence))
+    const qs = search.toString()
+    return request('GET', `/api/conversations/${convId}/runs/${runId}/events${qs ? `?${qs}` : ''}`)
+  },
   getMessageTree: (convId) => request('GET', `/api/conversations/${convId}/message-tree`),
   getMessage: (convId, messageId) => request('GET', `/api/conversations/${convId}/messages/${messageId}`),
   deleteMessage: (convId, messageId) => request('DELETE', `/api/conversations/${convId}/messages/${messageId}`),
