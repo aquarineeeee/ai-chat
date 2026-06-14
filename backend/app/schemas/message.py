@@ -53,6 +53,9 @@ class MessageNodeResponse(BaseModel):
     model: str | None
     temperature: Decimal | None
     max_tokens: int | None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
     status: MessageStatus
     error_message: str | None
     created_at: datetime

@@ -110,7 +110,7 @@ export default function BranchPane({
         </div>
 
         <div className="space-y-1">
-          <ToolTraceCard trace={pane.toolTrace} onToggle={pane.onToggleToolTrace} />
+          <ToolTraceCard traces={pane.toolTrace} onToggle={pane.onToggleToolTrace} />
           {branchMessages.map(msg => (
             <MessageBubble
               key={msg.id}

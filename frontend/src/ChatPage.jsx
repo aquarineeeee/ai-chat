@@ -73,7 +73,7 @@ function createBranchPane(sourceMessage, branch = null) {
     editingContent: '',
     editingMode: 'update',
     editingSubmittingMessageId: null,
-    toolTrace: null,
+    toolTrace: [],
     error: '',
     openedAt: Date.now(),
   }
@@ -90,14 +90,41 @@ const PROVIDER_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic' },
 ]
 
-function buildToolTrace(tool, previousTrace = null) {
+function buildToolTrace(tool, previousTrace = []) {
   if (!tool || typeof tool !== 'object') return previousTrace
-  return {
-    name: typeof tool.name === 'string' ? tool.name : previousTrace?.name || '',
-    status: typeof tool.status === 'string' ? tool.status : previousTrace?.status || '',
-    content: typeof tool.content === 'string' ? tool.content : previousTrace?.content || '',
-    expanded: previousTrace?.expanded || false,
+
+  const nextTrace = Array.isArray(previousTrace) ? [...previousTrace] : []
+  const name = typeof tool.name === 'string' ? tool.name : ''
+  const status = typeof tool.status === 'string' ? tool.status : ''
+  const argumentsText = typeof tool.arguments === 'string' ? tool.arguments : ''
+  const content = typeof tool.content === 'string' ? tool.content : ''
+
+  if (!name) return nextTrace
+
+  if (status === 'completed') {
+    const runningIndex = [...nextTrace]
+      .map((item, index) => ({ item, index }))
+      .reverse()
+      .find(({ item }) => item.name === name && item.status === 'running')?.index
+
+    if (runningIndex !== undefined) {
+      nextTrace[runningIndex] = {
+        ...nextTrace[runningIndex],
+        status: 'completed',
+        content: content || nextTrace[runningIndex].content || '',
+      }
+      return nextTrace
+    }
   }
+
+  nextTrace.push({
+    name,
+    status,
+    arguments: argumentsText,
+    content,
+    expanded: false,
+  })
+  return nextTrace
 }
 
 function sortConversations(items) {
@@ -129,7 +156,7 @@ export default function ChatPage() {
   const [editingMode, setEditingMode] = useState('update')
   const [editingSubmittingMessageId, setEditingSubmittingMessageId] = useState(null)
   const [streamingContent, setStreamingContent] = useState('')
-  const [streamToolTrace, setStreamToolTrace] = useState(null)
+  const [streamToolTrace, setStreamToolTrace] = useState([])
   const [error, setError] = useState('')
   const [apiKeys, setApiKeys] = useState([])
   const [loadingKeys, setLoadingKeys] = useState(false)
@@ -247,16 +274,24 @@ export default function ChatPage() {
     )))
   }, [])
 
-  const toggleMainToolTrace = useCallback(() => {
+  const toggleMainToolTraceItem = useCallback((traceIndex) => {
     setStreamToolTrace(current => (
-      current ? { ...current, expanded: !current.expanded } : current
+      Array.isArray(current)
+        ? current.map((item, index) => (
+          index === traceIndex ? { ...item, expanded: !item.expanded } : item
+        ))
+        : current
     ))
   }, [])
 
-  const toggleBranchToolTrace = useCallback((paneId) => {
+  const toggleBranchToolTrace = useCallback((paneId, traceIndex) => {
     patchBranchPane(paneId, pane => ({
       ...pane,
-      toolTrace: pane.toolTrace ? { ...pane.toolTrace, expanded: !pane.toolTrace.expanded } : pane.toolTrace,
+      toolTrace: Array.isArray(pane.toolTrace)
+        ? pane.toolTrace.map((item, index) => (
+          index === traceIndex ? { ...item, expanded: !item.expanded } : item
+        ))
+        : pane.toolTrace,
     }))
   }, [patchBranchPane])
 
@@ -828,7 +863,7 @@ export default function ChatPage() {
     setMessages(prev => [...prev, userMsg])
     setSending(true)
     setStreamingContent('')
-    setStreamToolTrace(null)
+    setStreamToolTrace([])
 
     try {
       const res = await fetch(`/api/conversations/${convId}/messages/stream`, {
@@ -907,7 +942,7 @@ export default function ChatPage() {
     setError('')
     setRegeneratingMessageId(messageId)
     setStreamingContent('')
-    setStreamToolTrace(null)
+    setStreamToolTrace([])
     const branchId = activeConv?.current_branch_id ?? null
 
     try {
@@ -1111,7 +1146,7 @@ export default function ChatPage() {
       messages: [...current.messages, userMsg],
       sending: true,
       streamingContent: '',
-      toolTrace: null,
+      toolTrace: [],
       error: '',
     }))
     try {
@@ -1498,7 +1533,7 @@ export default function ChatPage() {
                         />
                       )
                     })}
-                    <ToolTraceCard trace={streamToolTrace} onToggle={toggleMainToolTrace} />
+                    <ToolTraceCard traces={streamToolTrace} onToggle={toggleMainToolTraceItem} />
                     {sending && !streamingContent && (
                       <div className="flex gap-3 py-3">
                         <div
@@ -1583,7 +1618,7 @@ export default function ChatPage() {
                       <BranchPane
                         pane={{
                           ...pane,
-                          onToggleToolTrace: () => toggleBranchToolTrace(pane.id),
+                          onToggleToolTrace: (traceIndex) => toggleBranchToolTrace(pane.id, traceIndex),
                           busy: pane.loading
                             || pane.sending
                             || pane.regeneratingMessageId !== null

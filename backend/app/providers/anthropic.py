@@ -17,7 +17,7 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_MAX_TOKENS = 2000
 DEFAULT_CACHE_CONTROL = {"type": "ephemeral"}
-DEFAULT_MAX_TOOL_ROUND_TRIPS = 3
+DEFAULT_MAX_TOOL_ROUND_TRIPS = 99
 ToolExecutor = Callable[[str, str], Awaitable[str]]
 ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
 

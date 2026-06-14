@@ -381,7 +381,7 @@ async def create_message_pair(
     context = await _prepare_generation(session=session, user_id=user_id, conversation_id=conversation_id, payload=payload)
 
     try:
-        reply_content = await _generate_reply(
+        reply = await _generate_reply(
             session=session,
             user_id=user_id,
             conversation=context["conversation"],
@@ -410,7 +410,8 @@ async def create_message_pair(
         conversation=context["conversation"],
         branch=context["branch"],
         assistant_message=context["assistant_message"],
-        reply_content=reply_content,
+        reply_content=str(reply.get("content") or ""),
+        usage=reply.get("usage") if isinstance(reply.get("usage"), dict) else None,
         activate_branch=context["activate_branch"],
     )
     return await _build_send_response(
@@ -433,6 +434,12 @@ async def create_message_stream(
 
     async def iterator() -> AsyncIterator[dict[str, object]]:
         accumulated = ""
+        usage: dict[str, int] | None = None
+
+        async def capture_usage(value: dict[str, int] | None) -> None:
+            nonlocal usage
+            usage = value
+
         try:
             async for chunk in _stream_reply(
                 session=session,
@@ -443,6 +450,7 @@ async def create_message_stream(
                 temperature=context["temperature"],
                 max_tokens=context["max_tokens"],
                 prompt_messages=context["prompt_messages"],
+                usage_callback=capture_usage,
             ):
                 chunk_type = str(chunk.get("type") or "")
                 if chunk_type == "content":
@@ -477,6 +485,7 @@ async def create_message_stream(
             branch=context["branch"],
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
+            usage=usage,
             activate_branch=context["activate_branch"],
         )
 
@@ -499,7 +508,7 @@ async def regenerate_message(
     )
 
     try:
-        reply_content = await _generate_reply(
+        reply = await _generate_reply(
             session=session,
             user_id=user_id,
             conversation=context["conversation"],
@@ -528,7 +537,8 @@ async def regenerate_message(
         conversation=context["conversation"],
         branch=context["branch"],
         assistant_message=context["assistant_message"],
-        reply_content=reply_content,
+        reply_content=str(reply.get("content") or ""),
+        usage=reply.get("usage") if isinstance(reply.get("usage"), dict) else None,
         activate_branch=context["activate_branch"],
     )
     return await _build_regenerate_response(
@@ -558,6 +568,12 @@ async def regenerate_message_stream(
 
     async def iterator() -> AsyncIterator[dict[str, object]]:
         accumulated = ""
+        usage: dict[str, int] | None = None
+
+        async def capture_usage(value: dict[str, int] | None) -> None:
+            nonlocal usage
+            usage = value
+
         try:
             async for chunk in _stream_reply(
                 session=session,
@@ -568,6 +584,7 @@ async def regenerate_message_stream(
                 temperature=context["temperature"],
                 max_tokens=context["max_tokens"],
                 prompt_messages=context["prompt_messages"],
+                usage_callback=capture_usage,
             ):
                 chunk_type = str(chunk.get("type") or "")
                 if chunk_type == "content":
@@ -602,6 +619,7 @@ async def regenerate_message_stream(
             branch=context["branch"],
             assistant_message=context["assistant_message"],
             reply_content=accumulated,
+            usage=usage,
             activate_branch=context["activate_branch"],
         )
 
@@ -850,16 +868,19 @@ async def _generate_reply(
     temperature,
     max_tokens,
     prompt_messages: list[dict[str, str]],
-) -> str:
+) -> dict[str, object]:
     if provider == "mock":
-        return generate_mock_reply(
-            conversation=conversation,
-            content=_prompt_seed_content(prompt_messages),
-            model=model,
-        )
+        return {
+            "content": generate_mock_reply(
+                conversation=conversation,
+                content=_prompt_seed_content(prompt_messages),
+                model=model,
+            ),
+            "usage": None,
+        }
     if provider == "openai":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
-        return await create_openai_compatible_reply(
+        reply = await create_openai_compatible_reply(
             api_key=api_key,
             model=model,
             messages=prompt_messages,
@@ -868,17 +889,24 @@ async def _generate_reply(
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=execute_memory_tool_call,
         )
+        return {
+            "content": str(reply),
+            "usage": getattr(reply, "usage", None),
+        }
     if provider == "anthropic":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
-        return await create_anthropic_reply(
-            api_key=api_key,
-            model=model,
-            messages=prompt_messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
-            tool_executor=execute_memory_tool_call,
-        )
+        return {
+            "content": await create_anthropic_reply(
+                api_key=api_key,
+                model=model,
+                messages=prompt_messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
+                tool_executor=execute_memory_tool_call,
+            ),
+            "usage": None,
+        }
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 
 
@@ -892,6 +920,7 @@ async def _stream_reply(
     temperature,
     max_tokens,
     prompt_messages: list[dict[str, str]],
+    usage_callback=None,
 ) -> AsyncIterator[dict[str, object]]:
     if provider == "mock":
         yield {
@@ -918,6 +947,7 @@ async def _stream_reply(
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=execute_memory_tool_call,
             tool_event_callback=emit_tool_event,
+            usage_callback=usage_callback,
         ):
             while yield_event:
                 yield yield_event.pop(0)
@@ -957,11 +987,15 @@ async def _finalize_success(
     branch: ConversationBranch | None,
     assistant_message: Message,
     reply_content: str,
+    usage: dict[str, int] | None,
     activate_branch: bool,
 ) -> None:
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
     assistant_message.error_message = None
+    assistant_message.prompt_tokens = usage.get("prompt_tokens") if usage is not None else None
+    assistant_message.completion_tokens = usage.get("completion_tokens") if usage is not None else None
+    assistant_message.total_tokens = usage.get("total_tokens") if usage is not None else None
     if branch is not None:
         branch.current_leaf_message_id = assistant_message.id
     if activate_branch:

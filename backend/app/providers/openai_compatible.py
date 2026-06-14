@@ -14,9 +14,68 @@ from app.models.api_key import ApiKey
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MAX_TOOL_ROUND_TRIPS = 3
+DEFAULT_MAX_TOOL_ROUND_TRIPS = 99
 ToolExecutor = Callable[[str, str], Awaitable[str]]
 ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+UsageCallback = Callable[[dict[str, int] | None], Awaitable[None]]
+
+
+class ReplyText(str):
+    usage: dict[str, int] | None
+
+    def __new__(cls, content: str, usage: dict[str, int] | None = None) -> "ReplyText":
+        instance = super().__new__(cls, content)
+        instance.usage = usage
+        return instance
+
+
+def _coerce_token_count(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_usage(data: dict[str, Any]) -> dict[str, int] | None:
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    prompt_tokens = _coerce_token_count(usage.get("prompt_tokens"))
+    completion_tokens = _coerce_token_count(usage.get("completion_tokens"))
+    total_tokens = _coerce_token_count(usage.get("total_tokens"))
+    if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+        return None
+
+    return {
+        "prompt_tokens": prompt_tokens or 0,
+        "completion_tokens": completion_tokens or 0,
+        "total_tokens": total_tokens or 0,
+    }
+
+
+def _merge_usage(
+    current: dict[str, int] | None,
+    incoming: dict[str, int] | None,
+) -> dict[str, int] | None:
+    if incoming is None:
+        return current
+    if current is None:
+        return dict(incoming)
+
+    return {
+        "prompt_tokens": current.get("prompt_tokens", 0) + incoming.get("prompt_tokens", 0),
+        "completion_tokens": current.get("completion_tokens", 0) + incoming.get("completion_tokens", 0),
+        "total_tokens": current.get("total_tokens", 0) + incoming.get("total_tokens", 0),
+    }
 
 
 def normalize_base_url(base_url: str | None) -> str | None:
@@ -96,6 +155,8 @@ def _chat_payload(
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
     return payload
 
 
@@ -278,6 +339,7 @@ async def _stream_completion_round(
             accumulated_content = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
             saw_tool_calls = False
+            usage: dict[str, int] | None = None
 
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
@@ -289,6 +351,8 @@ async def _stream_completion_round(
                     data = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
+
+                usage = _merge_usage(usage, _extract_usage(data))
 
                 error = data.get("error")
                 if error:
@@ -321,9 +385,14 @@ async def _stream_completion_round(
 
             tool_calls = _finalize_stream_tool_calls(tool_calls_by_index)
             if tool_calls:
-                yield {"type": "tool_calls", "tool_calls": tool_calls, "content": accumulated_content}
+                yield {
+                    "type": "tool_calls",
+                    "tool_calls": tool_calls,
+                    "content": accumulated_content,
+                    "usage": usage,
+                }
             else:
-                yield {"type": "done", "content": accumulated_content}
+                yield {"type": "done", "content": accumulated_content, "usage": usage}
     except AppError:
         raise
     except httpx.HTTPError as exc:
@@ -358,6 +427,7 @@ async def create_openai_compatible_reply(
     ) as client:
         message_history: list[dict[str, object]] = [dict(message) for message in messages]
         max_rounds = max_tool_round_trips if tools else 1
+        total_usage: dict[str, int] | None = None
         for _ in range(max_rounds):
             payload = _chat_payload(
                 model=model,
@@ -379,6 +449,7 @@ async def create_openai_compatible_reply(
             try:
                 data = response.json()
                 message = _response_message(data)
+                total_usage = _merge_usage(total_usage, _extract_usage(data))
             except AppError:
                 raise
             except Exception as exc:
@@ -401,7 +472,7 @@ async def create_openai_compatible_reply(
 
             content = _stringify_content(message.get("content"))
             if content:
-                return content
+                return ReplyText(content, total_usage)
             raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
 
     raise AppError(status_code=502, code="MODEL_ERROR", message="模型工具调用次数超出限制")
@@ -418,6 +489,7 @@ async def stream_openai_compatible_reply(
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
     tool_event_callback: ToolEventCallback | None = None,
+    usage_callback: UsageCallback | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/chat/completions"
@@ -432,6 +504,7 @@ async def stream_openai_compatible_reply(
     ) as client:
         message_history: list[dict[str, object]] = [dict(message) for message in messages]
         max_rounds = max_tool_round_trips if tools else 1
+        total_usage: dict[str, int] | None = None
         for _ in range(max_rounds):
             payload = _chat_payload(
                 model=model,
@@ -451,6 +524,10 @@ async def stream_openai_compatible_reply(
                 payload=payload,
             ):
                 event_type = event.get("type")
+                total_usage = _merge_usage(
+                    total_usage,
+                    event.get("usage") if isinstance(event.get("usage"), dict) else None,
+                )
                 if event_type == "content":
                     content = str(event.get("content") or "")
                     if content:
@@ -480,6 +557,8 @@ async def stream_openai_compatible_reply(
                 continue
 
             if round_content:
+                if usage_callback is not None:
+                    await usage_callback(total_usage)
                 return
             raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
 

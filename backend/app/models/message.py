@@ -43,6 +43,9 @@ class Message(Base):
     model: Mapped[str | None] = mapped_column(String(100))
     temperature: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     max_tokens: Mapped[int | None] = mapped_column(Integer)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[MessageStatus] = mapped_column(
         SqlEnum(MessageStatus, name="message_status", values_callable=enum_values),
         nullable=False,

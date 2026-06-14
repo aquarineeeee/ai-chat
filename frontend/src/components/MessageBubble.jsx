@@ -53,6 +53,11 @@ function formatMessageTime(value) {
   return `${date.getFullYear()}-${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())} ${clock}`
 }
 
+function formatTokenCount(value) {
+  if (!Number.isFinite(value)) return null
+  return new Intl.NumberFormat('zh-CN').format(value)
+}
+
 function IconButton({ label, onClick, disabled, children, pulse = false }) {
   return (
     <button
@@ -255,6 +260,11 @@ export default function MessageBubble({
   const isStreaming = message.status === 'streaming'
   const actionDisabled = disableActions || isStreaming || isEditSubmitting
   const timeLabel = formatMessageTime(message.updated_at || message.created_at)
+  const promptTokensLabel = formatTokenCount(Number(message.prompt_tokens))
+  const completionTokensLabel = formatTokenCount(Number(message.completion_tokens))
+  const usageLabel = !isUser && (promptTokensLabel || completionTokensLabel)
+    ? `输入 ${promptTokensLabel || 0} / 输出 ${completionTokensLabel || 0}`
+    : ''
 
   if (isUser) {
     return (
@@ -346,8 +356,16 @@ export default function MessageBubble({
               {message.error_message || '生成失败'}
             </p>
           )}
-          {(timeLabel || !hideActions) && (
+          {(timeLabel || usageLabel || !hideActions) && (
             <div className="flex flex-wrap items-center gap-2 mt-3">
+              {usageLabel && (
+                <span
+                  className="whitespace-nowrap text-xs"
+                  style={{ color: 'var(--text-muted)' }}
+                >
+                  {usageLabel}
+                </span>
+              )}
               {!hideActions && (
                 <>
                   <SiblingNavigator
