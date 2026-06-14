@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -56,6 +57,8 @@ class MessageNodeResponse(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     total_tokens: int | None = None
+    parts: list[dict[str, Any]] | None = None
+    parts_schema_version: int = 1
     status: MessageStatus
     error_message: str | None
     created_at: datetime

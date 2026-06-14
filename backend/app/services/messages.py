@@ -2,14 +2,19 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from datetime import datetime
+from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
+from app.models.agent_run import AgentRun
 from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
+from app.models.run_event import RunEvent
+from app.models.tool_call import ToolCall
 from app.providers import (
     create_anthropic_reply,
     create_openai_compatible_reply,
@@ -32,6 +37,21 @@ from app.schemas.message import (
     MessageSendResponse,
 )
 from app.services.api_keys import get_preferred_api_key
+from app.services.agent_trace import (
+    EVENT_SCHEMA_VERSION,
+    PARTS_SCHEMA_VERSION,
+    TOOL_CALL_PROJECTION_VERSION,
+    aggregate_text_from_parts,
+    apply_run_event_to_parts,
+    build_preview,
+    json_dumps,
+    json_loads,
+    parts_from_message,
+    sanitize_tool_input_for_display,
+    sanitize_tool_output_for_audit,
+    sanitize_tool_output_for_display,
+    utcnow_naive,
+)
 from app.services.branches import (
     _branch_message_subtree_root_id,
     repair_branches_after_message_delete,
@@ -66,6 +86,31 @@ MEMORY_TOOL_GUIDANCE += (
 MEMORY_TOOL_GUIDANCE += (
     "When available, you may call memory_dream to review recently added memories before deciding whether to keep organizing them."
 )
+
+
+RUN_STATUS_RUNNING = "running"
+RUN_STATUS_COMPLETED = "completed"
+RUN_STATUS_FAILED = "failed"
+RUN_STATUS_CANCELLED = "cancelled"
+
+TOOL_STATUS_PENDING = "pending"
+TOOL_STATUS_READY = "ready"
+TOOL_STATUS_RUNNING = "running"
+TOOL_STATUS_SUCCESS = "success"
+TOOL_STATUS_ERROR = "error"
+
+
+def _new_event_id(prefix: str = "evt") -> str:
+    return f"{prefix}_{uuid4().hex}"
+
+
+def _trace_state(context: dict[str, object]) -> dict[str, object]:
+    state = context.get("trace_state")
+    if isinstance(state, dict):
+        return state
+    state = {"open_tool_calls": []}
+    context["trace_state"] = state
+    return state
 
 
 async def list_conversation_messages(
@@ -379,22 +424,19 @@ async def create_message_pair(
     payload: MessageCreateRequest,
 ) -> MessageSendResponse:
     context = await _prepare_generation(session=session, user_id=user_id, conversation_id=conversation_id, payload=payload)
+    await _initialize_trace_for_context(session=session, context=context, user_message=context["user_message"])
 
     try:
-        reply = await _generate_reply(
+        reply_content, usage = await _collect_reply_from_stream(
             session=session,
+            context=context,
             user_id=user_id,
-            conversation=context["conversation"],
-            provider=context["provider"],
-            model=context["model"],
-            temperature=context["temperature"],
-            max_tokens=context["max_tokens"],
-            prompt_messages=context["prompt_messages"],
         )
     except Exception as exc:
         app_error = _to_app_error(exc)
         await _mark_failed(
             session=session,
+            context=context,
             conversation=context["conversation"],
             branch=context["branch"],
             assistant_message=context["assistant_message"],
@@ -407,11 +449,12 @@ async def create_message_pair(
 
     await _finalize_success(
         session=session,
+        context=context,
         conversation=context["conversation"],
         branch=context["branch"],
         assistant_message=context["assistant_message"],
-        reply_content=str(reply.get("content") or ""),
-        usage=reply.get("usage") if isinstance(reply.get("usage"), dict) else None,
+        reply_content=reply_content,
+        usage=usage,
         activate_branch=context["activate_branch"],
     )
     return await _build_send_response(
@@ -431,6 +474,7 @@ async def create_message_stream(
     payload: MessageCreateRequest,
 ) -> AsyncIterator[dict[str, object]]:
     context = await _prepare_generation(session=session, user_id=user_id, conversation_id=conversation_id, payload=payload)
+    await _initialize_trace_for_context(session=session, context=context, user_message=context["user_message"])
 
     async def iterator() -> AsyncIterator[dict[str, object]]:
         accumulated = ""
@@ -456,10 +500,12 @@ async def create_message_stream(
                 if chunk_type == "content":
                     content = str(chunk.get("content") or "")
                     accumulated += content
+                    await _record_text_delta(session=session, context=context, text=content)
                     yield {"content": content}
                 elif chunk_type == "tool":
                     tool = chunk.get("tool")
                     if isinstance(tool, dict):
+                        await _record_tool_event(session=session, context=context, tool=tool)
                         yield {"tool": tool}
         except Exception as exc:
             app_error = _to_app_error(exc)
@@ -467,6 +513,7 @@ async def create_message_stream(
             leaf_message_id = context["assistant_message"].id if accumulated else context["user_message"].id
             await _mark_failed(
                 session=session,
+                context=context,
                 conversation=context["conversation"],
                 branch=context["branch"],
                 assistant_message=context["assistant_message"],
@@ -481,6 +528,7 @@ async def create_message_stream(
 
         await _finalize_success(
             session=session,
+            context=context,
             conversation=context["conversation"],
             branch=context["branch"],
             assistant_message=context["assistant_message"],
@@ -506,22 +554,19 @@ async def regenerate_message(
         message_id=message_id,
         payload=payload,
     )
+    await _initialize_trace_for_context(session=session, context=context, user_message=None)
 
     try:
-        reply = await _generate_reply(
+        reply_content, usage = await _collect_reply_from_stream(
             session=session,
+            context=context,
             user_id=user_id,
-            conversation=context["conversation"],
-            provider=context["provider"],
-            model=context["model"],
-            temperature=context["temperature"],
-            max_tokens=context["max_tokens"],
-            prompt_messages=context["prompt_messages"],
         )
     except Exception as exc:
         app_error = _to_app_error(exc)
         await _mark_failed(
             session=session,
+            context=context,
             conversation=context["conversation"],
             branch=context["branch"],
             assistant_message=context["assistant_message"],
@@ -534,11 +579,12 @@ async def regenerate_message(
 
     await _finalize_success(
         session=session,
+        context=context,
         conversation=context["conversation"],
         branch=context["branch"],
         assistant_message=context["assistant_message"],
-        reply_content=str(reply.get("content") or ""),
-        usage=reply.get("usage") if isinstance(reply.get("usage"), dict) else None,
+        reply_content=reply_content,
+        usage=usage,
         activate_branch=context["activate_branch"],
     )
     return await _build_regenerate_response(
@@ -565,6 +611,7 @@ async def regenerate_message_stream(
         message_id=message_id,
         payload=payload,
     )
+    await _initialize_trace_for_context(session=session, context=context, user_message=None)
 
     async def iterator() -> AsyncIterator[dict[str, object]]:
         accumulated = ""
@@ -590,10 +637,12 @@ async def regenerate_message_stream(
                 if chunk_type == "content":
                     content = str(chunk.get("content") or "")
                     accumulated += content
+                    await _record_text_delta(session=session, context=context, text=content)
                     yield {"content": content}
                 elif chunk_type == "tool":
                     tool = chunk.get("tool")
                     if isinstance(tool, dict):
+                        await _record_tool_event(session=session, context=context, tool=tool)
                         yield {"tool": tool}
         except Exception as exc:
             app_error = _to_app_error(exc)
@@ -601,6 +650,7 @@ async def regenerate_message_stream(
             leaf_message_id = context["assistant_message"].id if accumulated else context["target_message"].id
             await _mark_failed(
                 session=session,
+                context=context,
                 conversation=context["conversation"],
                 branch=context["branch"],
                 assistant_message=context["assistant_message"],
@@ -615,6 +665,7 @@ async def regenerate_message_stream(
 
         await _finalize_success(
             session=session,
+            context=context,
             conversation=context["conversation"],
             branch=context["branch"],
             assistant_message=context["assistant_message"],
@@ -812,6 +863,334 @@ async def _prepare_regeneration(
     }
 
 
+async def _initialize_trace_for_context(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    user_message: Message | None,
+) -> None:
+    if isinstance(context.get("agent_run"), AgentRun):
+        return
+
+    assistant_message = context["assistant_message"]
+    assert isinstance(assistant_message, Message)
+    conversation = context["conversation"]
+    assert isinstance(conversation, Conversation)
+
+    agent_run = AgentRun(
+        conversation_id=conversation.id,
+        user_message_id=user_message.id if user_message is not None else None,
+        assistant_message_id=assistant_message.id,
+        provider=str(context["provider"]),
+        model=str(context["model"]),
+        status=RUN_STATUS_RUNNING,
+        started_at=utcnow_naive(),
+        resume_token=_new_event_id("run"),
+        metadata_json=json_dumps({"phase": "1A"}),
+    )
+    session.add(agent_run)
+    await session.flush()
+    context["agent_run"] = agent_run
+    _trace_state(context)
+
+    await _record_run_event(
+        session=session,
+        context=context,
+        event_type="run.created",
+        payload={
+            "status": RUN_STATUS_RUNNING,
+            "provider": agent_run.provider,
+            "model": agent_run.model,
+            "user_message_id": user_message.id if user_message is not None else None,
+        },
+    )
+    await _record_run_event(
+        session=session,
+        context=context,
+        event_type="assistant_message.created",
+        payload={"assistant_message_id": assistant_message.id},
+    )
+
+
+async def _record_text_delta(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    text: str,
+) -> None:
+    if not text:
+        return
+    await _record_run_event(
+        session=session,
+        context=context,
+        event_type="message.text.delta",
+        payload={"text": text},
+    )
+
+
+async def _record_tool_event(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    tool: dict[str, object],
+) -> None:
+    status = str(tool.get("status") or "")
+    tool_name = str(tool.get("name") or "")
+    if not status or not tool_name:
+        return
+
+    state = _trace_state(context)
+    open_tool_calls = state.setdefault("open_tool_calls", [])
+    assert isinstance(open_tool_calls, list)
+
+    if status == "running":
+        raw_arguments = str(tool.get("arguments") or "")
+        display_input = sanitize_tool_input_for_display(_maybe_parse_json(raw_arguments))
+        tool_call_ref = _new_event_id("tc")
+        open_tool_calls.append({"tool_call_ref": tool_call_ref, "tool_name": tool_name, "completed": False})
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="tool_call.created",
+            tool_call_ref=tool_call_ref,
+            payload={
+                "tool_name": tool_name,
+                "display_input_preview": build_preview(display_input),
+                "input_for_model_json": raw_arguments,
+            },
+        )
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="tool_call.arguments.completed",
+            tool_call_ref=tool_call_ref,
+            payload={
+                "tool_name": tool_name,
+                "display_input_preview": build_preview(display_input),
+                "input_for_model_json": raw_arguments,
+            },
+        )
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="tool_call.started",
+            tool_call_ref=tool_call_ref,
+            payload={"tool_name": tool_name},
+        )
+        return
+
+    if status != "completed":
+        return
+
+    tool_call_ref = _pop_open_tool_call_ref(state=state, tool_name=tool_name)
+    raw_output = str(tool.get("content") or "")
+    display_output = sanitize_tool_output_for_display(_maybe_parse_json(raw_output))
+    audit_output = sanitize_tool_output_for_audit(_maybe_parse_json(raw_output))
+    await _record_run_event(
+        session=session,
+        context=context,
+        event_type="tool_call.completed",
+        tool_call_ref=tool_call_ref,
+        payload={
+            "tool_name": tool_name,
+            "display_output_preview": build_preview(display_output),
+            "audit_output_preview": build_preview(audit_output),
+            "output_for_model_json": raw_output,
+            "output_size_bytes": len(raw_output.encode("utf-8")),
+        },
+    )
+
+
+async def _record_run_event(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    event_type: str,
+    payload: dict[str, Any],
+    tool_call_ref: str | None = None,
+) -> RunEvent:
+    agent_run = context.get("agent_run")
+    assistant_message = context["assistant_message"]
+    assert isinstance(agent_run, AgentRun)
+    assert isinstance(assistant_message, Message)
+
+    agent_run.last_sequence += 1
+    event = RunEvent(
+        event_id=_new_event_id(),
+        run_id=agent_run.id,
+        assistant_message_id=assistant_message.id,
+        tool_call_ref=tool_call_ref,
+        sequence=agent_run.last_sequence,
+        event_type=event_type,
+        payload_json=json_dumps(payload),
+        schema_version=EVENT_SCHEMA_VERSION,
+    )
+    session.add(event)
+    await session.flush()
+    await _apply_projection_for_event(
+        session=session,
+        context=context,
+        event_type=event_type,
+        payload=payload,
+        tool_call_ref=tool_call_ref,
+        sequence=event.sequence,
+    )
+    await session.commit()
+    return event
+
+
+async def _apply_projection_for_event(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    event_type: str,
+    payload: dict[str, Any],
+    tool_call_ref: str | None,
+    sequence: int,
+) -> None:
+    assistant_message = context["assistant_message"]
+    conversation = context["conversation"]
+    agent_run = context["agent_run"]
+    assert isinstance(assistant_message, Message)
+    assert isinstance(conversation, Conversation)
+    assert isinstance(agent_run, AgentRun)
+
+    current_parts = parts_from_message(assistant_message.parts_json)
+    next_parts = apply_run_event_to_parts(
+        current_parts,
+        event_type=event_type,
+        payload=payload,
+        tool_call_ref=tool_call_ref,
+    )
+    if next_parts != current_parts or assistant_message.parts_json is None:
+        assistant_message.parts_json = json_dumps(next_parts)
+        assistant_message.parts_schema_version = PARTS_SCHEMA_VERSION
+        assistant_message.parts_updated_at = utcnow_naive()
+        assistant_message.content = aggregate_text_from_parts(next_parts)
+
+    if event_type.startswith("tool_call."):
+        await _project_tool_call_event(
+            session=session,
+            run=agent_run,
+            conversation=conversation,
+            assistant_message=assistant_message,
+            event_type=event_type,
+            payload=payload,
+            tool_call_ref=tool_call_ref,
+            sequence=sequence,
+        )
+
+
+async def _project_tool_call_event(
+    *,
+    session: AsyncSession,
+    run: AgentRun,
+    conversation: Conversation,
+    assistant_message: Message,
+    event_type: str,
+    payload: dict[str, Any],
+    tool_call_ref: str | None,
+    sequence: int,
+) -> None:
+    if not tool_call_ref:
+        return
+
+    tool_call = await session.scalar(
+        select(ToolCall).where(
+            ToolCall.run_id == run.id,
+            ToolCall.tool_call_id == tool_call_ref,
+        )
+    )
+
+    if tool_call is None:
+        if event_type != "tool_call.created":
+            return
+        tool_call = ToolCall(
+            run_id=run.id,
+            conversation_id=conversation.id,
+            assistant_message_id=assistant_message.id,
+            tool_call_id=tool_call_ref,
+            tool_name=str(payload.get("tool_name") or ""),
+            sequence_index=sequence,
+            status=TOOL_STATUS_PENDING,
+            projection_version=TOOL_CALL_PROJECTION_VERSION,
+        )
+        session.add(tool_call)
+        await session.flush()
+
+    if event_type == "tool_call.created":
+        tool_call.tool_name = str(payload.get("tool_name") or tool_call.tool_name)
+        tool_call.status = TOOL_STATUS_PENDING
+        return
+
+    if event_type == "tool_call.arguments.completed":
+        tool_call.status = TOOL_STATUS_READY
+        tool_call.input_for_model_json = str(payload.get("input_for_model_json") or "")
+        tool_call.display_input_preview = str(payload.get("display_input_preview") or "")
+        return
+
+    if event_type == "tool_call.started":
+        tool_call.status = TOOL_STATUS_RUNNING
+        tool_call.started_at = tool_call.started_at or utcnow_naive()
+        return
+
+    if event_type == "tool_call.completed":
+        tool_call.status = TOOL_STATUS_SUCCESS
+        tool_call.completed_at = utcnow_naive()
+        tool_call.output_for_model_json = str(payload.get("output_for_model_json") or "")
+        tool_call.display_output_preview = str(payload.get("display_output_preview") or "")
+        tool_call.audit_output_preview = str(payload.get("audit_output_preview") or "")
+        tool_call.output_size_bytes = payload.get("output_size_bytes")
+        if tool_call.started_at is not None and tool_call.completed_at is not None:
+            tool_call.duration_ms = int((tool_call.completed_at - tool_call.started_at).total_seconds() * 1000)
+        return
+
+    if event_type == "tool_call.failed":
+        tool_call.status = TOOL_STATUS_ERROR
+        tool_call.completed_at = utcnow_naive()
+        tool_call.error_message = str(payload.get("error_message") or "")
+        if tool_call.started_at is not None and tool_call.completed_at is not None:
+            tool_call.duration_ms = int((tool_call.completed_at - tool_call.started_at).total_seconds() * 1000)
+
+
+def _maybe_parse_json(value: str) -> Any:
+    if not value:
+        return value
+    try:
+        return json_loads(value, default=value)
+    except TypeError:
+        return value
+
+
+def _pop_open_tool_call_ref(*, state: dict[str, object], tool_name: str) -> str | None:
+    open_tool_calls = state.get("open_tool_calls")
+    if not isinstance(open_tool_calls, list):
+        return None
+
+    for item in reversed(open_tool_calls):
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool_name") != tool_name or item.get("completed") is True:
+            continue
+        item["completed"] = True
+        tool_call_ref = item.get("tool_call_ref")
+        return str(tool_call_ref) if tool_call_ref else None
+    return None
+
+
+def _find_pending_tool_call(context: dict[str, object]) -> dict[str, object] | None:
+    state = _trace_state(context)
+    open_tool_calls = state.get("open_tool_calls")
+    if not isinstance(open_tool_calls, list):
+        return None
+
+    for item in reversed(open_tool_calls):
+        if isinstance(item, dict) and item.get("completed") is not True:
+            item["completed"] = True
+            return item
+    return None
+
+
 async def _build_prompt_messages(
     *,
     session: AsyncSession,
@@ -856,6 +1235,43 @@ async def _build_prompt_messages(
     if user_content is not None:
         messages.append({"role": "user", "content": user_content})
     return messages
+
+
+async def _collect_reply_from_stream(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    user_id: int,
+) -> tuple[str, dict[str, int] | None]:
+    accumulated = ""
+    usage: dict[str, int] | None = None
+
+    async def capture_usage(value: dict[str, int] | None) -> None:
+        nonlocal usage
+        usage = value
+
+    async for chunk in _stream_reply(
+        session=session,
+        user_id=user_id,
+        conversation=context["conversation"],
+        provider=context["provider"],
+        model=context["model"],
+        temperature=context["temperature"],
+        max_tokens=context["max_tokens"],
+        prompt_messages=context["prompt_messages"],
+        usage_callback=capture_usage,
+    ):
+        chunk_type = str(chunk.get("type") or "")
+        if chunk_type == "content":
+            content = str(chunk.get("content") or "")
+            accumulated += content
+            await _record_text_delta(session=session, context=context, text=content)
+        elif chunk_type == "tool":
+            tool = chunk.get("tool")
+            if isinstance(tool, dict):
+                await _record_tool_event(session=session, context=context, tool=tool)
+
+    return accumulated, usage
 
 
 async def _generate_reply(
@@ -983,6 +1399,7 @@ async def _stream_reply(
 async def _finalize_success(
     *,
     session: AsyncSession,
+    context: dict[str, object],
     conversation: Conversation,
     branch: ConversationBranch | None,
     assistant_message: Message,
@@ -990,12 +1407,23 @@ async def _finalize_success(
     usage: dict[str, int] | None,
     activate_branch: bool,
 ) -> None:
+    await _record_run_event(
+        session=session,
+        context=context,
+        event_type="message.completed",
+        payload={"status": MessageStatus.COMPLETED.value},
+    )
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
     assistant_message.error_message = None
     assistant_message.prompt_tokens = usage.get("prompt_tokens") if usage is not None else None
     assistant_message.completion_tokens = usage.get("completion_tokens") if usage is not None else None
     assistant_message.total_tokens = usage.get("total_tokens") if usage is not None else None
+    agent_run = context.get("agent_run")
+    if isinstance(agent_run, AgentRun):
+        agent_run.status = RUN_STATUS_COMPLETED
+        agent_run.completed_at = utcnow_naive()
+        agent_run.error_message = None
     if branch is not None:
         branch.current_leaf_message_id = assistant_message.id
     if activate_branch:
@@ -1010,6 +1438,7 @@ async def _finalize_success(
 async def _mark_failed(
     *,
     session: AsyncSession,
+    context: dict[str, object] | None,
     conversation: Conversation,
     branch: ConversationBranch | None,
     assistant_message: Message,
@@ -1019,9 +1448,33 @@ async def _mark_failed(
     activate_branch: bool,
     partial_content: str = "",
 ) -> None:
+    if context is not None:
+        pending_tool = _find_pending_tool_call(context)
+        if pending_tool is not None:
+            await _record_run_event(
+                session=session,
+                context=context,
+                event_type="tool_call.failed",
+                tool_call_ref=str(pending_tool.get("tool_call_ref") or ""),
+                payload={
+                    "tool_name": str(pending_tool.get("tool_name") or ""),
+                    "error_message": message,
+                },
+            )
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="run.failed",
+            payload={"error_message": message, "status": status.value},
+        )
     assistant_message.content = partial_content
     assistant_message.status = status
     assistant_message.error_message = message
+    agent_run = context.get("agent_run") if context is not None else None
+    if isinstance(agent_run, AgentRun):
+        agent_run.status = RUN_STATUS_FAILED
+        agent_run.completed_at = utcnow_naive()
+        agent_run.error_message = message
     if branch is not None:
         branch.current_leaf_message_id = leaf_message_id
     if activate_branch:
@@ -1173,6 +1626,9 @@ async def _create_assistant_message(
         parent_id=parent_id,
         role=MessageRole.ASSISTANT,
         content="",
+        parts_json=json_dumps([]),
+        parts_schema_version=PARTS_SCHEMA_VERSION,
+        parts_updated_at=utcnow_naive(),
         provider=provider,
         model=model,
         temperature=temperature,
@@ -1271,8 +1727,11 @@ def _serialize_message_node(
         message.id,
         (1, 1, None, None),
     )
+    parsed_parts = parts_from_message(message.parts_json) if message.parts_json is not None else None
     return MessageNodeResponse.model_validate(message).model_copy(
         update={
+            "parts": parsed_parts,
+            "parts_schema_version": message.parts_schema_version,
             "sibling_index": sibling_index,
             "sibling_count": sibling_count,
             "previous_sibling_id": previous_sibling_id,

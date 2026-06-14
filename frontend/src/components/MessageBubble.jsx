@@ -58,6 +58,97 @@ function formatTokenCount(value) {
   return new Intl.NumberFormat('zh-CN').format(value)
 }
 
+function toolPartLabel(part) {
+  const toolName = part?.tool_name || 'tool'
+  if (part?.type === 'tool_call') {
+    return part?.status === 'running' ? `${toolName} 正在执行` : `${toolName} 已调用`
+  }
+  if (part?.type === 'tool_result') return `${toolName} 已返回结果`
+  return `${toolName} 执行失败`
+}
+
+function ToolPartCard({ part }) {
+  const [expanded, setExpanded] = useState(false)
+  const content = part?.type === 'tool_call'
+    ? (part?.arguments_preview || '')
+    : (part?.content || part?.message || '')
+  const canToggle = !!String(content).trim()
+
+  return (
+    <div
+      className="my-3 rounded-2xl border overflow-hidden"
+      style={{
+        background: 'color-mix(in srgb, var(--bg-surface) 88%, transparent)',
+        borderColor: 'var(--border)',
+      }}
+    >
+      <button
+        type="button"
+        onClick={canToggle ? () => setExpanded(value => !value) : undefined}
+        disabled={!canToggle}
+        className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left disabled:cursor-default"
+        style={{ color: 'var(--text-secondary)' }}
+      >
+        <span className="text-xs">{toolPartLabel(part)}</span>
+        {canToggle && (
+          <ChevronDown
+            className="w-3.5 h-3.5 shrink-0"
+            style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
+          />
+        )}
+      </button>
+      {expanded && canToggle && (
+        <div
+          className="px-3 py-2 text-xs whitespace-pre-wrap break-words border-t"
+          style={{
+            color: 'var(--text-primary)',
+            borderColor: 'var(--border)',
+            background: 'var(--bg-elevated)',
+          }}
+        >
+          {content}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssistantBody({ message }) {
+  const parts = Array.isArray(message?.parts) ? message.parts : null
+
+  if (!parts || parts.length === 0) {
+    return (
+      <div className="prose-chat">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+          {message.content || ''}
+        </ReactMarkdown>
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      {parts.map((part, index) => {
+        if (part?.type === 'text') {
+          return (
+            <div key={`part-${index}`} className="prose-chat">
+              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+                {part.text || ''}
+              </ReactMarkdown>
+            </div>
+          )
+        }
+
+        if (part?.type === 'tool_call' || part?.type === 'tool_result' || part?.type === 'error') {
+          return <ToolPartCard key={`part-${index}`} part={part} />
+        }
+
+        return null
+      })}
+    </div>
+  )
+}
+
 function IconButton({ label, onClick, disabled, children, pulse = false }) {
   return (
     <button
@@ -346,11 +437,7 @@ export default function MessageBubble({
           className={`min-w-0 text-sm ${isStreaming ? 'typing-cursor' : ''}`}
           style={{ color: 'var(--text-primary)' }}
         >
-          <div className="prose-chat">
-            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-              {message.content || ''}
-            </ReactMarkdown>
-          </div>
+          <AssistantBody message={message} />
           {message.status === 'failed' && (
             <p className="text-xs mt-1" style={{ color: 'var(--error-text)' }}>
               {message.error_message || '生成失败'}

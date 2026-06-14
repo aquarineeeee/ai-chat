@@ -46,6 +46,9 @@ class Message(Base):
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
     completion_tokens: Mapped[int | None] = mapped_column(Integer)
     total_tokens: Mapped[int | None] = mapped_column(Integer)
+    parts_json: Mapped[str | None] = mapped_column(Text().with_variant(MEDIUMTEXT(), "mysql"))
+    parts_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    parts_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     status: Mapped[MessageStatus] = mapped_column(
         SqlEnum(MessageStatus, name="message_status", values_callable=enum_values),
         nullable=False,
