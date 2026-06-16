@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from app.canonical_transcript import user_text_item
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
 from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
@@ -318,7 +319,7 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
             result = await create_openai_compatible_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": "继续这个项目"}],
+                transcript=[user_text_item("继续这个项目")],
                 temperature=None,
                 max_tokens=800,
                 tools=[memory_search_tool_definition()],
@@ -343,7 +344,7 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
                 await create_openai_compatible_reply(
                     api_key=api_key,
                     model="gpt-4.1-mini",
-                    messages=[{"role": "user", "content": "hello"}],
+                    transcript=[user_text_item("hello")],
                     temperature=None,
                     max_tokens=200,
                     tools=[memory_search_tool_definition()],
@@ -415,7 +416,7 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
             async for chunk in stream_openai_compatible_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": "继续"}],
+                transcript=[user_text_item("继续")],
                 temperature=None,
                 max_tokens=800,
                 tools=[memory_search_tool_definition()],

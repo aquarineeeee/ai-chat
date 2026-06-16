@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from app.canonical_transcript import CanonicalTranscriptItem, parse_tool_arguments
 from app.core.encryption import decrypt_text
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
@@ -168,6 +169,77 @@ def _convert_messages(messages: list[dict[str, object]]) -> tuple[list[dict[str,
         anthropic_messages.append({"role": role, "content": content})
 
     return _anthropic_system_blocks("\n\n".join(system_parts)), anthropic_messages
+
+
+def _transcript_to_anthropic_history(transcript: list[CanonicalTranscriptItem]) -> list[dict[str, object]]:
+    messages: list[dict[str, object]] = []
+    current_role: str | None = None
+    current_content: str | list[dict[str, object]] | None = None
+
+    def ensure_role(role: str) -> list[dict[str, object]]:
+        nonlocal current_role, current_content
+        if current_role != role or not isinstance(current_content, list):
+            flush_message()
+            current_role = role
+            current_content = []
+        assert isinstance(current_content, list)
+        return current_content
+
+    def flush_message() -> None:
+        nonlocal current_role, current_content
+        if current_role is None or current_content is None:
+            current_role = None
+            current_content = None
+            return
+        messages.append({"role": current_role, "content": _json_copy(current_content)})
+        current_role = None
+        current_content = None
+
+    for item in transcript:
+        if item.kind == "system_text":
+            flush_message()
+            messages.append({"role": "system", "content": item.text})
+            continue
+
+        if item.kind == "user_text":
+            blocks = ensure_role("user")
+            blocks.append({"type": "text", "text": item.text})
+            continue
+
+        if item.kind == "assistant_text":
+            blocks = ensure_role("assistant")
+            blocks.append({"type": "text", "text": item.text})
+            continue
+
+        if item.kind == "assistant_tool_call":
+            blocks = ensure_role("assistant")
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": item.tool_call_id or f"toolu-{len(blocks)}",
+                    "name": item.tool_name,
+                    "input": parse_tool_arguments(item.arguments),
+                }
+            )
+            continue
+
+        if item.kind == "tool_result":
+            flush_message()
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": item.tool_call_id,
+                            "content": item.result,
+                        }
+                    ],
+                }
+            )
+
+    flush_message()
+    return messages
 
 
 def _anthropic_tools(tools: list[dict[str, object]] | None) -> list[dict[str, object]] | None:
@@ -496,7 +568,7 @@ async def create_anthropic_reply(
     *,
     api_key: ApiKey,
     model: str,
-    messages: list[dict[str, object]],
+    transcript: list[CanonicalTranscriptItem],
     temperature: Decimal | None,
     max_tokens: int | None,
     tools: list[dict[str, object]] | None = None,
@@ -514,7 +586,7 @@ async def create_anthropic_reply(
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = [dict(message) for message in messages]
+        message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         for _ in range(max_rounds):
             payload = _messages_payload(
@@ -574,7 +646,7 @@ async def stream_anthropic_reply(
     *,
     api_key: ApiKey,
     model: str,
-    messages: list[dict[str, object]],
+    transcript: list[CanonicalTranscriptItem],
     temperature: Decimal | None,
     max_tokens: int | None,
     tools: list[dict[str, object]] | None = None,
@@ -593,7 +665,7 @@ async def stream_anthropic_reply(
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = [dict(message) for message in messages]
+        message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         for _ in range(max_rounds):
             payload = _messages_payload(

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app.canonical_transcript import user_text_item
 from app.models.api_key import ApiKey
 from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
 
@@ -66,7 +67,7 @@ class OpenAIUsageTests(unittest.IsolatedAsyncioTestCase):
             result = await create_openai_compatible_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": "hello"}],
+                transcript=[user_text_item("hello")],
                 temperature=None,
                 max_tokens=800,
                 tools=[{"type": "function", "function": {"name": "memory_search", "parameters": {}}}],
@@ -134,7 +135,7 @@ class OpenAIUsageTests(unittest.IsolatedAsyncioTestCase):
             async for chunk in stream_openai_compatible_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
-                messages=[{"role": "user", "content": "hello"}],
+                transcript=[user_text_item("hello")],
                 temperature=None,
                 max_tokens=800,
                 usage_callback=on_usage,

@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from app.canonical_transcript import user_text_item
+from app.models.agent_run import AgentRun
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
 from app.services import memory_mcp, messages
@@ -435,16 +437,17 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 model="gpt-4.1-mini",
                 temperature=None,
                 max_tokens=1000,
-                prompt_messages=[{"role": "user", "content": "hello"}],
+                prompt_transcript=[user_text_item("hello")],
             )
 
-        self.assertEqual(result, "final answer")
+        self.assertEqual(result["content"], "final answer")
         mock_get_key.assert_awaited_once_with(session=session, user_id=1, provider="openai")
         _, kwargs = mock_reply.await_args
         self.assertEqual(
             [tool["function"]["name"] for tool in kwargs["tools"]],
             ["memory_search", "memory_pulse", "memory_dream", "memory_write", "memory_grow", "memory_update"],
         )
+        self.assertEqual(kwargs["transcript"], [user_text_item("hello")])
         self.assertTrue(callable(kwargs["tool_executor"]))
 
     async def test_generate_reply_for_anthropic_uses_memory_tools(self) -> None:
@@ -463,16 +466,17 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 model="claude-sonnet-4-20250514",
                 temperature=None,
                 max_tokens=1000,
-                prompt_messages=[{"role": "user", "content": "hello"}],
+                prompt_transcript=[user_text_item("hello")],
             )
 
-        self.assertEqual(result, "final answer")
+        self.assertEqual(result["content"], "final answer")
         mock_get_key.assert_awaited_once_with(session=session, user_id=1, provider="anthropic")
         _, kwargs = mock_reply.await_args
         self.assertEqual(
             [tool["function"]["name"] for tool in kwargs["tools"]],
             ["memory_search", "memory_pulse", "memory_dream", "memory_write", "memory_grow", "memory_update"],
         )
+        self.assertEqual(kwargs["transcript"], [user_text_item("hello")])
         self.assertTrue(callable(kwargs["tool_executor"]))
 
     async def test_build_prompt_messages_includes_memory_tool_guidance_for_openai(self) -> None:
@@ -539,6 +543,42 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(assistant_message.content, "新的回答")
         self.assertEqual(assistant_message.status, MessageStatus.COMPLETED)
+        session.commit.assert_awaited_once()
+    async def test_finalize_success_marks_message_completed_without_memory_write(self) -> None:
+        session = AsyncMock()
+        conversation = Conversation(user_id=1)
+        run = AgentRun(id=1, conversation_id=1, provider="openai", model="gpt-4.1-mini", status="running")
+        now = datetime.now(UTC)
+        assistant_message = Message(
+            id=2,
+            conversation_id=1,
+            parent_id=1,
+            role=MessageRole.ASSISTANT,
+            content="",
+            status=MessageStatus.STREAMING,
+            created_at=now,
+            updated_at=now,
+        )
+
+        with patch("app.services.messages._record_run_event", AsyncMock()):
+            await messages._finalize_success(
+                session=session,
+                context={
+                    "agent_run": run,
+                    "assistant_message": assistant_message,
+                    "conversation": conversation,
+                },
+                conversation=conversation,
+                branch=None,
+                assistant_message=assistant_message,
+                reply_content="鏂扮殑鍥炵瓟",
+                usage=None,
+                activate_branch=True,
+            )
+
+        self.assertEqual(assistant_message.content, "鏂扮殑鍥炵瓟")
+        self.assertEqual(assistant_message.status, MessageStatus.COMPLETED)
+        self.assertEqual(run.status, messages.RUN_STATUS_COMPLETED)
         session.commit.assert_awaited_once()
 
 

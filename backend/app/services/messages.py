@@ -9,6 +9,14 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.canonical_transcript import (
+    CanonicalTranscriptItem,
+    build_message_history_transcript,
+    latest_user_text,
+    system_text_item,
+    transcript_to_simple_messages,
+    user_text_item,
+)
 from app.core.exceptions import AppError
 from app.db.session import AsyncSessionLocal
 from app.models.agent_run import AgentRun
@@ -575,7 +583,7 @@ async def create_message_stream(
                 "model": context["model"],
                 "temperature": context["temperature"],
                 "max_tokens": context["max_tokens"],
-                "prompt_messages": context["prompt_messages"],
+                "prompt_transcript": context["prompt_transcript"],
                 "activate_branch": context["activate_branch"],
                 "failure_leaf_message_id": context["user_message"].id,
             }
@@ -677,7 +685,7 @@ async def regenerate_message_stream(
                 "model": context["model"],
                 "temperature": context["temperature"],
                 "max_tokens": context["max_tokens"],
-                "prompt_messages": context["prompt_messages"],
+                "prompt_transcript": context["prompt_transcript"],
                 "activate_branch": context["activate_branch"],
                 "failure_leaf_message_id": context["target_message"].id,
             }
@@ -762,7 +770,7 @@ async def _prepare_generation(
     # Both new messages are flushed above, so this snapshot includes them and can
     # be reused for the response (expire_on_commit=False keeps the objects live).
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    prompt_messages = await _build_prompt_messages(
+    prompt_transcript = await _build_prompt_transcript(
         session=session,
         conversation=conversation,
         parent_id=parent_id,
@@ -781,7 +789,7 @@ async def _prepare_generation(
         "history": history,
         "max_tokens": max_tokens,
         "model": model,
-        "prompt_messages": prompt_messages,
+        "prompt_transcript": prompt_transcript,
         "provider": provider,
         "temperature": temperature,
         "user_message": user_message,
@@ -853,7 +861,7 @@ async def _prepare_regeneration(
     # Assistant placeholder is flushed above, so this snapshot includes it and can
     # be reused for the response (expire_on_commit=False keeps the objects live).
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    prompt_messages = await _build_prompt_messages(
+    prompt_transcript = await _build_prompt_transcript(
         session=session,
         conversation=conversation,
         parent_id=parent_id,
@@ -871,7 +879,7 @@ async def _prepare_regeneration(
         "history": history,
         "max_tokens": max_tokens,
         "model": model,
-        "prompt_messages": prompt_messages,
+        "prompt_transcript": prompt_transcript,
         "provider": provider,
         "target_message": target_message,
         "temperature": temperature,
@@ -949,7 +957,7 @@ async def _execute_background_run(payload: dict[str, Any]) -> None:
             "model": payload["model"],
             "temperature": payload.get("temperature"),
             "max_tokens": payload.get("max_tokens"),
-            "prompt_messages": payload.get("prompt_messages") or [],
+            "prompt_transcript": payload.get("prompt_transcript") or [],
             "activate_branch": bool(payload.get("activate_branch", True)),
         }
 
@@ -1376,6 +1384,54 @@ def _find_pending_tool_call(context: dict[str, object]) -> dict[str, object] | N
     return None
 
 
+async def _build_prompt_transcript(
+    *,
+    session: AsyncSession,
+    conversation: Conversation,
+    parent_id: int | None,
+    user_content: str | None = None,
+    context_mode: str = "full",
+    context_root_message_id: int | None = None,
+    history: list[Message] | None = None,
+    include_memory_context: bool = True,
+    include_memory_tool_guidance: bool = False,
+) -> list[CanonicalTranscriptItem]:
+    transcript: list[CanonicalTranscriptItem] = []
+    if conversation.system_prompt:
+        transcript.append(system_text_item(conversation.system_prompt))
+    if include_memory_tool_guidance:
+        transcript.append(system_text_item(MEMORY_TOOL_GUIDANCE))
+
+    if include_memory_context:
+        memory_query = user_content.strip() if user_content else None
+        if memory_query is None and history is not None:
+            memory_query = _latest_user_content(history=history, parent_id=parent_id)
+        if memory_query:
+            memory_context = await search_memory(query=memory_query)
+            if memory_context:
+                transcript.append(system_text_item(memory_context))
+
+    if history is None:
+        history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    by_id = {item.id: item for item in history}
+    context_messages: list[Message] = []
+
+    if context_mode == "root_only":
+        if context_root_message_id is not None and context_root_message_id in by_id:
+            root_message = by_id[context_root_message_id]
+            if root_message.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
+                context_messages.append(root_message)
+    elif parent_id is not None:
+        for item in _lineage_messages(by_id, parent_id):
+            if item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
+                context_messages.append(item)
+
+    transcript.extend(await build_message_history_transcript(session=session, messages=context_messages))
+    if user_content is not None:
+        transcript.append(user_text_item(user_content))
+    return transcript
+
+
 async def _build_prompt_messages(
     *,
     session: AsyncSession,
@@ -1388,38 +1444,18 @@ async def _build_prompt_messages(
     include_memory_context: bool = True,
     include_memory_tool_guidance: bool = False,
 ) -> list[dict[str, str]]:
-    messages: list[dict[str, str]] = []
-    if conversation.system_prompt:
-        messages.append({"role": "system", "content": conversation.system_prompt})
-    if include_memory_tool_guidance:
-        messages.append({"role": "system", "content": MEMORY_TOOL_GUIDANCE})
-
-    if include_memory_context:
-        memory_query = user_content.strip() if user_content else None
-        if memory_query is None and history is not None:
-            memory_query = _latest_user_content(history=history, parent_id=parent_id)
-        if memory_query:
-            memory_context = await search_memory(query=memory_query)
-            if memory_context:
-                messages.append({"role": "system", "content": memory_context})
-
-    if history is None:
-        history = await _load_conversation_history(session=session, conversation_id=conversation.id)
-    by_id = {item.id: item for item in history}
-
-    if context_mode == "root_only":
-        if context_root_message_id is not None and context_root_message_id in by_id:
-            root_message = by_id[context_root_message_id]
-            if root_message.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
-                messages.append({"role": root_message.role.value, "content": root_message.content})
-    elif parent_id is not None:
-        for item in _lineage_messages(by_id, parent_id):
-            if item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
-                messages.append({"role": item.role.value, "content": item.content})
-
-    if user_content is not None:
-        messages.append({"role": "user", "content": user_content})
-    return messages
+    transcript = await _build_prompt_transcript(
+        session=session,
+        conversation=conversation,
+        parent_id=parent_id,
+        user_content=user_content,
+        context_mode=context_mode,
+        context_root_message_id=context_root_message_id,
+        history=history,
+        include_memory_context=include_memory_context,
+        include_memory_tool_guidance=include_memory_tool_guidance,
+    )
+    return transcript_to_simple_messages(transcript)
 
 
 async def _collect_reply_from_stream(
@@ -1443,7 +1479,7 @@ async def _collect_reply_from_stream(
         model=context["model"],
         temperature=context["temperature"],
         max_tokens=context["max_tokens"],
-        prompt_messages=context["prompt_messages"],
+        prompt_transcript=context["prompt_transcript"],
         usage_callback=capture_usage,
     ):
         chunk_type = str(chunk.get("type") or "")
@@ -1468,13 +1504,13 @@ async def _generate_reply(
     model: str,
     temperature,
     max_tokens,
-    prompt_messages: list[dict[str, str]],
+    prompt_transcript: list[CanonicalTranscriptItem],
 ) -> dict[str, object]:
     if provider == "mock":
         return {
             "content": generate_mock_reply(
                 conversation=conversation,
-                content=_prompt_seed_content(prompt_messages),
+                content=_prompt_seed_content(prompt_transcript),
                 model=model,
             ),
             "usage": None,
@@ -1484,7 +1520,7 @@ async def _generate_reply(
         reply = await create_openai_compatible_reply(
             api_key=api_key,
             model=model,
-            messages=prompt_messages,
+            transcript=prompt_transcript,
             temperature=temperature,
             max_tokens=max_tokens,
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
@@ -1500,7 +1536,7 @@ async def _generate_reply(
             "content": await create_anthropic_reply(
                 api_key=api_key,
                 model=model,
-                messages=prompt_messages,
+                transcript=prompt_transcript,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
@@ -1520,7 +1556,7 @@ async def _stream_reply(
     model: str,
     temperature,
     max_tokens,
-    prompt_messages: list[dict[str, str]],
+    prompt_transcript: list[CanonicalTranscriptItem],
     usage_callback=None,
 ) -> AsyncIterator[dict[str, object]]:
     if provider == "mock":
@@ -1528,7 +1564,7 @@ async def _stream_reply(
             "type": "content",
             "content": generate_mock_reply(
                 conversation=conversation,
-                content=_prompt_seed_content(prompt_messages),
+                content=_prompt_seed_content(prompt_transcript),
                 model=model,
             ),
         }
@@ -1542,7 +1578,7 @@ async def _stream_reply(
         async for chunk in stream_openai_compatible_reply(
             api_key=api_key,
             model=model,
-            messages=prompt_messages,
+            transcript=prompt_transcript,
             temperature=temperature,
             max_tokens=max_tokens,
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
@@ -1565,7 +1601,7 @@ async def _stream_reply(
         async for chunk in stream_anthropic_reply(
             api_key=api_key,
             model=model,
-            messages=prompt_messages,
+            transcript=prompt_transcript,
             temperature=temperature,
             max_tokens=max_tokens,
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
@@ -2188,13 +2224,8 @@ def _resolve_latest_leaf_message_id(messages: list[Message]) -> int | None:
     return leaves[-1].id
 
 
-def _prompt_seed_content(prompt_messages: list[dict[str, str]]) -> str:
-    for item in reversed(prompt_messages):
-        if item["role"] == "user":
-            return item["content"]
-    if prompt_messages:
-        return prompt_messages[-1]["content"]
-    return ""
+def _prompt_seed_content(prompt_transcript: list[CanonicalTranscriptItem]) -> str:
+    return latest_user_text(prompt_transcript)
 
 
 def _latest_user_content(*, history: list[Message], parent_id: int | None) -> str | None:

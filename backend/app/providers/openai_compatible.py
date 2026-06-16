@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 
+from app.canonical_transcript import CanonicalTranscriptItem
 from app.core.encryption import decrypt_text
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
@@ -278,6 +279,70 @@ def _assistant_history_message(message: dict[str, Any]) -> dict[str, object]:
     return history_message
 
 
+def _transcript_to_openai_messages(transcript: list[CanonicalTranscriptItem]) -> list[dict[str, object]]:
+    messages: list[dict[str, object]] = []
+    current_assistant: dict[str, object] | None = None
+
+    def flush_assistant() -> None:
+        nonlocal current_assistant
+        if current_assistant is None:
+            return
+        content = str(current_assistant.get("content") or "")
+        tool_calls = current_assistant.get("tool_calls")
+        if not content and not tool_calls:
+            current_assistant = None
+            return
+        messages.append(current_assistant)
+        current_assistant = None
+
+    for item in transcript:
+        if item.kind == "system_text":
+            flush_assistant()
+            messages.append({"role": "system", "content": item.text})
+            continue
+
+        if item.kind == "user_text":
+            flush_assistant()
+            messages.append({"role": "user", "content": item.text})
+            continue
+
+        if item.kind == "assistant_text":
+            if current_assistant is None:
+                current_assistant = {"role": "assistant", "content": ""}
+            current_assistant["content"] = str(current_assistant.get("content") or "") + item.text
+            continue
+
+        if item.kind == "assistant_tool_call":
+            if current_assistant is None:
+                current_assistant = {"role": "assistant", "content": ""}
+            tool_calls = current_assistant.setdefault("tool_calls", [])
+            assert isinstance(tool_calls, list)
+            tool_calls.append(
+                {
+                    "id": item.tool_call_id or f"tool-call-{len(tool_calls)}",
+                    "type": "function",
+                    "function": {
+                        "name": item.tool_name,
+                        "arguments": item.arguments,
+                    },
+                }
+            )
+            continue
+
+        if item.kind == "tool_result":
+            flush_assistant()
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": item.tool_call_id,
+                    "content": item.result,
+                }
+            )
+
+    flush_assistant()
+    return messages
+
+
 async def _run_tool_round(
     *,
     message_history: list[dict[str, object]],
@@ -407,7 +472,7 @@ async def create_openai_compatible_reply(
     *,
     api_key: ApiKey,
     model: str,
-    messages: list[dict[str, str]],
+    transcript: list[CanonicalTranscriptItem],
     temperature: Decimal | None,
     max_tokens: int | None,
     tools: list[dict[str, object]] | None = None,
@@ -425,7 +490,7 @@ async def create_openai_compatible_reply(
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = [dict(message) for message in messages]
+        message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
         for _ in range(max_rounds):
@@ -482,7 +547,7 @@ async def stream_openai_compatible_reply(
     *,
     api_key: ApiKey,
     model: str,
-    messages: list[dict[str, str]],
+    transcript: list[CanonicalTranscriptItem],
     temperature: Decimal | None,
     max_tokens: int | None,
     tools: list[dict[str, object]] | None = None,
@@ -502,7 +567,7 @@ async def stream_openai_compatible_reply(
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = [dict(message) for message in messages]
+        message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
         for _ in range(max_rounds):
