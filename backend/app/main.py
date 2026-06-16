@@ -12,6 +12,7 @@ from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.db.session import bootstrap_admin_user
+from app.services.agent_runner import agent_runner
 
 
 settings = get_settings()
@@ -21,7 +22,10 @@ STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await bootstrap_admin_user()
-    yield
+    try:
+        yield
+    finally:
+        await agent_runner.shutdown()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

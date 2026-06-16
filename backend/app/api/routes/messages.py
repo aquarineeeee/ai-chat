@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,10 +35,30 @@ from app.services.messages import (
     regenerate_message_stream,
     serialize_agent_run,
     serialize_run_event,
+    stream_run_events,
 )
 
 
 router = APIRouter()
+
+
+def _resolve_after_sequence(*, after_sequence: int, request: Request) -> int:
+    raw_last_event_id = request.headers.get("Last-Event-ID")
+    if raw_last_event_id is None:
+        return after_sequence
+    try:
+        return max(after_sequence, int(raw_last_event_id))
+    except (TypeError, ValueError):
+        return after_sequence
+
+
+def _encode_sse_chunk(chunk: dict[str, object]) -> str:
+    lines: list[str] = []
+    sequence = chunk.get("sequence")
+    if isinstance(sequence, int):
+        lines.append(f"id: {sequence}")
+    lines.append(f"data: {json.dumps(chunk, ensure_ascii=False)}")
+    return "\n".join(lines) + "\n\n"
 
 
 @router.get("/conversations/{conversation_id}/runs", response_model=AgentRunListResponse)
@@ -76,6 +96,40 @@ async def conversation_run_events_index(
         run_id=run_id,
         after_sequence=after_sequence,
         items=[RunEventResponse.model_validate(serialize_run_event(item)) for item in items],
+    )
+
+
+@router.get("/conversations/{conversation_id}/runs/{run_id}/stream")
+async def conversation_run_stream(
+    conversation_id: int,
+    run_id: int,
+    request: Request,
+    after_sequence: int = Query(default=0, ge=0),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> StreamingResponse:
+    resolved_after_sequence = _resolve_after_sequence(after_sequence=after_sequence, request=request)
+    stream = stream_run_events(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        after_sequence=resolved_after_sequence,
+    )
+
+    async def event_stream():
+        async for chunk in stream:
+            yield _encode_sse_chunk(chunk)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -157,7 +211,7 @@ async def messages_create_stream(
 
     async def event_stream():
         async for chunk in stream:
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield _encode_sse_chunk(chunk)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
@@ -209,7 +263,7 @@ async def messages_regenerate_stream(
 
     async def event_stream():
         async for chunk in stream:
-            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield _encode_sse_chunk(chunk)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(

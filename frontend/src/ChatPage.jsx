@@ -140,6 +140,17 @@ function aggregateTextFromParts(parts) {
     .join('')
 }
 
+function buildRunEventFromChunk(chunk, fallbackAssistantMessageId = null) {
+  if (!chunk?.type) return null
+  return {
+    type: chunk.type,
+    payload: chunk.payload && typeof chunk.payload === 'object' ? chunk.payload : {},
+    tool_call_ref: chunk.tool_call_ref || null,
+    assistant_message_id: chunk.assistant_message_id ?? fallbackAssistantMessageId,
+    sequence: Number.isFinite(chunk.sequence) ? Number(chunk.sequence) : null,
+  }
+}
+
 function applyRunEventToParts(parts, event) {
   const nextParts = cloneParts(parts)
   const type = event?.type || ''
@@ -211,6 +222,71 @@ function applyRunEventToParts(parts, event) {
   }
 
   return nextParts
+}
+
+function applyRunEventToMessage(message, event) {
+  if (!message || !event) return message
+  const nextParts = applyRunEventToParts(Array.isArray(message.parts) ? message.parts : [], event)
+  const nextMessage = {
+    ...message,
+    parts: nextParts,
+    content: aggregateTextFromParts(nextParts),
+  }
+
+  if (event.type === 'message.completed') {
+    nextMessage.status = 'completed'
+    nextMessage.error_message = null
+    return nextMessage
+  }
+
+  if (event.type === 'run.failed' || event.type === 'run.cancelled') {
+    nextMessage.status = 'failed'
+    nextMessage.error_message = event.payload?.error_message || message.error_message
+    return nextMessage
+  }
+
+  nextMessage.status = 'streaming'
+  return nextMessage
+}
+
+async function consumeSseJsonStream(response, onChunk) {
+  const reader = response.body?.getReader()
+  if (!reader) throw new Error('流式响应不可用')
+
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let sawDone = false
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    buffer += decoder.decode(value, { stream: true })
+    const rawEvents = buffer.split('\n\n')
+    buffer = rawEvents.pop() || ''
+
+    for (const rawEvent of rawEvents) {
+      const dataLines = rawEvent
+        .split('\n')
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).trimStart())
+
+      if (dataLines.length === 0) continue
+      const raw = dataLines.join('\n').trim()
+      if (raw === '[DONE]') {
+        sawDone = true
+        continue
+      }
+
+      try {
+        onChunk(JSON.parse(raw))
+      } catch {
+        // ignore malformed chunks
+      }
+    }
+  }
+
+  return { sawDone }
 }
 
 function rebuildMessageFromEvents(message, run, events) {
@@ -333,6 +409,8 @@ export default function ChatPage() {
   const resizeCleanupRef = useRef(null)
   const modelLoadSeqRef = useRef(0)
   const modelLoadInFlightRef = useRef(new Map())
+  const runStreamControllersRef = useRef(new Map())
+  const runSequenceRef = useRef(new Map())
   const activeConv = conversations.find(c => c.id === activeId)
 
   useEffect(() => {
@@ -533,6 +611,106 @@ export default function ChatPage() {
     }
   }, [patchBranchPane])
 
+  const recoverMainInterruptedStream = useCallback(async (conversationId, runId, lastSequence) => {
+    if (!conversationId || !runId) return
+    try {
+      await api.getRunEvents(conversationId, runId, {
+        afterSequence: Number.isFinite(lastSequence) ? lastSequence : 0,
+      })
+    } catch {
+      // best-effort fallback; final refresh still attempts recovery from snapshots + events
+    }
+    await refreshMessages(conversationId)
+    await loadBranches(conversationId)
+  }, [loadBranches, refreshMessages])
+
+  const recoverBranchInterruptedStream = useCallback(async (conversationId, paneId, runId, lastSequence) => {
+    if (!conversationId || !paneId || !runId) return
+    try {
+      await api.getRunEvents(conversationId, runId, {
+        afterSequence: Number.isFinite(lastSequence) ? lastSequence : 0,
+      })
+    } catch {
+      // best-effort fallback; pane refresh below rebuilds from persisted state
+    }
+    await refreshBranchPane(conversationId, paneId)
+    await loadBranches(conversationId)
+  }, [loadBranches, refreshBranchPane])
+
+  const applyRunEventToUi = useCallback((assistantMessageId, event) => {
+    if (!assistantMessageId || !event) return
+
+    setMessages(current => current.map(message => (
+      message.id === assistantMessageId
+        ? applyRunEventToMessage(message, event)
+        : message
+    )))
+    setBranchPanes(current => current.map(pane => ({
+      ...pane,
+      currentLeafMessageId: event.type === 'message.completed' && pane.currentLeafMessageId !== assistantMessageId
+        ? assistantMessageId
+        : pane.currentLeafMessageId,
+      messages: Array.isArray(pane.messages)
+        ? pane.messages.map(message => (
+          message.id === assistantMessageId
+            ? applyRunEventToMessage(message, event)
+            : message
+        ))
+        : pane.messages,
+    })))
+  }, [])
+
+  const subscribeToRunStream = useCallback(async ({ conversationId, runId, assistantMessageId, afterSequence = 0 }) => {
+    if (!conversationId || !runId || runStreamControllersRef.current.has(runId)) return
+
+    const controller = new AbortController()
+    runStreamControllersRef.current.set(runId, { controller, conversationId, assistantMessageId })
+
+    try {
+      const res = await fetch(
+        api.getRunStreamPath(conversationId, runId, {
+          afterSequence: Number.isFinite(afterSequence) ? afterSequence : 0,
+        }),
+        {
+          credentials: 'include',
+          headers: Number.isFinite(afterSequence) && afterSequence > 0
+            ? { 'Last-Event-ID': String(afterSequence) }
+            : {},
+          signal: controller.signal,
+        },
+      )
+
+      if (!res.ok) {
+        throw new Error(`订阅 run ${runId} 事件流失败`)
+      }
+
+      await consumeSseJsonStream(res, chunk => {
+        if (chunk?.run?.id && Number.isFinite(chunk.run.sequence)) {
+          runSequenceRef.current.set(runId, Number(chunk.run.sequence) || 0)
+        }
+        if (Number.isFinite(chunk?.sequence)) {
+          const nextSequence = Math.max(
+            runSequenceRef.current.get(runId) || 0,
+            Number(chunk.sequence) || 0,
+          )
+          runSequenceRef.current.set(runId, nextSequence)
+        }
+
+        const event = buildRunEventFromChunk(chunk, assistantMessageId)
+        if (event) {
+          applyRunEventToUi(event.assistant_message_id, event)
+        }
+      })
+    } catch {
+      // stream discovery effect will retry while the run remains active
+    } finally {
+      const entry = runStreamControllersRef.current.get(runId)
+      if (entry?.controller === controller) {
+        runStreamControllersRef.current.delete(runId)
+      }
+    }
+  }, [applyRunEventToUi])
+
   const loadApiKeys = useCallback(async () => {
     setKeysError('')
     setLoadingKeys(true)
@@ -702,6 +880,68 @@ export default function ChatPage() {
       void loadProviderModels(provider)
     })
   }, [activeConv?.provider, loadProviderModels, pendingProvider])
+
+  useEffect(() => {
+    if (!activeId) return undefined
+
+    let disposed = false
+    let inFlight = false
+    const hasForegroundRun = sending || regeneratingMessageId !== null || branchPanes.some(pane => pane.sending)
+
+    async function syncRunStreams() {
+      if (disposed || inFlight || hasForegroundRun) return
+      inFlight = true
+      try {
+        const runsData = await api.getAgentRuns(activeId, { status: 'running' })
+        const runs = runsData?.items || []
+        if (disposed) return
+
+        const activeRunIds = new Set(runs.map(run => run.id))
+        for (const [runId, entry] of runStreamControllersRef.current.entries()) {
+          if (entry?.conversationId !== activeId || !activeRunIds.has(runId)) {
+            entry?.controller?.abort()
+            runStreamControllersRef.current.delete(runId)
+            runSequenceRef.current.delete(runId)
+          }
+        }
+
+        for (const run of runs) {
+          if (!run?.assistant_message_id || runStreamControllersRef.current.has(run.id)) continue
+          const afterSequence = Number.isFinite(runSequenceRef.current.get(run.id))
+            ? runSequenceRef.current.get(run.id)
+            : Number(run.last_sequence) || 0
+          void subscribeToRunStream({
+            conversationId: activeId,
+            runId: run.id,
+            assistantMessageId: run.assistant_message_id,
+            afterSequence,
+          })
+        }
+      } catch {
+        // Ignore stream discovery failures; the next interval will retry.
+      } finally {
+        inFlight = false
+      }
+    }
+
+    const intervalId = window.setInterval(() => {
+      void syncRunStreams()
+    }, 1000)
+
+    void syncRunStreams()
+
+    return () => {
+      disposed = true
+      window.clearInterval(intervalId)
+      for (const [runId, entry] of runStreamControllersRef.current.entries()) {
+        if (entry?.conversationId === activeId) {
+          entry?.controller?.abort()
+          runStreamControllersRef.current.delete(runId)
+          runSequenceRef.current.delete(runId)
+        }
+      }
+    }
+  }, [activeId, branchPanes, regeneratingMessageId, sending, subscribeToRunStream])
 
   const createConversation = useCallback(async (title = '新对话', model = undefined, provider = undefined) => {
     const payload = { title }
@@ -1013,6 +1253,9 @@ export default function ChatPage() {
     setSending(true)
     setStreamingContent('')
     setStreamToolTrace([])
+    let streamRunId = null
+    let lastSequence = 0
+    let sawDone = false
 
     try {
       const res = await fetch(`/api/conversations/${convId}/messages/stream`, {
@@ -1052,10 +1295,20 @@ export default function ChatPage() {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           const raw = line.slice(6).trim()
-          if (raw === '[DONE]') continue
+          if (raw === '[DONE]') {
+            sawDone = true
+            continue
+          }
 
           try {
             const chunk = JSON.parse(raw)
+            if (chunk.run?.id) {
+              streamRunId = chunk.run.id
+              lastSequence = Number(chunk.run.sequence) || lastSequence
+            }
+            if (Number.isFinite(chunk.sequence)) {
+              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
+            }
             if (chunk.tool) {
               setStreamToolTrace(current => buildToolTrace(chunk.tool, current))
             }
@@ -1073,6 +1326,9 @@ export default function ChatPage() {
         }
       }
 
+      if (!sawDone && streamRunId) {
+        await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
+      }
       setStreamingContent('')
       await refreshMessages(convId)
       await loadBranches(convId)
@@ -1081,8 +1337,7 @@ export default function ChatPage() {
       setError(e.message || '发送失败，请重试')
       if (convId) {
         try {
-          await refreshMessages(convId)
-          await loadBranches(convId)
+          await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
         } catch {
           setMessages(prev => prev.filter(m => m.id !== userMsg.id))
         }
@@ -1093,7 +1348,7 @@ export default function ChatPage() {
       setSending(false)
       setStreamingContent('')
     }
-  }, [activeConv, activeId, createConversation, loadBranches, pendingModel, pendingProvider, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, createConversation, loadBranches, pendingModel, pendingProvider, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const regenerateMainMessage = useCallback(async (messageId) => {
     if (!activeId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -1102,6 +1357,9 @@ export default function ChatPage() {
     setStreamingContent('')
     setStreamToolTrace([])
     const branchId = activeConv?.current_branch_id ?? null
+    let streamRunId = null
+    let lastSequence = 0
+    let sawDone = false
 
     try {
       const res = await fetch(`/api/conversations/${activeId}/messages/${messageId}/regenerate/stream`, {
@@ -1141,10 +1399,20 @@ export default function ChatPage() {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           const raw = line.slice(6).trim()
-          if (raw === '[DONE]') continue
+          if (raw === '[DONE]') {
+            sawDone = true
+            continue
+          }
 
           try {
             const chunk = JSON.parse(raw)
+            if (chunk.run?.id) {
+              streamRunId = chunk.run.id
+              lastSequence = Number(chunk.run.sequence) || lastSequence
+            }
+            if (Number.isFinite(chunk.sequence)) {
+              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
+            }
             if (chunk.tool) {
               setStreamToolTrace(current => buildToolTrace(chunk.tool, current))
             }
@@ -1162,17 +1430,20 @@ export default function ChatPage() {
         }
       }
 
+      if (!sawDone && streamRunId) {
+        await recoverMainInterruptedStream(activeId, streamRunId, lastSequence)
+      }
       await refreshMessages(activeId)
       await loadBranches(activeId)
       if (!streamError && !accumulated) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '閲嶆柊鐢熸垚澶辫触锛岃閲嶈瘯')
-      await refreshMessages(activeId)
+      await recoverMainInterruptedStream(activeId, streamRunId, lastSequence)
     } finally {
       setRegeneratingMessageId(null)
       setStreamingContent('')
     }
-  }, [activeConv, activeId, loadBranches, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, loadBranches, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const switchMainSibling = useCallback(async (targetMessageId) => {
     if (!activeId || !targetMessageId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -1345,10 +1616,20 @@ export default function ChatPage() {
         for (const line of lines) {
           if (!line.startsWith('data: ')) continue
           const raw = line.slice(6).trim()
-          if (raw === '[DONE]') continue
+          if (raw === '[DONE]') {
+            sawDone = true
+            continue
+          }
 
           try {
             const chunk = JSON.parse(raw)
+            if (chunk.run?.id) {
+              streamRunId = chunk.run.id
+              lastSequence = Number(chunk.run.sequence) || lastSequence
+            }
+            if (Number.isFinite(chunk.sequence)) {
+              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
+            }
             if (chunk.tool) {
               patchBranchPane(paneId, pane => ({
                 ...pane,
@@ -1369,6 +1650,9 @@ export default function ChatPage() {
         }
       }
 
+      if (!sawDone && streamRunId) {
+        await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
+      }
       patchBranchPane(paneId, { streamingContent: '' })
       await refreshBranchPane(activeId, paneId)
       await loadBranches(activeId)
@@ -1382,7 +1666,7 @@ export default function ChatPage() {
     } finally {
       patchBranchPane(paneId, { sending: false, streamingContent: '' })
     }
-  }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPane])
+  }, [activeId, branchPanes, loadBranches, patchBranchPane, recoverBranchInterruptedStream, refreshBranchPane])
 
   const regenerateBranchMessage = useCallback(async (paneId, messageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
