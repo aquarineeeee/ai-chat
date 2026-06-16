@@ -60,6 +60,11 @@ function formatTokenCount(value) {
 
 function toolPartLabel(part) {
   const toolName = part?.tool_name || 'tool'
+  if (part?.type === 'approval') {
+    if (part?.status === 'granted') return `${toolName} 已批准`
+    if (part?.status === 'denied') return `${toolName} 已拒绝`
+    return `${toolName} 等待批准`
+  }
   if (part?.type === 'tool_call') {
     return part?.status === 'running' ? `${toolName} 正在执行` : `${toolName} 已调用`
   }
@@ -67,12 +72,23 @@ function toolPartLabel(part) {
   return `${toolName} 执行失败`
 }
 
-function ToolPartCard({ part }) {
+function ToolPartCard({
+  part,
+  onApproveToolCall,
+  onDenyToolCall,
+  isApprovalSubmitting = false,
+  canApproveToolCall,
+}) {
   const [expanded, setExpanded] = useState(false)
   const content = part?.type === 'tool_call'
     ? (part?.arguments_preview || '')
     : (part?.content || part?.message || '')
   const canToggle = !!String(content).trim()
+  const showApprovalActions = part?.type === 'approval'
+    && part?.status === 'requested'
+    && part?.tool_call_id
+    && canApproveToolCall !== false
+    && (onApproveToolCall || onDenyToolCall)
 
   return (
     <div
@@ -109,11 +125,52 @@ function ToolPartCard({ part }) {
           {content}
         </div>
       )}
+      {showApprovalActions && (
+        <div
+          className="flex items-center justify-end gap-2 px-3 py-2 border-t"
+          style={{
+            borderColor: 'var(--border)',
+            background: 'var(--bg-elevated)',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => onDenyToolCall?.(part.tool_call_id)}
+            disabled={isApprovalSubmitting}
+            className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              background: 'var(--bg-surface)',
+              color: 'var(--text-secondary)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            拒绝
+          </button>
+          <button
+            type="button"
+            onClick={() => onApproveToolCall?.(part.tool_call_id)}
+            disabled={isApprovalSubmitting}
+            className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              background: 'var(--accent)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            {isApprovalSubmitting ? '处理中…' : '批准'}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
 
-function AssistantBody({ message }) {
+function AssistantBody({
+  message,
+  onApproveToolCall,
+  onDenyToolCall,
+  isApprovalSubmitting,
+  canApproveToolCall,
+}) {
   const parts = Array.isArray(message?.parts) ? message.parts : null
 
   if (!parts || parts.length === 0) {
@@ -139,8 +196,17 @@ function AssistantBody({ message }) {
           )
         }
 
-        if (part?.type === 'tool_call' || part?.type === 'tool_result' || part?.type === 'error') {
-          return <ToolPartCard key={`part-${index}`} part={part} />
+        if (part?.type === 'tool_call' || part?.type === 'tool_result' || part?.type === 'error' || part?.type === 'approval') {
+          return (
+            <ToolPartCard
+              key={`part-${index}`}
+              part={part}
+              onApproveToolCall={onApproveToolCall}
+              onDenyToolCall={onDenyToolCall}
+              isApprovalSubmitting={isApprovalSubmitting?.(part?.tool_call_id)}
+              canApproveToolCall={canApproveToolCall?.(part?.tool_call_id)}
+            />
+          )
         }
 
         return null
@@ -346,6 +412,10 @@ export default function MessageBubble({
   isCreatingBranch = false,
   isDeleting = false,
   hideActions = false,
+  onApproveToolCall,
+  onDenyToolCall,
+  isApprovalSubmitting,
+  canApproveToolCall,
 }) {
   const isUser = message.role === 'user'
   const isStreaming = message.status === 'streaming'
@@ -437,7 +507,13 @@ export default function MessageBubble({
           className={`min-w-0 text-sm ${isStreaming ? 'typing-cursor' : ''}`}
           style={{ color: 'var(--text-primary)' }}
         >
-          <AssistantBody message={message} />
+          <AssistantBody
+            message={message}
+            onApproveToolCall={onApproveToolCall}
+            onDenyToolCall={onDenyToolCall}
+            isApprovalSubmitting={isApprovalSubmitting}
+            canApproveToolCall={canApproveToolCall}
+          />
           {message.status === 'failed' && (
             <p className="text-xs mt-1" style={{ color: 'var(--error-text)' }}>
               {message.error_message || '生成失败'}

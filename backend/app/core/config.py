@@ -39,6 +39,7 @@ class Settings:
     memory_write_timeout_seconds: float
     memory_max_context_chars: int
     memory_write_max_chars: int
+    approval_required_tools: tuple[str, ...]
 
     @property
     def cookie_secure(self) -> bool:
@@ -69,6 +70,14 @@ def _bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _csv_tuple(name: str) -> tuple[str, ...]:
+    value = os.getenv(name, "")
+    if not value.strip():
+        return ()
+    items = [item.strip() for item in value.split(",")]
+    return tuple(item for item in items if item)
+
+
 @lru_cache
 def get_settings() -> Settings:
     return Settings(
@@ -96,4 +105,5 @@ def get_settings() -> Settings:
         memory_write_timeout_seconds=float(os.getenv("MEMORY_WRITE_TIMEOUT_SECONDS", "15")),
         memory_max_context_chars=int(os.getenv("MEMORY_MAX_CONTEXT_CHARS", "3000")),
         memory_write_max_chars=int(os.getenv("MEMORY_WRITE_MAX_CHARS", "6000")),
+        approval_required_tools=_csv_tuple("APPROVAL_REQUIRED_TOOLS"),
     )

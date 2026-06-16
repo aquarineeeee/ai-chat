@@ -89,6 +89,8 @@ const PROVIDER_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic' },
 ]
 
+const ACTIVE_RUN_STATUSES = ['running', 'waiting_approval']
+
 function createStreamingAssistantMessage(id, overrides = {}) {
   return {
     id,
@@ -148,6 +150,32 @@ function buildRunEventFromChunk(chunk, fallbackAssistantMessageId = null) {
   }
 }
 
+function dedupeRuns(runs) {
+  const byId = new Map()
+  for (const run of runs) {
+    if (run?.id == null) continue
+    byId.set(run.id, run)
+  }
+  return [...byId.values()]
+}
+
+function mapRunsByAssistantMessage(runs) {
+  const byAssistantMessageId = {}
+  for (const run of runs) {
+    if (!run?.assistant_message_id) continue
+    byAssistantMessageId[run.assistant_message_id] = run
+  }
+  return byAssistantMessageId
+}
+
+async function listActiveRuns(conversationId) {
+  if (!conversationId) return []
+  const responses = await Promise.all(
+    ACTIVE_RUN_STATUSES.map(status => api.getAgentRuns(conversationId, { status })),
+  )
+  return dedupeRuns(responses.flatMap(response => response?.items || []))
+}
+
 function applyRunEventToParts(parts, event) {
   const nextParts = cloneParts(parts)
   const type = event?.type || ''
@@ -186,6 +214,38 @@ function applyRunEventToParts(parts, event) {
   if (type === 'tool_call.started') {
     const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
     if (toolPart) toolPart.status = 'running'
+    return nextParts
+  }
+
+  if (type === 'tool_call.approval.requested') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.status = 'waiting_approval'
+    nextParts.push({
+      type: 'approval',
+      tool_call_id: toolCallRef,
+      tool_name: payload?.tool_name || '',
+      status: 'requested',
+      message: 'Waiting for approval',
+    })
+    return nextParts
+  }
+
+  if (type === 'tool_call.approval.granted') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.status = 'ready'
+    const approvalPart = [...nextParts].reverse().find(part => part?.type === 'approval' && part?.tool_call_id === toolCallRef)
+    if (approvalPart) approvalPart.status = 'granted'
+    return nextParts
+  }
+
+  if (type === 'tool_call.approval.denied') {
+    const toolPart = [...nextParts].reverse().find(part => part?.type === 'tool_call' && part?.tool_call_id === toolCallRef)
+    if (toolPart) toolPart.status = 'denied'
+    const approvalPart = [...nextParts].reverse().find(part => part?.type === 'approval' && part?.tool_call_id === toolCallRef)
+    if (approvalPart) {
+      approvalPart.status = 'denied'
+      approvalPart.message = payload?.comment || payload?.error_message || ''
+    }
     return nextParts
   }
 
@@ -305,7 +365,7 @@ function rebuildMessageFromEvents(message, run, events) {
       ? 'failed'
       : completed
         ? 'completed'
-        : run?.status === 'running'
+        : ACTIVE_RUN_STATUSES.includes(run?.status)
           ? 'streaming'
           : message.status,
     error_message: lastFailureEvent?.payload?.error_message || message.error_message,
@@ -315,8 +375,7 @@ function rebuildMessageFromEvents(message, run, events) {
 async function recoverMessagesFromRuns(conversationId, messages) {
   if (!conversationId || !Array.isArray(messages) || messages.length === 0) return messages
   try {
-    const runsData = await api.getAgentRuns(conversationId, { status: 'running' })
-    const runs = runsData?.items || []
+    const runs = await listActiveRuns(conversationId)
     if (runs.length === 0) return messages
 
     const recoveries = await Promise.all(
@@ -390,6 +449,8 @@ export default function ChatPage() {
   const [branchesByConversation, setBranchesByConversation] = useState({})
   const [loadingBranches, setLoadingBranches] = useState({})
   const [branchPanes, setBranchPanes] = useState([])
+  const [activeRunsByAssistantId, setActiveRunsByAssistantId] = useState({})
+  const [approvalActions, setApprovalActions] = useState({})
   const [messageTreeOpen, setMessageTreeOpen] = useState(false)
   const [messageTreeRefreshToken, setMessageTreeRefreshToken] = useState(0)
   const [branchPaneWidth, setBranchPaneWidth] = useState(() => {
@@ -518,6 +579,10 @@ export default function ChatPage() {
         }
         : conv
     )))
+  }, [])
+
+  const patchActiveRuns = useCallback((runs) => {
+    setActiveRunsByAssistantId(mapRunsByAssistantMessage(runs))
   }, [])
 
   const refreshMessages = useCallback(async (conversationId) => {
@@ -799,6 +864,8 @@ export default function ChatPage() {
   const selectConversation = useCallback(async (conversationId) => {
     setActiveId(conversationId)
     setBranchPanes([])
+    setActiveRunsByAssistantId({})
+    setApprovalActions({})
     resetMainEdit()
     if (!conversationId) {
       setMessages([])
@@ -890,29 +957,31 @@ export default function ChatPage() {
 
     let disposed = false
     let inFlight = false
+    const runControllers = runStreamControllersRef.current
+    const runSequences = runSequenceRef.current
     const hasForegroundRun = sending || regeneratingMessageId !== null || branchPanes.some(pane => pane.sending)
 
     async function syncRunStreams() {
       if (disposed || inFlight || hasForegroundRun) return
       inFlight = true
       try {
-        const runsData = await api.getAgentRuns(activeId, { status: 'running' })
-        const runs = runsData?.items || []
+        const runs = await listActiveRuns(activeId)
         if (disposed) return
+        patchActiveRuns(runs)
 
         const activeRunIds = new Set(runs.map(run => run.id))
-        for (const [runId, entry] of runStreamControllersRef.current.entries()) {
+        for (const [runId, entry] of runControllers.entries()) {
           if (entry?.conversationId !== activeId || !activeRunIds.has(runId)) {
             entry?.controller?.abort()
-            runStreamControllersRef.current.delete(runId)
-            runSequenceRef.current.delete(runId)
+            runControllers.delete(runId)
+            runSequences.delete(runId)
           }
         }
 
         for (const run of runs) {
-          if (!run?.assistant_message_id || runStreamControllersRef.current.has(run.id)) continue
-          const afterSequence = Number.isFinite(runSequenceRef.current.get(run.id))
-            ? runSequenceRef.current.get(run.id)
+          if (!run?.assistant_message_id || runControllers.has(run.id)) continue
+          const afterSequence = Number.isFinite(runSequences.get(run.id))
+            ? runSequences.get(run.id)
             : Number(run.last_sequence) || 0
           void subscribeToRunStream({
             conversationId: activeId,
@@ -936,16 +1005,142 @@ export default function ChatPage() {
 
     return () => {
       disposed = true
+      setActiveRunsByAssistantId({})
       window.clearInterval(intervalId)
-      for (const [runId, entry] of runStreamControllersRef.current.entries()) {
+      for (const [runId, entry] of runControllers.entries()) {
         if (entry?.conversationId === activeId) {
           entry?.controller?.abort()
-          runStreamControllersRef.current.delete(runId)
-          runSequenceRef.current.delete(runId)
+          runControllers.delete(runId)
+          runSequences.delete(runId)
         }
       }
     }
-  }, [activeId, branchPanes, regeneratingMessageId, sending, subscribeToRunStream])
+  }, [activeId, branchPanes, patchActiveRuns, regeneratingMessageId, sending, subscribeToRunStream])
+
+  const setApprovalActionPending = useCallback((assistantMessageId, toolCallRef, pending) => {
+    const key = `${assistantMessageId}:${toolCallRef}`
+    setApprovalActions(current => {
+      if (pending) return { ...current, [key]: true }
+      if (!(key in current)) return current
+      const next = { ...current }
+      delete next[key]
+      return next
+    })
+  }, [])
+
+  const isApprovalActionPending = useCallback((assistantMessageId, toolCallRef) => (
+    !!approvalActions[`${assistantMessageId}:${toolCallRef}`]
+  ), [approvalActions])
+
+  const resolveActiveRunForAssistant = useCallback(async (conversationId, assistantMessageId) => {
+    if (!conversationId || !assistantMessageId) return null
+    const cached = activeRunsByAssistantId[assistantMessageId]
+    if (cached) return cached
+    const runs = await listActiveRuns(conversationId)
+    patchActiveRuns(runs)
+    return runs.find(run => run?.assistant_message_id === assistantMessageId) || null
+  }, [activeRunsByAssistantId, patchActiveRuns])
+
+  const submitToolApproval = useCallback(async ({
+    conversationId,
+    assistantMessageId,
+    toolCallRef,
+    approved,
+  }) => {
+    if (!conversationId || !assistantMessageId || !toolCallRef) {
+      throw new Error('缺少审批所需的 run 信息')
+    }
+
+    setApprovalActionPending(assistantMessageId, toolCallRef, true)
+    try {
+      const run = await resolveActiveRunForAssistant(conversationId, assistantMessageId)
+      if (!run?.id) {
+        throw new Error('未找到待审批的运行实例，请刷新后重试')
+      }
+
+      const payload = { tool_call_ref: toolCallRef }
+      const updatedRun = approved
+        ? await api.approveRunTool(conversationId, run.id, payload)
+        : await api.denyRunTool(conversationId, run.id, payload)
+
+      if (ACTIVE_RUN_STATUSES.includes(updatedRun?.status)) {
+        setActiveRunsByAssistantId(current => ({
+          ...current,
+          [assistantMessageId]: updatedRun,
+        }))
+      } else {
+        setActiveRunsByAssistantId(current => {
+          if (!(assistantMessageId in current)) return current
+          const next = { ...current }
+          delete next[assistantMessageId]
+          return next
+        })
+      }
+      return updatedRun
+    } finally {
+      setApprovalActionPending(assistantMessageId, toolCallRef, false)
+    }
+  }, [resolveActiveRunForAssistant, setApprovalActionPending])
+
+  const approveMainToolCall = useCallback(async (message, toolCallRef) => {
+    if (!activeId || !message?.id || !toolCallRef) return
+    setError('')
+    try {
+      await submitToolApproval({
+        conversationId: activeId,
+        assistantMessageId: message.id,
+        toolCallRef,
+        approved: true,
+      })
+    } catch (e) {
+      setError(e.message || '批准工具调用失败，请重试')
+    }
+  }, [activeId, submitToolApproval])
+
+  const denyMainToolCall = useCallback(async (message, toolCallRef) => {
+    if (!activeId || !message?.id || !toolCallRef) return
+    setError('')
+    try {
+      await submitToolApproval({
+        conversationId: activeId,
+        assistantMessageId: message.id,
+        toolCallRef,
+        approved: false,
+      })
+    } catch (e) {
+      setError(e.message || '拒绝工具调用失败，请重试')
+    }
+  }, [activeId, submitToolApproval])
+
+  const approveBranchToolCall = useCallback(async (paneId, message, toolCallRef) => {
+    if (!activeId || !paneId || !message?.id || !toolCallRef) return
+    patchBranchPane(paneId, { error: '' })
+    try {
+      await submitToolApproval({
+        conversationId: activeId,
+        assistantMessageId: message.id,
+        toolCallRef,
+        approved: true,
+      })
+    } catch (e) {
+      patchBranchPane(paneId, { error: e.message || '批准工具调用失败，请重试' })
+    }
+  }, [activeId, patchBranchPane, submitToolApproval])
+
+  const denyBranchToolCall = useCallback(async (paneId, message, toolCallRef) => {
+    if (!activeId || !paneId || !message?.id || !toolCallRef) return
+    patchBranchPane(paneId, { error: '' })
+    try {
+      await submitToolApproval({
+        conversationId: activeId,
+        assistantMessageId: message.id,
+        toolCallRef,
+        approved: false,
+      })
+    } catch (e) {
+      patchBranchPane(paneId, { error: e.message || '拒绝工具调用失败，请重试' })
+    }
+  }, [activeId, patchBranchPane, submitToolApproval])
 
   const createConversation = useCallback(async (title = '新对话', model = undefined, provider = undefined) => {
     const payload = { title }
@@ -2060,6 +2255,12 @@ export default function ChatPage() {
                           isRegenerating={regeneratingMessageId === msg.id}
                           isDeleting={deletingMessageId === msg.id}
                           isCreatingBranch={creatingBranchMessageId === msg.id}
+                          onApproveToolCall={msg.role === 'assistant' ? toolCallRef => { void approveMainToolCall(msg, toolCallRef) } : undefined}
+                          onDenyToolCall={msg.role === 'assistant' ? toolCallRef => { void denyMainToolCall(msg, toolCallRef) } : undefined}
+                          isApprovalSubmitting={toolCallRef => isApprovalActionPending(msg.id, toolCallRef)}
+                          canApproveToolCall={toolCallRef => (
+                            activeRunsByAssistantId[msg.id]?.metadata?.pending_approval?.tool_call_ref === toolCallRef
+                          )}
                         />
                       )
                     })}
@@ -2166,6 +2367,12 @@ export default function ChatPage() {
                         onCreateBranch={message => openBranchPane(message, pane.id)}
                         onPrevSibling={message => switchBranchPaneSibling(pane.id, message.previous_sibling_id)}
                         onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}
+                        onApproveToolCall={(message, toolCallRef) => approveBranchToolCall(pane.id, message, toolCallRef)}
+                        onDenyToolCall={(message, toolCallRef) => denyBranchToolCall(pane.id, message, toolCallRef)}
+                        isApprovalSubmitting={(messageId, toolCallRef) => isApprovalActionPending(messageId, toolCallRef)}
+                        canApproveToolCall={(messageId, toolCallRef) => (
+                          activeRunsByAssistantId[messageId]?.metadata?.pending_approval?.tool_call_ref === toolCallRef
+                        )}
                         providerValue={pendingProvider}
                         providerOptions={PROVIDER_OPTIONS}
                         modelValue={pendingModel}

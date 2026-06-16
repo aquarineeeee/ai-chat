@@ -12,6 +12,7 @@ from app.api.router import api_router
 from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.db.session import bootstrap_admin_user
+from app.services.approval_manager import approval_manager
 from app.services.agent_runner import agent_runner
 
 
@@ -25,6 +26,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        await approval_manager.shutdown()
         await agent_runner.shutdown()
 
 

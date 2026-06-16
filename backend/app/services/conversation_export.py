@@ -12,8 +12,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import AppError
+from app.models.agent_run import AgentRun
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
+from app.models.run_event import RunEvent
+from app.models.tool_call import ToolCall
+from app.services.agent_artifacts import read_artifact_text
+from app.services.agent_trace import json_loads
 from app.services.conversations import get_conversation
 
 
@@ -58,6 +63,11 @@ async def export_conversation(
         scope=scope,
         current_leaf_message_id=conversation.current_leaf_message_id,
     )
+    trace_bundle = await _load_trace_bundle(
+        session=session,
+        conversation_id=conversation.id,
+        message_ids={message.id for message in selected_messages},
+    )
 
     if export_format == ExportFormat.MARKDOWN:
         return ExportedFile(
@@ -83,6 +93,7 @@ async def export_conversation(
             messages=selected_messages,
             exported_at=exported_at,
             scope=scope,
+            trace_bundle=trace_bundle,
             warnings=warnings,
         ),
         media_type="application/json",
@@ -245,10 +256,11 @@ def _render_json_export(
     messages: list[Message],
     exported_at: datetime,
     scope: ExportScope,
+    trace_bundle: dict[str, object],
     warnings: list[str],
 ) -> str:
     payload: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "type": "ai-chat.conversation_export",
         "format": "json",
         "scope": scope.value,
@@ -283,6 +295,9 @@ def _render_json_export(
             }
             for message in messages
         ],
+        "agent_runs": trace_bundle["agent_runs"],
+        "tool_calls": trace_bundle["tool_calls"],
+        "run_events": trace_bundle["run_events"],
     }
 
     if warnings:
@@ -321,3 +336,115 @@ def _decimal_to_string(value: Decimal | None) -> str | None:
 
 def _datetime_to_iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
+
+
+async def _load_trace_bundle(
+    *,
+    session: AsyncSession,
+    conversation_id: int,
+    message_ids: set[int],
+) -> dict[str, object]:
+    if not message_ids:
+        return {"agent_runs": [], "tool_calls": [], "run_events": []}
+
+    run_rows = await session.scalars(
+        select(AgentRun)
+        .where(
+            AgentRun.conversation_id == conversation_id,
+            AgentRun.assistant_message_id.in_(message_ids),
+        )
+        .order_by(AgentRun.id.asc())
+    )
+    runs = list(run_rows.all())
+    run_ids = [run.id for run in runs]
+    if not run_ids:
+        return {"agent_runs": [], "tool_calls": [], "run_events": []}
+
+    tool_call_rows = await session.scalars(
+        select(ToolCall)
+        .where(ToolCall.run_id.in_(run_ids))
+        .order_by(ToolCall.run_id.asc(), ToolCall.sequence_index.asc(), ToolCall.id.asc())
+    )
+    tool_calls = list(tool_call_rows.all())
+
+    event_rows = await session.scalars(
+        select(RunEvent)
+        .where(RunEvent.run_id.in_(run_ids))
+        .order_by(RunEvent.run_id.asc(), RunEvent.sequence.asc(), RunEvent.id.asc())
+    )
+    events = list(event_rows.all())
+
+    return {
+        "agent_runs": [_serialize_agent_run(run) for run in runs],
+        "tool_calls": [_serialize_tool_call(tool_call) for tool_call in tool_calls],
+        "run_events": [_serialize_run_event(event) for event in events],
+    }
+
+
+def _serialize_agent_run(run: AgentRun) -> dict[str, object]:
+    metadata = json_loads(run.metadata_json, default={})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "id": run.id,
+        "conversation_id": run.conversation_id,
+        "user_message_id": run.user_message_id,
+        "assistant_message_id": run.assistant_message_id,
+        "provider": run.provider,
+        "model": run.model,
+        "status": run.status,
+        "started_at": _datetime_to_iso(run.started_at),
+        "completed_at": _datetime_to_iso(run.completed_at),
+        "last_sequence": run.last_sequence,
+        "resume_token": run.resume_token,
+        "error_message": run.error_message,
+        "metadata": metadata,
+        "created_at": _datetime_to_iso(run.created_at),
+        "updated_at": _datetime_to_iso(run.updated_at),
+    }
+
+
+def _serialize_tool_call(tool_call: ToolCall) -> dict[str, object]:
+    return {
+        "id": tool_call.id,
+        "run_id": tool_call.run_id,
+        "conversation_id": tool_call.conversation_id,
+        "assistant_message_id": tool_call.assistant_message_id,
+        "tool_call_id": tool_call.tool_call_id,
+        "provider_tool_call_id": tool_call.provider_tool_call_id,
+        "tool_name": tool_call.tool_name,
+        "sequence_index": tool_call.sequence_index,
+        "status": tool_call.status,
+        "input_for_model_json": tool_call.input_for_model_json,
+        "display_input_preview": tool_call.display_input_preview,
+        "output_for_model_json": tool_call.output_for_model_json,
+        "display_output_preview": tool_call.display_output_preview,
+        "audit_output_preview": tool_call.audit_output_preview,
+        "output_blob_ref": tool_call.output_blob_ref,
+        "output_blob_content": read_artifact_text(tool_call.output_blob_ref or ""),
+        "output_size_bytes": tool_call.output_size_bytes,
+        "error_message": tool_call.error_message,
+        "started_at": _datetime_to_iso(tool_call.started_at),
+        "completed_at": _datetime_to_iso(tool_call.completed_at),
+        "duration_ms": tool_call.duration_ms,
+        "created_at": _datetime_to_iso(tool_call.created_at),
+        "updated_at": _datetime_to_iso(tool_call.updated_at),
+    }
+
+
+def _serialize_run_event(event: RunEvent) -> dict[str, object]:
+    payload = json_loads(event.payload_json, default={})
+    if not isinstance(payload, dict):
+        payload = {}
+    return {
+        "id": event.id,
+        "event_id": event.event_id,
+        "run_id": event.run_id,
+        "assistant_message_id": event.assistant_message_id,
+        "tool_call_ref": event.tool_call_ref,
+        "sequence": event.sequence,
+        "event_type": event.event_type,
+        "payload": payload,
+        "schema_version": event.schema_version,
+        "created_at": _datetime_to_iso(event.created_at),
+    }

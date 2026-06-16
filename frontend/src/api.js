@@ -120,6 +120,8 @@ export const api = {
     const qs = search.toString()
     return request('GET', `/api/conversations/${convId}/runs/${runId}/events${qs ? `?${qs}` : ''}`)
   },
+  approveRunTool: (convId, runId, data) => request('POST', `/api/conversations/${convId}/runs/${runId}/approve`, data),
+  denyRunTool: (convId, runId, data) => request('POST', `/api/conversations/${convId}/runs/${runId}/deny`, data),
   getRunStreamPath: (convId, runId, params = {}) => {
     const search = new URLSearchParams()
     if (Number.isFinite(params.afterSequence)) search.set('after_sequence', String(params.afterSequence))

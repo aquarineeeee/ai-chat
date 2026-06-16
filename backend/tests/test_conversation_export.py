@@ -3,18 +3,25 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.core.exceptions import AppError
+from app.models.agent_run import AgentRun
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
+from app.models.run_event import RunEvent
+from app.models.tool_call import ToolCall
 from app.services.conversation_export import (
     ExportFormat,
     ExportScope,
     _build_export_filename,
     _lineage_messages,
+    _load_trace_bundle,
     _render_json_export,
     _render_markdown_export,
+    _serialize_tool_call,
     _select_messages_for_scope,
     _validate_export_capability,
 )
@@ -131,17 +138,47 @@ class ConversationExportTests(unittest.TestCase):
             messages=messages,
             exported_at=exported_at,
             scope=ExportScope.ALL_BRANCHES,
+            trace_bundle={"agent_runs": [], "tool_calls": [], "run_events": []},
             warnings=["current_leaf_message_id does not reference an existing message"],
         )
         payload = json.loads(content)
 
-        self.assertEqual(payload["schema_version"], 1)
+        self.assertEqual(payload["schema_version"], 2)
         self.assertEqual(payload["type"], "ai-chat.conversation_export")
         self.assertEqual(payload["scope"], "all_branches")
         self.assertEqual(payload["conversation"]["temperature"], "0.70")
         self.assertEqual(payload["messages"][1]["parent_id"], 1)
         self.assertEqual(payload["messages"][1]["temperature"], "0.50")
+        self.assertEqual(payload["agent_runs"], [])
+        self.assertEqual(payload["tool_calls"], [])
+        self.assertEqual(payload["run_events"], [])
         self.assertEqual(payload["warnings"], ["current_leaf_message_id does not reference an existing message"])
+
+    def test_serialize_tool_call_reads_blob_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            artifact_root = Path(tmpdir)
+            blob_rel = Path("tool_outputs/run-1/tc_1-abcdef.txt")
+            blob_path = artifact_root / blob_rel
+            blob_path.parent.mkdir(parents=True, exist_ok=True)
+            blob_path.write_text("full artifact output", encoding="utf-8")
+
+            tool_call = ToolCall(
+                id=1,
+                run_id=1,
+                conversation_id=123,
+                assistant_message_id=2,
+                tool_call_id="tc_1",
+                tool_name="memory_search",
+                sequence_index=5,
+                status="success",
+                output_blob_ref=str(blob_rel).replace("\\", "/"),
+            )
+
+            with unittest.mock.patch("app.services.conversation_export.read_artifact_text", return_value="full artifact output"):
+                payload = _serialize_tool_call(tool_call)
+
+        self.assertEqual(payload["output_blob_ref"], "tool_outputs/run-1/tc_1-abcdef.txt")
+        self.assertEqual(payload["output_blob_content"], "full artifact output")
 
     def test_build_export_filename_sanitizes_title(self) -> None:
         filename = _build_export_filename(

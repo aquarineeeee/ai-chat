@@ -18,6 +18,7 @@ from app.canonical_transcript import (
     user_text_item,
 )
 from app.core.exceptions import AppError
+from app.core.config import get_settings
 from app.db.session import AsyncSessionLocal
 from app.models.agent_run import AgentRun
 from app.models.branch import ConversationBranch
@@ -46,7 +47,10 @@ from app.schemas.message import (
     MessageRegenerateResponse,
     MessageSendResponse,
 )
+from app.schemas.agent_run import RunApprovalDecisionRequest
+from app.services.approval_manager import ApprovalDecision, approval_manager
 from app.services.agent_runner import agent_runner
+from app.services.agent_artifacts import tool_output_should_externalize, write_tool_output_artifact
 from app.services.api_keys import get_preferred_api_key
 from app.services.agent_trace import (
     EVENT_SCHEMA_VERSION,
@@ -100,15 +104,20 @@ MEMORY_TOOL_GUIDANCE += (
 
 
 RUN_STATUS_RUNNING = "running"
+RUN_STATUS_WAITING_APPROVAL = "waiting_approval"
 RUN_STATUS_COMPLETED = "completed"
 RUN_STATUS_FAILED = "failed"
 RUN_STATUS_CANCELLED = "cancelled"
 
 TOOL_STATUS_PENDING = "pending"
 TOOL_STATUS_READY = "ready"
+TOOL_STATUS_WAITING_APPROVAL = "waiting_approval"
 TOOL_STATUS_RUNNING = "running"
 TOOL_STATUS_SUCCESS = "success"
 TOOL_STATUS_ERROR = "error"
+TOOL_STATUS_DENIED = "denied"
+
+APPROVAL_REQUIRED_TOOLS = {item.strip() for item in get_settings().approval_required_tools if item.strip()}
 
 
 def _new_event_id(prefix: str = "evt") -> str:
@@ -250,6 +259,37 @@ async def get_agent_run_for_conversation(
     )
     if agent_run is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="run 不存在")
+    return agent_run
+
+
+async def submit_tool_approval_decision(
+    *,
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    run_id: int,
+    payload: RunApprovalDecisionRequest,
+    approved: bool,
+) -> AgentRun:
+    agent_run = await get_agent_run_for_conversation(
+        session=session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+    metadata = _run_metadata(agent_run)
+    pending = metadata.get("pending_approval")
+    if not isinstance(pending, dict):
+        raise AppError(status_code=409, code="NO_PENDING_APPROVAL", message="当前 run 没有待审批的工具调用")
+    if str(pending.get("tool_call_ref") or "") != payload.tool_call_ref:
+        raise AppError(status_code=409, code="APPROVAL_TARGET_MISMATCH", message="待审批的 tool_call_ref 不匹配")
+    resolved = approval_manager.resolve(
+        run_id=agent_run.id,
+        tool_call_ref=payload.tool_call_ref,
+        decision=ApprovalDecision(approved=approved, reviewer_id=user_id, comment=payload.comment),
+    )
+    if not resolved:
+        raise AppError(status_code=409, code="APPROVAL_NOT_ACTIVE", message="该审批状态已变更，请刷新后重试")
     return agent_run
 
 
@@ -1094,7 +1134,7 @@ def _stream_chunk_from_run_event(event: dict[str, Any]) -> dict[str, object] | N
             **base,
             "error": str(payload.get("error_message") or ""),
         }
-    return None
+    return base
 
 
 async def _record_text_delta(
@@ -1133,7 +1173,16 @@ async def _record_tool_event(
         raw_arguments = str(tool.get("arguments") or "")
         display_input = sanitize_tool_input_for_display(_maybe_parse_json(raw_arguments))
         tool_call_ref = _new_event_id("tc")
-        open_tool_calls.append({"tool_call_ref": tool_call_ref, "tool_name": tool_name, "completed": False})
+        requires_approval = _tool_requires_approval(tool_name)
+        open_tool_calls.append(
+            {
+                "tool_call_ref": tool_call_ref,
+                "tool_name": tool_name,
+                "completed": False,
+                "awaiting_approval": requires_approval,
+                "arguments": raw_arguments,
+            }
+        )
         created_event = await _record_run_event(
             session=session,
             context=context,
@@ -1156,18 +1205,36 @@ async def _record_tool_event(
                 "input_for_model_json": raw_arguments,
             },
         )
-        started_event = await _record_run_event(
-            session=session,
-            context=context,
-            event_type="tool_call.started",
-            tool_call_ref=tool_call_ref,
-            payload={
-                "tool_name": tool_name,
-                "input_for_model_json": raw_arguments,
-                "display_input_preview": build_preview(display_input),
-            },
-        )
-        events.extend([created_event, arguments_event, started_event])
+        events.extend([created_event, arguments_event])
+        if requires_approval:
+            approval_event = await _record_run_event(
+                session=session,
+                context=context,
+                event_type="tool_call.approval.requested",
+                tool_call_ref=tool_call_ref,
+                payload={
+                    "tool_name": tool_name,
+                    "input_for_model_json": raw_arguments,
+                    "display_input_preview": build_preview(display_input),
+                },
+            )
+            events.append(approval_event)
+            agent_run = context.get("agent_run")
+            assert isinstance(agent_run, AgentRun)
+            approval_manager.register(run_id=agent_run.id, tool_call_ref=tool_call_ref)
+        else:
+            started_event = await _record_run_event(
+                session=session,
+                context=context,
+                event_type="tool_call.started",
+                tool_call_ref=tool_call_ref,
+                payload={
+                    "tool_name": tool_name,
+                    "input_for_model_json": raw_arguments,
+                    "display_input_preview": build_preview(display_input),
+                },
+            )
+            events.append(started_event)
         return events
 
     if status != "completed":
@@ -1177,6 +1244,17 @@ async def _record_tool_event(
     raw_output = str(tool.get("content") or "")
     display_output = sanitize_tool_output_for_display(_maybe_parse_json(raw_output))
     audit_output = sanitize_tool_output_for_audit(_maybe_parse_json(raw_output))
+    agent_run = context.get("agent_run")
+    assert isinstance(agent_run, AgentRun)
+    output_blob_ref = (
+        write_tool_output_artifact(
+            run_id=agent_run.id,
+            tool_call_ref=tool_call_ref or _new_event_id("tc"),
+            raw_output=raw_output,
+        )
+        if tool_call_ref and tool_output_should_externalize(raw_output)
+        else None
+    )
     completed_event = await _record_run_event(
         session=session,
         context=context,
@@ -1188,6 +1266,7 @@ async def _record_tool_event(
             "audit_output_preview": build_preview(audit_output),
             "output_for_model_json": raw_output,
             "output_size_bytes": len(raw_output.encode("utf-8")),
+            "output_blob_ref": output_blob_ref,
         },
     )
     events.append(completed_event)
@@ -1261,6 +1340,26 @@ async def _apply_projection_for_event(
         assistant_message.parts_updated_at = utcnow_naive()
         assistant_message.content = aggregate_text_from_parts(next_parts)
 
+    if event_type == "tool_call.approval.requested":
+        agent_run.status = RUN_STATUS_WAITING_APPROVAL
+        metadata = _run_metadata(agent_run)
+        metadata["pending_approval"] = {
+            "tool_call_ref": tool_call_ref,
+            "tool_name": str(payload.get("tool_name") or ""),
+            "arguments_preview": str(payload.get("display_input_preview") or ""),
+            "requested_at": utcnow_naive().isoformat(),
+        }
+        _set_run_metadata(agent_run, metadata)
+    elif event_type == "tool_call.approval.granted":
+        agent_run.status = RUN_STATUS_RUNNING
+        metadata = _run_metadata(agent_run)
+        metadata.pop("pending_approval", None)
+        _set_run_metadata(agent_run, metadata)
+    elif event_type == "tool_call.approval.denied":
+        metadata = _run_metadata(agent_run)
+        metadata.pop("pending_approval", None)
+        _set_run_metadata(agent_run, metadata)
+
     if event_type.startswith("tool_call."):
         await _project_tool_call_event(
             session=session,
@@ -1322,6 +1421,20 @@ async def _project_tool_call_event(
         tool_call.display_input_preview = str(payload.get("display_input_preview") or "")
         return
 
+    if event_type == "tool_call.approval.requested":
+        tool_call.status = TOOL_STATUS_WAITING_APPROVAL
+        return
+
+    if event_type == "tool_call.approval.granted":
+        tool_call.status = TOOL_STATUS_READY
+        return
+
+    if event_type == "tool_call.approval.denied":
+        tool_call.status = TOOL_STATUS_DENIED
+        tool_call.error_message = str(payload.get("comment") or payload.get("error_message") or "")
+        tool_call.completed_at = utcnow_naive()
+        return
+
     if event_type == "tool_call.started":
         tool_call.status = TOOL_STATUS_RUNNING
         tool_call.started_at = tool_call.started_at or utcnow_naive()
@@ -1333,6 +1446,7 @@ async def _project_tool_call_event(
         tool_call.output_for_model_json = str(payload.get("output_for_model_json") or "")
         tool_call.display_output_preview = str(payload.get("display_output_preview") or "")
         tool_call.audit_output_preview = str(payload.get("audit_output_preview") or "")
+        tool_call.output_blob_ref = str(payload.get("output_blob_ref") or "") or None
         tool_call.output_size_bytes = payload.get("output_size_bytes")
         if tool_call.started_at is not None and tool_call.completed_at is not None:
             tool_call.duration_ms = int((tool_call.completed_at - tool_call.started_at).total_seconds() * 1000)
@@ -1353,6 +1467,34 @@ def _maybe_parse_json(value: str) -> Any:
         return json_loads(value, default=value)
     except TypeError:
         return value
+
+
+def _run_metadata(run: AgentRun) -> dict[str, Any]:
+    metadata = json_loads(run.metadata_json, default={})
+    if isinstance(metadata, dict):
+        return metadata
+    return {}
+
+
+def _set_run_metadata(run: AgentRun, metadata: dict[str, Any]) -> None:
+    run.metadata_json = json_dumps(metadata)
+
+
+def _tool_requires_approval(tool_name: str) -> bool:
+    return tool_name in APPROVAL_REQUIRED_TOOLS
+
+
+def _find_open_tool_call_entry(*, state: dict[str, object], tool_name: str) -> dict[str, object] | None:
+    open_tool_calls = state.get("open_tool_calls")
+    if not isinstance(open_tool_calls, list):
+        return None
+    for item in reversed(open_tool_calls):
+        if not isinstance(item, dict):
+            continue
+        if item.get("tool_name") != tool_name or item.get("completed") is True:
+            continue
+        return item
+    return None
 
 
 def _pop_open_tool_call_ref(*, state: dict[str, object], tool_name: str) -> str | None:
@@ -1458,6 +1600,67 @@ async def _build_prompt_messages(
     return transcript_to_simple_messages(transcript)
 
 
+def _build_context_tool_executor(
+    *,
+    session: AsyncSession,
+    context: dict[str, object] | None,
+):
+    if context is None:
+        return execute_memory_tool_call
+
+    async def execute(tool_name: str, tool_arguments: str) -> str:
+        state = _trace_state(context)
+        entry = _find_open_tool_call_entry(state=state, tool_name=tool_name)
+        if entry is not None and entry.get("awaiting_approval") is True:
+            tool_call_ref = str(entry.get("tool_call_ref") or "")
+            if tool_call_ref:
+                agent_run = context.get("agent_run")
+                assert isinstance(agent_run, AgentRun)
+                decision = await approval_manager.wait_for_decision(run_id=agent_run.id, tool_call_ref=tool_call_ref)
+                if decision.approved:
+                    await _record_run_event(
+                        session=session,
+                        context=context,
+                        event_type="tool_call.approval.granted",
+                        tool_call_ref=tool_call_ref,
+                        payload={
+                            "tool_name": tool_name,
+                            "reviewer_id": decision.reviewer_id,
+                            "comment": decision.comment,
+                        },
+                    )
+                    await _record_run_event(
+                        session=session,
+                        context=context,
+                        event_type="tool_call.started",
+                        tool_call_ref=tool_call_ref,
+                        payload={
+                            "tool_name": tool_name,
+                            "input_for_model_json": tool_arguments,
+                            "display_input_preview": build_preview(
+                                sanitize_tool_input_for_display(_maybe_parse_json(tool_arguments))
+                            ),
+                        },
+                    )
+                else:
+                    await _record_run_event(
+                        session=session,
+                        context=context,
+                        event_type="tool_call.approval.denied",
+                        tool_call_ref=tool_call_ref,
+                        payload={
+                            "tool_name": tool_name,
+                            "reviewer_id": decision.reviewer_id,
+                            "comment": decision.comment,
+                            "error_message": "Tool approval denied",
+                        },
+                    )
+                    raise AppError(status_code=409, code="TOOL_APPROVAL_DENIED", message="Tool approval denied")
+        return await execute_memory_tool_call(tool_name, tool_arguments)
+
+    return execute
+
+
 async def _collect_reply_from_stream(
     *,
     session: AsyncSession,
@@ -1473,6 +1676,7 @@ async def _collect_reply_from_stream(
 
     async for chunk in _stream_reply(
         session=session,
+        context=context,
         user_id=user_id,
         conversation=context["conversation"],
         provider=context["provider"],
@@ -1498,6 +1702,7 @@ async def _collect_reply_from_stream(
 async def _generate_reply(
     *,
     session: AsyncSession,
+    context: dict[str, object] | None = None,
     user_id: int,
     conversation: Conversation,
     provider: str,
@@ -1506,6 +1711,7 @@ async def _generate_reply(
     max_tokens,
     prompt_transcript: list[CanonicalTranscriptItem],
 ) -> dict[str, object]:
+    tool_executor = _build_context_tool_executor(session=session, context=context)
     if provider == "mock":
         return {
             "content": generate_mock_reply(
@@ -1524,7 +1730,7 @@ async def _generate_reply(
             temperature=temperature,
             max_tokens=max_tokens,
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
-            tool_executor=execute_memory_tool_call,
+            tool_executor=tool_executor,
         )
         return {
             "content": str(reply),
@@ -1540,7 +1746,7 @@ async def _generate_reply(
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
-                tool_executor=execute_memory_tool_call,
+                tool_executor=tool_executor,
             ),
             "usage": None,
         }
@@ -1550,6 +1756,7 @@ async def _generate_reply(
 async def _stream_reply(
     *,
     session: AsyncSession,
+    context: dict[str, object] | None = None,
     user_id: int,
     conversation: Conversation,
     provider: str,
@@ -1559,6 +1766,7 @@ async def _stream_reply(
     prompt_transcript: list[CanonicalTranscriptItem],
     usage_callback=None,
 ) -> AsyncIterator[dict[str, object]]:
+    tool_executor = _build_context_tool_executor(session=session, context=context)
     if provider == "mock":
         yield {
             "type": "content",
@@ -1582,7 +1790,7 @@ async def _stream_reply(
             temperature=temperature,
             max_tokens=max_tokens,
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
-            tool_executor=execute_memory_tool_call,
+            tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
             usage_callback=usage_callback,
         ):
@@ -1605,7 +1813,7 @@ async def _stream_reply(
             temperature=temperature,
             max_tokens=max_tokens,
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
-            tool_executor=execute_memory_tool_call,
+            tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
         ):
             while yield_event:
@@ -2058,6 +2266,7 @@ def serialize_agent_run(run: AgentRun) -> dict[str, Any]:
         "last_sequence": run.last_sequence,
         "resume_token": run.resume_token,
         "error_message": run.error_message,
+        "metadata": _run_metadata(run),
         "created_at": run.created_at,
         "updated_at": run.updated_at,
     }

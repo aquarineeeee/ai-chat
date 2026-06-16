@@ -8,7 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import db_session, get_current_user
 from app.models.user import User
-from app.schemas.agent_run import AgentRunListResponse, AgentRunResponse, RunEventListResponse, RunEventResponse
+from app.schemas.agent_run import (
+    AgentRunListResponse,
+    AgentRunResponse,
+    RunApprovalDecisionRequest,
+    RunEventListResponse,
+    RunEventResponse,
+)
 from app.schemas.message import (
     MessageEditRequest,
     MessageEditResponse,
@@ -36,6 +42,7 @@ from app.services.messages import (
     serialize_agent_run,
     serialize_run_event,
     stream_run_events,
+    submit_tool_approval_decision,
 )
 
 
@@ -131,6 +138,44 @@ async def conversation_run_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/conversations/{conversation_id}/runs/{run_id}/approve", response_model=AgentRunResponse)
+async def conversation_run_approve(
+    conversation_id: int,
+    run_id: int,
+    payload: RunApprovalDecisionRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> AgentRunResponse:
+    run = await submit_tool_approval_decision(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        payload=payload,
+        approved=True,
+    )
+    return AgentRunResponse.model_validate(serialize_agent_run(run))
+
+
+@router.post("/conversations/{conversation_id}/runs/{run_id}/deny", response_model=AgentRunResponse)
+async def conversation_run_deny(
+    conversation_id: int,
+    run_id: int,
+    payload: RunApprovalDecisionRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> AgentRunResponse:
+    run = await submit_tool_approval_decision(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        payload=payload,
+        approved=False,
+    )
+    return AgentRunResponse.model_validate(serialize_agent_run(run))
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessagesResponse)
