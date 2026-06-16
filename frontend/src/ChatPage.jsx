@@ -9,7 +9,6 @@ import EmptyState from './components/EmptyState'
 import ApiKeysModal from './components/ApiKeysModal'
 import BranchPane from './components/BranchPane'
 import MessageTreePanel from './components/MessageTreePanel'
-import ToolTraceCard from './components/ToolTraceCard'
 import { Menu, X, Loader2, AlertCircle, Download, ChevronDown, Network } from 'lucide-react'
 
 const DEFAULT_BRANCH_PANE_WIDTH = 440
@@ -73,7 +72,7 @@ function createBranchPane(sourceMessage, branch = null) {
     editingContent: '',
     editingMode: 'update',
     editingSubmittingMessageId: null,
-    toolTrace: [],
+    streamingAssistantId: null,
     error: '',
     openedAt: Date.now(),
   }
@@ -90,42 +89,40 @@ const PROVIDER_OPTIONS = [
   { value: 'anthropic', label: 'Anthropic' },
 ]
 
-function buildToolTrace(tool, previousTrace = []) {
-  if (!tool || typeof tool !== 'object') return previousTrace
-
-  const nextTrace = Array.isArray(previousTrace) ? [...previousTrace] : []
-  const name = typeof tool.name === 'string' ? tool.name : ''
-  const status = typeof tool.status === 'string' ? tool.status : ''
-  const argumentsText = typeof tool.arguments === 'string' ? tool.arguments : ''
-  const content = typeof tool.content === 'string' ? tool.content : ''
-
-  if (!name) return nextTrace
-
-  if (status === 'completed') {
-    const runningIndex = [...nextTrace]
-      .map((item, index) => ({ item, index }))
-      .reverse()
-      .find(({ item }) => item.name === name && item.status === 'running')?.index
-
-    if (runningIndex !== undefined) {
-      nextTrace[runningIndex] = {
-        ...nextTrace[runningIndex],
-        status: 'completed',
-        content: content || nextTrace[runningIndex].content || '',
-      }
-      return nextTrace
-    }
+function createStreamingAssistantMessage(id, overrides = {}) {
+  return {
+    id,
+    role: 'assistant',
+    content: '',
+    parts: [],
+    parts_schema_version: 1,
+    status: 'streaming',
+    error_message: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    sibling_index: 1,
+    sibling_count: 1,
+    previous_sibling_id: null,
+    next_sibling_id: null,
+    ...overrides,
   }
-
-  nextTrace.push({
-    name,
-    status,
-    arguments: argumentsText,
-    content,
-    expanded: false,
-  })
-  return nextTrace
 }
+
+function insertMessageAfter(messages, anchorId, message) {
+  if (!Array.isArray(messages)) return [message]
+  if (messages.some(item => item.id === message.id)) {
+    return messages.map(item => (item.id === message.id ? { ...item, ...message } : item))
+  }
+  if (!anchorId) return [...messages, message]
+  const anchorIndex = messages.findIndex(item => item.id === anchorId)
+  if (anchorIndex < 0) return [...messages, message]
+  return [
+    ...messages.slice(0, anchorIndex + 1),
+    message,
+    ...messages.slice(anchorIndex + 1),
+  ]
+}
+
 
 function cloneParts(parts) {
   if (!Array.isArray(parts)) return []
@@ -377,8 +374,7 @@ export default function ChatPage() {
   const [editingContent, setEditingContent] = useState('')
   const [editingMode, setEditingMode] = useState('update')
   const [editingSubmittingMessageId, setEditingSubmittingMessageId] = useState(null)
-  const [streamingContent, setStreamingContent] = useState('')
-  const [streamToolTrace, setStreamToolTrace] = useState([])
+  const [mainStreamingAssistantId, setMainStreamingAssistantId] = useState(null)
   const [error, setError] = useState('')
   const [apiKeys, setApiKeys] = useState([])
   const [loadingKeys, setLoadingKeys] = useState(false)
@@ -498,27 +494,6 @@ export default function ChatPage() {
     )))
   }, [])
 
-  const toggleMainToolTraceItem = useCallback((traceIndex) => {
-    setStreamToolTrace(current => (
-      Array.isArray(current)
-        ? current.map((item, index) => (
-          index === traceIndex ? { ...item, expanded: !item.expanded } : item
-        ))
-        : current
-    ))
-  }, [])
-
-  const toggleBranchToolTrace = useCallback((paneId, traceIndex) => {
-    patchBranchPane(paneId, pane => ({
-      ...pane,
-      toolTrace: Array.isArray(pane.toolTrace)
-        ? pane.toolTrace.map((item, index) => (
-          index === traceIndex ? { ...item, expanded: !item.expanded } : item
-        ))
-        : pane.toolTrace,
-    }))
-  }, [patchBranchPane])
-
   const loadBranches = useCallback(async (conversationId) => {
     if (!conversationId) return []
 
@@ -637,6 +612,28 @@ export default function ChatPage() {
     await loadBranches(conversationId)
   }, [loadBranches, refreshBranchPane])
 
+  const ensureMainAssistantPlaceholder = useCallback((assistantMessageId, anchorMessageId = null) => {
+    if (!assistantMessageId) return
+    setMessages(current => insertMessageAfter(
+      current,
+      anchorMessageId,
+      createStreamingAssistantMessage(assistantMessageId),
+    ))
+  }, [])
+
+  const ensureBranchAssistantPlaceholder = useCallback((paneId, assistantMessageId, anchorMessageId = null) => {
+    if (!paneId || !assistantMessageId) return
+    patchBranchPane(paneId, current => ({
+      ...current,
+      streamingAssistantId: assistantMessageId,
+      messages: insertMessageAfter(
+        current.messages,
+        anchorMessageId,
+        createStreamingAssistantMessage(assistantMessageId),
+      ),
+    }))
+  }, [patchBranchPane])
+
   const applyRunEventToUi = useCallback((assistantMessageId, event) => {
     if (!assistantMessageId || !event) return
 
@@ -650,6 +647,10 @@ export default function ChatPage() {
       currentLeafMessageId: event.type === 'message.completed' && pane.currentLeafMessageId !== assistantMessageId
         ? assistantMessageId
         : pane.currentLeafMessageId,
+      streamingAssistantId: (event.type === 'message.completed' || event.type === 'run.failed' || event.type === 'run.cancelled')
+        && pane.streamingAssistantId === assistantMessageId
+        ? null
+        : pane.streamingAssistantId,
       messages: Array.isArray(pane.messages)
         ? pane.messages.map(message => (
           message.id === assistantMessageId
@@ -688,6 +689,9 @@ export default function ChatPage() {
         if (chunk?.run?.id && Number.isFinite(chunk.run.sequence)) {
           runSequenceRef.current.set(runId, Number(chunk.run.sequence) || 0)
         }
+        if (chunk?.run?.assistant_message_id) {
+          ensureMainAssistantPlaceholder(chunk.run.assistant_message_id)
+        }
         if (Number.isFinite(chunk?.sequence)) {
           const nextSequence = Math.max(
             runSequenceRef.current.get(runId) || 0,
@@ -709,7 +713,7 @@ export default function ChatPage() {
         runStreamControllersRef.current.delete(runId)
       }
     }
-  }, [applyRunEventToUi])
+  }, [applyRunEventToUi, ensureMainAssistantPlaceholder])
 
   const loadApiKeys = useCallback(async () => {
     setKeysError('')
@@ -864,7 +868,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, streamingContent])
+  }, [messages])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -1251,11 +1255,11 @@ export default function ChatPage() {
     }
     setMessages(prev => [...prev, userMsg])
     setSending(true)
-    setStreamingContent('')
-    setStreamToolTrace([])
     let streamRunId = null
     let lastSequence = 0
     let sawDone = false
+    let streamAssistantId = null
+    let sawEvent = false
 
     try {
       const res = await fetch(`/api/conversations/${convId}/messages/stream`, {
@@ -1282,7 +1286,6 @@ export default function ChatPage() {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let accumulated = ''
       let streamError = ''
 
       while (true) {
@@ -1302,19 +1305,22 @@ export default function ChatPage() {
 
           try {
             const chunk = JSON.parse(raw)
+            sawEvent = true
             if (chunk.run?.id) {
               streamRunId = chunk.run.id
               lastSequence = Number(chunk.run.sequence) || lastSequence
             }
+            if (chunk.run?.assistant_message_id) {
+              streamAssistantId = chunk.run.assistant_message_id
+              setMainStreamingAssistantId(streamAssistantId)
+              ensureMainAssistantPlaceholder(streamAssistantId, userMsg.id)
+            }
             if (Number.isFinite(chunk.sequence)) {
               lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
             }
-            if (chunk.tool) {
-              setStreamToolTrace(current => buildToolTrace(chunk.tool, current))
-            }
-            if (chunk.content) {
-              accumulated += chunk.content
-              setStreamingContent(accumulated)
+            const event = buildRunEventFromChunk(chunk, streamAssistantId)
+            if (event) {
+              applyRunEventToUi(event.assistant_message_id, event)
             }
             if (chunk.error) {
               streamError = chunk.error
@@ -1329,10 +1335,9 @@ export default function ChatPage() {
       if (!sawDone && streamRunId) {
         await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
       }
-      setStreamingContent('')
       await refreshMessages(convId)
       await loadBranches(convId)
-      if (!streamError && !accumulated) setError('妯″瀷娌℃湁杩斿洖鍐呭')
+      if (!streamError && !sawEvent) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '发送失败，请重试')
       if (convId) {
@@ -1346,20 +1351,20 @@ export default function ChatPage() {
       }
     } finally {
       setSending(false)
-      setStreamingContent('')
+      setMainStreamingAssistantId(null)
     }
-  }, [activeConv, activeId, createConversation, loadBranches, pendingModel, pendingProvider, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, applyRunEventToUi, createConversation, ensureMainAssistantPlaceholder, loadBranches, pendingModel, pendingProvider, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const regenerateMainMessage = useCallback(async (messageId) => {
     if (!activeId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
     setError('')
     setRegeneratingMessageId(messageId)
-    setStreamingContent('')
-    setStreamToolTrace([])
     const branchId = activeConv?.current_branch_id ?? null
     let streamRunId = null
     let lastSequence = 0
     let sawDone = false
+    let streamAssistantId = null
+    let sawEvent = false
 
     try {
       const res = await fetch(`/api/conversations/${activeId}/messages/${messageId}/regenerate/stream`, {
@@ -1386,7 +1391,6 @@ export default function ChatPage() {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let accumulated = ''
       let streamError = ''
 
       while (true) {
@@ -1406,19 +1410,22 @@ export default function ChatPage() {
 
           try {
             const chunk = JSON.parse(raw)
+            sawEvent = true
             if (chunk.run?.id) {
               streamRunId = chunk.run.id
               lastSequence = Number(chunk.run.sequence) || lastSequence
             }
+            if (chunk.run?.assistant_message_id) {
+              streamAssistantId = chunk.run.assistant_message_id
+              setMainStreamingAssistantId(streamAssistantId)
+              ensureMainAssistantPlaceholder(streamAssistantId, messageId)
+            }
             if (Number.isFinite(chunk.sequence)) {
               lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
             }
-            if (chunk.tool) {
-              setStreamToolTrace(current => buildToolTrace(chunk.tool, current))
-            }
-            if (chunk.content) {
-              accumulated += chunk.content
-              setStreamingContent(accumulated)
+            const event = buildRunEventFromChunk(chunk, streamAssistantId)
+            if (event) {
+              applyRunEventToUi(event.assistant_message_id, event)
             }
             if (chunk.error) {
               streamError = chunk.error
@@ -1435,15 +1442,15 @@ export default function ChatPage() {
       }
       await refreshMessages(activeId)
       await loadBranches(activeId)
-      if (!streamError && !accumulated) setError('妯″瀷娌℃湁杩斿洖鍐呭')
+      if (!streamError && !sawEvent) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '閲嶆柊鐢熸垚澶辫触锛岃閲嶈瘯')
       await recoverMainInterruptedStream(activeId, streamRunId, lastSequence)
     } finally {
       setRegeneratingMessageId(null)
-      setStreamingContent('')
+      setMainStreamingAssistantId(null)
     }
-  }, [activeConv, activeId, loadBranches, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, applyRunEventToUi, ensureMainAssistantPlaceholder, loadBranches, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const switchMainSibling = useCallback(async (targetMessageId) => {
     if (!activeId || !targetMessageId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -1574,10 +1581,14 @@ export default function ChatPage() {
       ...current,
       messages: [...current.messages, userMsg],
       sending: true,
-      streamingContent: '',
-      toolTrace: [],
+      streamingAssistantId: null,
       error: '',
     }))
+    let streamRunId = null
+    let lastSequence = 0
+    let sawDone = false
+    let streamAssistantId = null
+    let sawEvent = false
     try {
       const res = await fetch(`/api/conversations/${activeId}/messages/stream`, {
         method: 'POST',
@@ -1603,7 +1614,6 @@ export default function ChatPage() {
 
       const decoder = new TextDecoder()
       let buffer = ''
-      let accumulated = ''
       let streamError = ''
 
       while (true) {
@@ -1623,22 +1633,21 @@ export default function ChatPage() {
 
           try {
             const chunk = JSON.parse(raw)
+            sawEvent = true
             if (chunk.run?.id) {
               streamRunId = chunk.run.id
               lastSequence = Number(chunk.run.sequence) || lastSequence
             }
+            if (chunk.run?.assistant_message_id) {
+              streamAssistantId = chunk.run.assistant_message_id
+              ensureBranchAssistantPlaceholder(paneId, streamAssistantId, userMsg.id)
+            }
             if (Number.isFinite(chunk.sequence)) {
               lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
             }
-            if (chunk.tool) {
-              patchBranchPane(paneId, pane => ({
-                ...pane,
-                toolTrace: buildToolTrace(chunk.tool, pane.toolTrace),
-              }))
-            }
-            if (chunk.content) {
-              accumulated += chunk.content
-              patchBranchPane(paneId, { streamingContent: accumulated })
+            const event = buildRunEventFromChunk(chunk, streamAssistantId)
+            if (event) {
+              applyRunEventToUi(event.assistant_message_id, event)
             }
             if (chunk.error) {
               streamError = chunk.error
@@ -1653,10 +1662,9 @@ export default function ChatPage() {
       if (!sawDone && streamRunId) {
         await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
       }
-      patchBranchPane(paneId, { streamingContent: '' })
       await refreshBranchPane(activeId, paneId)
       await loadBranches(activeId)
-      if (!streamError && !accumulated) patchBranchPane(paneId, { error: '模型没有返回内容' })
+      if (!streamError && !sawEvent) patchBranchPane(paneId, { error: '模型没有返回内容' })
     } catch (e) {
       patchBranchPane(paneId, current => ({
         ...current,
@@ -1664,30 +1672,115 @@ export default function ChatPage() {
         error: e.message || '发送失败，请重试',
       }))
     } finally {
-      patchBranchPane(paneId, { sending: false, streamingContent: '' })
+      patchBranchPane(paneId, { sending: false, streamingAssistantId: null })
     }
-  }, [activeId, branchPanes, loadBranches, patchBranchPane, recoverBranchInterruptedStream, refreshBranchPane])
+  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, recoverBranchInterruptedStream, refreshBranchPane])
 
   const regenerateBranchMessage = useCallback(async (paneId, messageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
     if (!activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
 
-    patchBranchPane(paneId, { regeneratingMessageId: messageId, error: '' })
+    patchBranchPane(paneId, {
+      regeneratingMessageId: messageId,
+      error: '',
+      streamingAssistantId: null,
+    })
+    let streamRunId = null
+    let lastSequence = 0
+    let sawDone = false
+    let streamAssistantId = null
+    let sawEvent = false
     try {
-      const res = await api.regenerateMessage(activeId, messageId, {
+      const payload = {
         ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         activate_branch: false,
         context_mode: pane.contextMode,
         context_root_message_id: pane.rootMessageId,
+      }
+      const res = await fetch(`/api/conversations/${activeId}/messages/${messageId}/regenerate/stream`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       })
-      await refreshBranchPane(activeId, paneId, { leafMessageId: res?.current_leaf_message_id })
+
+      if (res.status === 404 || res.status === 405) {
+        const fallback = await api.regenerateMessage(activeId, messageId, payload)
+        await refreshBranchPane(activeId, paneId, { leafMessageId: fallback?.current_leaf_message_id })
+        await loadBranches(activeId)
+        return
+      }
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.error?.message || err?.detail || '閲嶆柊鐢熸垚澶辫触锛岃閲嶈瘯')
+      }
+
+      const reader = res.body?.getReader()
+      if (!reader) throw new Error('娴佸紡鍝嶅簲涓嶅彲鐢?')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const raw = line.slice(6).trim()
+          if (raw === '[DONE]') {
+            sawDone = true
+            continue
+          }
+
+          try {
+            const chunk = JSON.parse(raw)
+            sawEvent = true
+            if (chunk.run?.id) {
+              streamRunId = chunk.run.id
+              lastSequence = Number(chunk.run.sequence) || lastSequence
+            }
+            if (chunk.run?.assistant_message_id) {
+              streamAssistantId = chunk.run.assistant_message_id
+              ensureBranchAssistantPlaceholder(paneId, streamAssistantId, messageId)
+            }
+            if (Number.isFinite(chunk.sequence)) {
+              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
+            }
+            const event = buildRunEventFromChunk(chunk, streamAssistantId)
+            if (event) {
+              applyRunEventToUi(event.assistant_message_id, event)
+            }
+            if (chunk.error) {
+              patchBranchPane(paneId, { error: chunk.error })
+            }
+          } catch {
+            // ignore malformed chunks
+          }
+        }
+      }
+
+      if (!sawDone && streamRunId) {
+        await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
+      }
+      await refreshBranchPane(activeId, paneId)
       await loadBranches(activeId)
+      if (!sawEvent) {
+        patchBranchPane(paneId, { error: '妯″瀷娌℃湁杩斿洖鍐呭' })
+      }
     } catch (e) {
       patchBranchPane(paneId, { error: e.message || '重新生成失败，请重试' })
     } finally {
-      patchBranchPane(paneId, { regeneratingMessageId: null })
+      patchBranchPane(paneId, {
+        regeneratingMessageId: null,
+        streamingAssistantId: null,
+      })
     }
-  }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPane])
+  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, recoverBranchInterruptedStream, refreshBranchPane])
 
   const switchBranchPaneSibling = useCallback(async (paneId, targetMessageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -1795,14 +1888,14 @@ export default function ChatPage() {
     || creatingBranchMessageId !== null
     || deletingMessageId !== null
     || editingSubmittingMessageId !== null
-  const regeneratingMsg = regeneratingMessageId !== null
-    ? messages.find(m => m.id === regeneratingMessageId)
-    : null
   const regenerationCutoffIndex = regeneratingMessageId === null
     ? -1
     : messages.findIndex(msg => msg.id === regeneratingMessageId)
+  const streamingAssistantIndex = mainStreamingAssistantId === null
+    ? -1
+    : messages.findIndex(message => message.id === mainStreamingAssistantId)
   const displayedMessages = regenerationCutoffIndex >= 0
-    ? messages.slice(0, regenerationCutoffIndex + 1)
+    ? messages.slice(0, Math.max(regenerationCutoffIndex + 1, streamingAssistantIndex + 1))
     : messages
 
   return (
@@ -1939,20 +2032,15 @@ export default function ChatPage() {
                   <div className="flex items-center justify-center h-full">
                     <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--text-muted)' }} />
                   </div>
-                ) : messages.length === 0 && !streamingContent ? (
+                ) : messages.length === 0 ? (
                   <EmptyState onSend={sendMessage} />
                 ) : (
                   <div className="max-w-3xl mx-auto px-4 py-6 space-y-1">
                     {displayedMessages.map(msg => {
-                      const isRegeneratingTarget = regeneratingMessageId === msg.id && msg.role === 'assistant'
-                      const renderedMessage = isRegeneratingTarget
-                        ? { ...msg, content: streamingContent, status: 'streaming', error_message: null }
-                        : msg
-
                       return (
                         <MessageBubble
                           key={msg.id}
-                          message={renderedMessage}
+                          message={msg}
                           onCopy={msg.role === 'system' ? undefined : () => { void copyMainMessage(msg) }}
                           onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
                           onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
@@ -1975,8 +2063,7 @@ export default function ChatPage() {
                         />
                       )
                     })}
-                    <ToolTraceCard traces={streamToolTrace} onToggle={toggleMainToolTraceItem} />
-                    {sending && !streamingContent && (
+                    {(sending || regeneratingMessageId !== null) && !mainStreamingAssistantId && (
                       <div className="flex gap-3 py-3">
                         <div
                           className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-bold"
@@ -1994,9 +2081,6 @@ export default function ChatPage() {
                           ))}
                         </div>
                       </div>
-                    )}
-                    {streamingContent && (regeneratingMessageId === null || regeneratingMsg?.role === 'user') && (
-                      <MessageBubble message={{ role: 'assistant', content: streamingContent, status: 'streaming' }} hideActions />
                     )}
                     {error && (
                       <div
@@ -2060,7 +2144,6 @@ export default function ChatPage() {
                       <BranchPane
                         pane={{
                           ...pane,
-                          onToggleToolTrace: (traceIndex) => toggleBranchToolTrace(pane.id, traceIndex),
                           busy: pane.loading
                             || pane.sending
                             || pane.regeneratingMessageId !== null

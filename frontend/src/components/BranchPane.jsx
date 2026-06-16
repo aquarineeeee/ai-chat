@@ -1,7 +1,6 @@
 import { X } from 'lucide-react'
 import MessageBubble from './MessageBubble'
 import ChatInput from './ChatInput'
-import ToolTraceCard from './ToolTraceCard'
 
 export default function BranchPane({
   pane,
@@ -34,6 +33,7 @@ export default function BranchPane({
   const branchMessages = pane.messages.length > 0 && pane.messages[0]?.id === pane.rootMessageId
     ? pane.messages.slice(1)
     : pane.messages
+  const showPendingAssistant = (pane.sending || pane.regeneratingMessageId !== null) && !pane.streamingAssistantId
 
   return (
     <section
@@ -110,7 +110,6 @@ export default function BranchPane({
         </div>
 
         <div className="space-y-1">
-          <ToolTraceCard traces={pane.toolTrace} onToggle={pane.onToggleToolTrace} />
           {branchMessages.map(msg => (
             <MessageBubble
               key={msg.id}
@@ -134,9 +133,9 @@ export default function BranchPane({
               isRegenerating={pane.regeneratingMessageId === msg.id}
               isCreatingBranch={pane.creatingBranchMessageId === msg.id}
               isDeleting={pane.deletingMessageId === msg.id}
-            />
+              />
           ))}
-          {pane.sending && !pane.streamingContent && (
+          {showPendingAssistant && (
             <div className="flex gap-3 py-3">
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center shrink-0 text-xs font-bold"
@@ -154,9 +153,6 @@ export default function BranchPane({
                 ))}
               </div>
             </div>
-          )}
-          {pane.streamingContent && (
-            <MessageBubble message={{ role: 'assistant', content: pane.streamingContent, status: 'streaming' }} hideActions />
           )}
           {pane.error && (
             <div
