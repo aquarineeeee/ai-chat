@@ -75,6 +75,7 @@ async def branches_update(
 async def branches_activate(
     conversation_id: int,
     branch_id: int,
+    limit: int | None = Query(default=None, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> ConversationMessagesResponse:
@@ -89,6 +90,7 @@ async def branches_activate(
         user_id=current_user.id,
         conversation_id=conversation_id,
         leaf_message_id=branch.current_leaf_message_id,
+        limit=limit,
     )
 
 

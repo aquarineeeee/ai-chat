@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { useAuth } from './AuthContext'
 import { useTheme } from './ThemeContext'
 import { api } from './api'
@@ -18,6 +18,8 @@ const MIN_MAIN_PANEL_WIDTH = 320
 const BRANCH_PANE_WIDTH_STORAGE_KEY = 'ai-chat.branch-pane-width'
 const STREAM_INACTIVITY_TIMEOUT_MS = 60000
 const DEFAULT_BRANCH_CONTEXT_MESSAGE_COUNT = 6
+const INITIAL_MESSAGE_PAGE_SIZE = 40
+const LOAD_EARLIER_THRESHOLD_PX = 120
 
 function clampBranchPaneWidth(width, containerWidth) {
   if (!Number.isFinite(width)) return DEFAULT_BRANCH_PANE_WIDTH
@@ -767,6 +769,9 @@ export default function ChatPage() {
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [messages, setMessages] = useState([])
+  const [hasMoreMessages, setHasMoreMessages] = useState(false)
+  const [nextBeforeMessageId, setNextBeforeMessageId] = useState(null)
+  const [loadingEarlierMessages, setLoadingEarlierMessages] = useState(false)
   const [loadingConvs, setLoadingConvs] = useState(true)
   const [loadingMsgs, setLoadingMsgs] = useState(false)
   const [sending, setSending] = useState(false)
@@ -808,6 +813,9 @@ export default function ChatPage() {
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const [exportingKey, setExportingKey] = useState('')
   const bottomRef = useRef(null)
+  const messageListRef = useRef(null)
+  const activeConversationIdRef = useRef(null)
+  const loadingEarlierMessagesRef = useRef(false)
   const exportMenuRef = useRef(null)
   const conversationLayoutRef = useRef(null)
   const resizeCleanupRef = useRef(null)
@@ -980,14 +988,53 @@ export default function ChatPage() {
   }, [patchActiveRuns])
 
   const refreshMessages = useCallback(async (conversationId) => {
-    const data = await api.getMessages(conversationId)
+    const data = await api.getMessages(conversationId, { limit: INITIAL_MESSAGE_PAGE_SIZE })
     const items = data?.items || []
     setMessages(items)
+    setHasMoreMessages(Boolean(data?.has_more))
+    setNextBeforeMessageId(data?.next_before_message_id ?? null)
     await hydrateRunViewsForMessages(conversationId, items)
     patchConversationBranchState(conversationId, data)
     setMessageTreeRefreshToken(token => token + 1)
     return { ...data, items }
   }, [hydrateRunViewsForMessages, patchConversationBranchState])
+
+  const loadEarlierMessages = useCallback(async () => {
+    if (!activeId || !hasMoreMessages || !nextBeforeMessageId || loadingEarlierMessagesRef.current) return
+
+    const list = messageListRef.current
+    const previousHeight = list?.scrollHeight ?? 0
+    const previousTop = list?.scrollTop ?? 0
+    const conversationId = activeId
+
+    loadingEarlierMessagesRef.current = true
+    setLoadingEarlierMessages(true)
+    try {
+      const data = await api.getMessages(conversationId, {
+        beforeMessageId: nextBeforeMessageId,
+        limit: INITIAL_MESSAGE_PAGE_SIZE,
+      })
+      const earlierItems = data?.items || []
+      await hydrateRunViewsForMessages(conversationId, earlierItems)
+      if (conversationId !== activeConversationIdRef.current) return
+
+      setMessages(current => {
+        const currentIds = new Set(current.map(message => message.id))
+        return [...earlierItems.filter(message => !currentIds.has(message.id)), ...current]
+      })
+      setHasMoreMessages(Boolean(data?.has_more))
+      setNextBeforeMessageId(data?.next_before_message_id ?? null)
+      requestAnimationFrame(() => {
+        if (!list) return
+        list.scrollTop = previousTop + list.scrollHeight - previousHeight
+      })
+    } catch (err) {
+      setError(err.message || '加载更早消息失败')
+    } finally {
+      loadingEarlierMessagesRef.current = false
+      setLoadingEarlierMessages(false)
+    }
+  }, [activeId, hasMoreMessages, hydrateRunViewsForMessages, nextBeforeMessageId])
 
   const refreshBranchPane = useCallback(async (conversationId, paneId, options = {}) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -1290,6 +1337,7 @@ export default function ChatPage() {
   }, [])
 
   const selectConversation = useCallback(async (conversationId) => {
+    activeConversationIdRef.current = conversationId
     setActiveId(conversationId)
     setBranchPanes([])
     setActiveRunsByAssistantId({})
@@ -1297,11 +1345,15 @@ export default function ChatPage() {
     resetMainEdit()
     if (!conversationId) {
       setMessages([])
+      setHasMoreMessages(false)
+      setNextBeforeMessageId(null)
       return
     }
 
     setLoadingMsgs(true)
     setMessages([])
+    setHasMoreMessages(false)
+    setNextBeforeMessageId(null)
     try {
       await Promise.all([
         refreshMessages(conversationId),
@@ -1361,9 +1413,13 @@ export default function ChatPage() {
     }
   }, [fetchConversations, selectConversation])
 
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  useLayoutEffect(() => {
+    if (loadingMsgs || loadingEarlierMessagesRef.current) return
+    const messageList = messageListRef.current
+    if (messageList) {
+      messageList.scrollTop = messageList.scrollHeight
+    }
+  }, [loadingMsgs, messages])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -1652,14 +1708,19 @@ export default function ChatPage() {
   }, [])
 
   const activateBranch = useCallback(async (conversationId, branchId) => {
+    activeConversationIdRef.current = conversationId
     setActiveId(conversationId)
     setBranchPanes([])
     resetMainEdit()
     setLoadingMsgs(true)
     setMessages([])
+    setHasMoreMessages(false)
+    setNextBeforeMessageId(null)
     try {
-      const data = await api.activateBranch(conversationId, branchId)
+      const data = await api.activateBranch(conversationId, branchId, { limit: INITIAL_MESSAGE_PAGE_SIZE })
       setMessages(data?.items || [])
+      setHasMoreMessages(Boolean(data?.has_more))
+      setNextBeforeMessageId(data?.next_before_message_id ?? null)
       patchConversationBranchState(conversationId, data)
       await loadBranches(conversationId)
       return data
@@ -2575,7 +2636,20 @@ export default function ChatPage() {
 
           <div className="flex flex-1 min-h-0 overflow-hidden" ref={conversationLayoutRef}>
             <div className="flex flex-col flex-1 min-w-0">
-              <div className="flex-1 overflow-y-auto scrollbar-thin">
+              <div
+                ref={messageListRef}
+                onScroll={event => {
+                  if (event.currentTarget.scrollTop <= LOAD_EARLIER_THRESHOLD_PX) {
+                    void loadEarlierMessages()
+                  }
+                }}
+                className="relative flex-1 overflow-y-auto scrollbar-thin"
+              >
+                {loadingEarlierMessages && (
+                  <div className="absolute inset-x-0 top-2 z-10 flex justify-center pointer-events-none">
+                    <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--text-muted)' }} />
+                  </div>
+                )}
                 {loadingMsgs ? (
                   <div className="flex items-center justify-center h-full">
                     <Loader2 className="w-6 h-6 animate-spin" style={{ color: 'var(--text-muted)' }} />

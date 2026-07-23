@@ -124,6 +124,8 @@ class ConversationMessagesResponse(BaseModel):
     current_branch_id: int | None = None
     current_leaf_message_id: int | None
     items: list[MessageNodeResponse]
+    has_more: bool = False
+    next_before_message_id: int | None = None
 
 
 class MessageSendResponse(BaseModel):

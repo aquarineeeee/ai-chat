@@ -202,6 +202,8 @@ async def messages_index(
     leaf_message_id: int | None = Query(default=None, ge=1),
     root_message_id: int | None = Query(default=None, ge=1),
     expand_leaf_descendants: bool = False,
+    before_message_id: int | None = Query(default=None, ge=1),
+    limit: int | None = Query(default=None, ge=1, le=100),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> ConversationMessagesResponse:
@@ -212,6 +214,8 @@ async def messages_index(
         leaf_message_id=leaf_message_id,
         root_message_id=root_message_id,
         expand_leaf_descendants=expand_leaf_descendants,
+        before_message_id=before_message_id,
+        limit=limit,
     )
 
 

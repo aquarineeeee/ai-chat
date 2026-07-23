@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.canonical_transcript import (
@@ -160,11 +160,14 @@ async def list_conversation_messages(
     leaf_message_id: int | None = None,
     root_message_id: int | None = None,
     expand_leaf_descendants: bool = False,
+    before_message_id: int | None = None,
+    limit: int | None = None,
 ) -> ConversationMessagesResponse:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    history: list[Message] | None = None
 
     if root_message_id is not None:
+        history = await _load_conversation_history(session=session, conversation_id=conversation.id)
         await _ensure_message_belongs_to_conversation(
             session=session,
             conversation_id=conversation.id,
@@ -172,13 +175,15 @@ async def list_conversation_messages(
         )
 
     if leaf_message_id is not None:
+        if history is None and expand_leaf_descendants:
+            history = await _load_conversation_history(session=session, conversation_id=conversation.id)
         await _ensure_message_belongs_to_conversation(
             session=session,
             conversation_id=conversation.id,
             message_id=leaf_message_id,
         )
         selected_leaf_message_id = (
-            _resolve_branch_leaf_message_id(history, leaf_message_id)
+            _resolve_branch_leaf_message_id(history or [], leaf_message_id)
             if expand_leaf_descendants
             else leaf_message_id
         )
@@ -191,6 +196,18 @@ async def list_conversation_messages(
             if current_branch is not None
             else conversation.current_leaf_message_id
         )
+
+    if limit is not None and root_message_id is None:
+        return await _build_paginated_messages_response(
+            session=session,
+            conversation=conversation,
+            selected_leaf_message_id=selected_leaf_message_id,
+            before_message_id=before_message_id,
+            limit=limit,
+        )
+
+    if history is None:
+        history = await _load_conversation_history(session=session, conversation_id=conversation.id)
 
     return _build_messages_response(
         conversation=conversation,
@@ -346,6 +363,85 @@ def _build_messages_response(
         current_leaf_message_id=selected_leaf_message_id,
         items=[_serialize_message_node(item, sibling_map=sibling_map) for item in visible_messages],
     )
+
+
+async def _build_paginated_messages_response(
+    *,
+    session: AsyncSession,
+    conversation: Conversation,
+    selected_leaf_message_id: int | None,
+    before_message_id: int | None,
+    limit: int,
+) -> ConversationMessagesResponse:
+    if selected_leaf_message_id is None:
+        return ConversationMessagesResponse(
+            conversation_id=conversation.id,
+            current_branch_id=conversation.current_branch_id,
+            current_leaf_message_id=None,
+            items=[],
+        )
+
+    lineage = (
+        select(Message.id.label("id"), Message.parent_id.label("parent_id"))
+        .where(
+            Message.id == selected_leaf_message_id,
+            Message.conversation_id == conversation.id,
+        )
+        .cte("message_lineage", recursive=True)
+    )
+    parent = Message.__table__.alias("lineage_parent")
+    lineage = lineage.union_all(
+        select(parent.c.id, parent.c.parent_id).where(
+            parent.c.id == lineage.c.parent_id,
+            parent.c.conversation_id == conversation.id,
+        )
+    )
+
+    stmt = select(Message).join(lineage, Message.id == lineage.c.id)
+    if before_message_id is not None:
+        stmt = stmt.where(Message.id < before_message_id)
+    result = await session.scalars(stmt.order_by(Message.id.desc()).limit(limit + 1))
+    newest_first = list(result.all())
+    has_more = len(newest_first) > limit
+    page = newest_first[:limit]
+    page.reverse()
+
+    sibling_map = await _load_sibling_meta_map(
+        session=session,
+        conversation_id=conversation.id,
+        messages=page,
+    )
+    return ConversationMessagesResponse(
+        conversation_id=conversation.id,
+        current_branch_id=conversation.current_branch_id,
+        current_leaf_message_id=selected_leaf_message_id,
+        items=[_serialize_message_node(item, sibling_map=sibling_map) for item in page],
+        has_more=has_more,
+        next_before_message_id=page[0].id if has_more and page else None,
+    )
+
+
+async def _load_sibling_meta_map(
+    *,
+    session: AsyncSession,
+    conversation_id: int,
+    messages: list[Message],
+) -> dict[int, tuple[int, int, int | None, int | None]]:
+    if not messages:
+        return {}
+
+    parent_ids = {message.parent_id for message in messages}
+    sibling_stmt = select(Message).where(Message.conversation_id == conversation_id)
+    non_null_parent_ids = [parent_id for parent_id in parent_ids if parent_id is not None]
+    parent_conditions = []
+    if non_null_parent_ids:
+        parent_conditions.append(Message.parent_id.in_(non_null_parent_ids))
+    if None in parent_ids:
+        parent_conditions.append(Message.parent_id.is_(None))
+    sibling_stmt = sibling_stmt.where(or_(*parent_conditions))
+
+    result = await session.scalars(sibling_stmt.order_by(Message.created_at.asc(), Message.id.asc()))
+    return _build_sibling_meta_map(list(result.all()))
 
 
 async def get_conversation_message(

@@ -96,7 +96,12 @@ export const api = {
   getBranches: (convId) => request('GET', `/api/conversations/${convId}/branches`),
   createBranch: (convId, data) => request('POST', `/api/conversations/${convId}/branches`, data),
   updateBranch: (convId, branchId, data) => request('PUT', `/api/conversations/${convId}/branches/${branchId}`, data),
-  activateBranch: (convId, branchId) => request('POST', `/api/conversations/${convId}/branches/${branchId}/activate`),
+  activateBranch: (convId, branchId, params = {}) => {
+    const search = new URLSearchParams()
+    if (params.limit) search.set('limit', params.limit)
+    const qs = search.toString()
+    return request('POST', `/api/conversations/${convId}/branches/${branchId}/activate${qs ? `?${qs}` : ''}`)
+  },
   archiveBranch: (convId, branchId) => request('POST', `/api/conversations/${convId}/branches/${branchId}/archive`),
   deleteBranch: (convId, branchId) => request('DELETE', `/api/conversations/${convId}/branches/${branchId}`),
 
@@ -105,6 +110,8 @@ export const api = {
     if (params.leafMessageId) search.set('leaf_message_id', params.leafMessageId)
     if (params.rootMessageId) search.set('root_message_id', params.rootMessageId)
     if (params.expandLeaf) search.set('expand_leaf_descendants', 'true')
+    if (params.beforeMessageId) search.set('before_message_id', params.beforeMessageId)
+    if (params.limit) search.set('limit', params.limit)
     const qs = search.toString()
     return request('GET', `/api/conversations/${convId}/messages${qs ? `?${qs}` : ''}`)
   },
