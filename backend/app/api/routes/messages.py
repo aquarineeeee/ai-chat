@@ -14,6 +14,7 @@ from app.schemas.agent_run import (
     RunApprovalDecisionRequest,
     RunEventListResponse,
     RunEventResponse,
+    RunViewResponse,
 )
 from app.schemas.message import (
     MessageEditRequest,
@@ -37,6 +38,7 @@ from app.services.messages import (
     list_conversation_messages,
     list_agent_runs_for_conversation,
     list_run_events_for_conversation_run,
+    get_run_view_for_conversation_run,
     regenerate_message,
     regenerate_message_stream,
     serialize_agent_run,
@@ -104,6 +106,22 @@ async def conversation_run_events_index(
         after_sequence=after_sequence,
         items=[RunEventResponse.model_validate(serialize_run_event(item)) for item in items],
     )
+
+
+@router.get("/conversations/{conversation_id}/runs/{run_id}/view", response_model=RunViewResponse)
+async def conversation_run_view(
+    conversation_id: int,
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> RunViewResponse:
+    view = await get_run_view_for_conversation_run(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+    return RunViewResponse.model_validate(view)
 
 
 @router.get("/conversations/{conversation_id}/runs/{run_id}/stream")

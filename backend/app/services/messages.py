@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -75,6 +76,7 @@ from app.services.branches import (
 from app.services.conversations import get_conversation
 from app.services.memory_mcp import search_memory
 from app.services.memory_tools import execute_memory_tool_call, memory_tool_definitions
+from app.services.run_timeline import project_run_view
 
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
@@ -119,6 +121,8 @@ TOOL_STATUS_DENIED = "denied"
 
 APPROVAL_REQUIRED_TOOLS = {item.strip() for item in get_settings().approval_required_tools if item.strip()}
 
+logger = logging.getLogger(__name__)
+
 
 def _new_event_id(prefix: str = "evt") -> str:
     return f"{prefix}_{uuid4().hex}"
@@ -143,6 +147,7 @@ def _stream_chunk_base(event: dict[str, Any]) -> dict[str, object]:
         "run_id": event.get("run_id"),
         "sequence": event.get("sequence"),
         "assistant_message_id": event.get("assistant_message_id"),
+        "step_id": event.get("step_id"),
         "tool_call_ref": event.get("tool_call_ref"),
         "payload": payload,
     }
@@ -241,6 +246,35 @@ async def list_run_events_for_conversation_run(
         .order_by(RunEvent.sequence.asc(), RunEvent.id.asc())
     )
     return list(result.all())
+
+
+async def get_run_view_for_conversation_run(
+    *,
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    run_id: int,
+) -> dict[str, Any]:
+    agent_run = await get_agent_run_for_conversation(
+        session=session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+    events = await list_run_events_for_conversation_run(
+        session=session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+        after_sequence=0,
+    )
+    tool_call_rows = await session.scalars(
+        select(ToolCall)
+        .where(ToolCall.run_id == agent_run.id)
+        .order_by(ToolCall.sequence_index.asc(), ToolCall.id.asc())
+    )
+    tool_calls = list(tool_call_rows.all())
+    return project_run_view(run=agent_run, events=events, tool_calls=tool_calls)
 
 
 async def get_agent_run_for_conversation(
@@ -540,6 +574,7 @@ async def edit_message(
             activate_branch=True,
             context_mode=payload.context_mode,
             context_root_message_id=payload.context_root_message_id,
+            context_message_count=payload.context_message_count,
         ),
     )
     return MessageEditResponse(
@@ -771,7 +806,7 @@ async def _prepare_generation(
         )
 
     context_root_message_id = payload.context_root_message_id
-    if payload.context_mode == "root_only":
+    if payload.context_mode in {"root_only", "last_n"}:
         context_root_message_id = context_root_message_id or parent_id
         if context_root_message_id is not None:
             await _ensure_message_belongs_to_conversation(
@@ -817,6 +852,7 @@ async def _prepare_generation(
         user_content=payload.content,
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
+        context_message_count=payload.context_message_count,
         history=history,
         include_memory_context=provider not in MEMORY_TOOL_PROVIDERS,
         include_memory_tool_guidance=provider in MEMORY_TOOL_PROVIDERS,
@@ -880,7 +916,7 @@ async def _prepare_regeneration(
         raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持重新生成此类型消息")
 
     context_root_message_id = payload.context_root_message_id
-    if payload.context_mode == "root_only":
+    if payload.context_mode in {"root_only", "last_n"}:
         context_root_message_id = context_root_message_id or target_message.id
         if context_root_message_id is not None:
             await _ensure_message_belongs_to_conversation(
@@ -907,6 +943,7 @@ async def _prepare_regeneration(
         parent_id=parent_id,
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
+        context_message_count=payload.context_message_count,
         history=history,
         include_memory_context=provider not in MEMORY_TOOL_PROVIDERS,
         include_memory_tool_guidance=provider in MEMORY_TOOL_PROVIDERS,
@@ -949,7 +986,7 @@ async def _initialize_trace_for_context(
         status=RUN_STATUS_RUNNING,
         started_at=utcnow_naive(),
         resume_token=_new_event_id("run"),
-        metadata_json=json_dumps({"phase": "1A"}),
+        metadata_json=json_dumps({"phase": "running"}),
     )
     session.add(agent_run)
     await session.flush()
@@ -966,6 +1003,12 @@ async def _initialize_trace_for_context(
             "model": agent_run.model,
             "user_message_id": user_message.id if user_message is not None else None,
         },
+    )
+    await _record_run_event(
+        session=session,
+        context=context,
+        event_type="run.phase.changed",
+        payload={"phase": "running"},
     )
     await _record_run_event(
         session=session,
@@ -1065,10 +1108,12 @@ async def stream_run_events(
         conversation_id=conversation_id,
         run_id=run_id,
     )
+    initial_assistant_message_id = run.assistant_message_id
+    await session.rollback()
     yield {
         "run": {
-            "id": run.id,
-            "assistant_message_id": run.assistant_message_id,
+            "id": run_id,
+            "assistant_message_id": initial_assistant_message_id,
             "sequence": after_sequence,
         }
     }
@@ -1089,6 +1134,7 @@ async def stream_run_events(
             chunk = _stream_chunk_from_run_event(serialized)
             if chunk is not None:
                 yield chunk
+        await session.rollback()
 
         session.expire_all()
         run = await get_agent_run_for_conversation(
@@ -1097,7 +1143,9 @@ async def stream_run_events(
             conversation_id=conversation_id,
             run_id=run_id,
         )
-        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED} and not agent_runner.is_running(run.id):
+        run_status = run.status
+        await session.rollback()
+        if run_status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED} and not agent_runner.is_running(run_id):
             return
 
         await asyncio.sleep(0.2)
@@ -1153,6 +1201,129 @@ async def _record_text_delta(
     )
 
 
+async def _record_text_retraction(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    text: str,
+) -> RunEvent | None:
+    if not text:
+        return None
+    return await _record_run_event(
+        session=session,
+        context=context,
+        event_type="message.text.retracted",
+        payload={"text": text},
+    )
+
+
+async def _record_commentary(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    step_id: str | None,
+    text: str,
+    source: str = "model",
+    style: str = "progress",
+) -> list[RunEvent]:
+    normalized = text.strip()
+    if not step_id or not normalized:
+        return []
+
+    commentary_id = _new_event_id("cm")
+    events = [
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="commentary.created",
+            step_id=step_id,
+            payload={
+                "commentary_id": commentary_id,
+                "step_id": step_id,
+                "source": source,
+                "style": style,
+                "text": "",
+            },
+        ),
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="commentary.delta",
+            step_id=step_id,
+            payload={
+                "commentary_id": commentary_id,
+                "step_id": step_id,
+                "source": source,
+                "style": style,
+                "text": normalized,
+            },
+        ),
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="commentary.completed",
+            step_id=step_id,
+            payload={
+                "commentary_id": commentary_id,
+                "step_id": step_id,
+                "source": source,
+                "style": style,
+            },
+        ),
+    ]
+    return events
+
+
+async def _flush_pending_commentary_for_step(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    step_id: str,
+) -> list[RunEvent]:
+    pending_commentary = context.get("pending_commentary")
+    if not isinstance(pending_commentary, list) or not pending_commentary:
+        return []
+
+    text = "".join(str(chunk) for chunk in pending_commentary)
+    pending_commentary.clear()
+    normalized = text.strip()
+    if not normalized:
+        return []
+
+    events = await _record_commentary(
+        session=session,
+        context=context,
+        step_id=step_id,
+        text=text,
+        source="model",
+        style="progress",
+    )
+    events.append(
+        await _record_run_event(
+            session=session,
+            context=context,
+            event_type="assistant.model_text",
+            step_id=step_id,
+            payload={"text": text},
+        )
+    )
+    return events
+
+
+async def _record_phase_change(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    phase: str,
+) -> RunEvent:
+    return await _record_run_event(
+        session=session,
+        context=context,
+        event_type="run.phase.changed",
+        payload={"phase": phase},
+    )
+
+
 async def _record_tool_event(
     *,
     session: AsyncSession,
@@ -1173,10 +1344,12 @@ async def _record_tool_event(
         raw_arguments = str(tool.get("arguments") or "")
         display_input = sanitize_tool_input_for_display(_maybe_parse_json(raw_arguments))
         tool_call_ref = _new_event_id("tc")
+        step_id = _new_event_id("step")
         requires_approval = _tool_requires_approval(tool_name)
         open_tool_calls.append(
             {
                 "tool_call_ref": tool_call_ref,
+                "step_id": step_id,
                 "tool_name": tool_name,
                 "completed": False,
                 "awaiting_approval": requires_approval,
@@ -1187,8 +1360,10 @@ async def _record_tool_event(
             session=session,
             context=context,
             event_type="tool_call.created",
+            step_id=step_id,
             tool_call_ref=tool_call_ref,
             payload={
+                "step_id": step_id,
                 "tool_name": tool_name,
                 "display_input_preview": build_preview(display_input),
                 "input_for_model_json": raw_arguments,
@@ -1198,27 +1373,60 @@ async def _record_tool_event(
             session=session,
             context=context,
             event_type="tool_call.arguments.completed",
+            step_id=step_id,
             tool_call_ref=tool_call_ref,
             payload={
+                "step_id": step_id,
                 "tool_name": tool_name,
                 "display_input_preview": build_preview(display_input),
                 "input_for_model_json": raw_arguments,
             },
         )
         events.extend([created_event, arguments_event])
+        events.extend(
+            await _flush_pending_commentary_for_step(
+                session=session,
+                context=context,
+                step_id=step_id,
+            )
+        )
+        if str(tool.get("commentary") or "").strip():
+            events.extend(
+                await _record_commentary(
+                    session=session,
+                    context=context,
+                    step_id=step_id,
+                    text=str(tool.get("commentary") or ""),
+                    source=str(tool.get("commentary_source") or "model"),
+                    style=str(tool.get("commentary_style") or "progress"),
+                )
+            )
         if requires_approval:
             approval_event = await _record_run_event(
                 session=session,
                 context=context,
                 event_type="tool_call.approval.requested",
+                step_id=step_id,
                 tool_call_ref=tool_call_ref,
                 payload={
+                    "step_id": step_id,
                     "tool_name": tool_name,
                     "input_for_model_json": raw_arguments,
                     "display_input_preview": build_preview(display_input),
                 },
             )
             events.append(approval_event)
+            events.extend(
+                await _record_commentary(
+                    session=session,
+                    context=context,
+                    step_id=step_id,
+                    text="Waiting for approval.",
+                    source="system",
+                    style="status",
+                )
+            )
+            await _record_phase_change(session=session, context=context, phase="waiting_approval")
             agent_run = context.get("agent_run")
             assert isinstance(agent_run, AgentRun)
             approval_manager.register(run_id=agent_run.id, tool_call_ref=tool_call_ref)
@@ -1227,20 +1435,25 @@ async def _record_tool_event(
                 session=session,
                 context=context,
                 event_type="tool_call.started",
+                step_id=step_id,
                 tool_call_ref=tool_call_ref,
                 payload={
+                    "step_id": step_id,
                     "tool_name": tool_name,
                     "input_for_model_json": raw_arguments,
                     "display_input_preview": build_preview(display_input),
                 },
             )
             events.append(started_event)
+            await _record_phase_change(session=session, context=context, phase="running_tool")
         return events
 
     if status != "completed":
         return []
 
-    tool_call_ref = _pop_open_tool_call_ref(state=state, tool_name=tool_name)
+    tool_entry = _pop_open_tool_call_entry(state=state, tool_name=tool_name)
+    tool_call_ref = str(tool_entry.get("tool_call_ref") or "") if isinstance(tool_entry, dict) else None
+    step_id = str(tool_entry.get("step_id") or "") if isinstance(tool_entry, dict) else None
     raw_output = str(tool.get("content") or "")
     display_output = sanitize_tool_output_for_display(_maybe_parse_json(raw_output))
     audit_output = sanitize_tool_output_for_audit(_maybe_parse_json(raw_output))
@@ -1259,8 +1472,10 @@ async def _record_tool_event(
         session=session,
         context=context,
         event_type="tool_call.completed",
+        step_id=step_id or None,
         tool_call_ref=tool_call_ref,
         payload={
+            "step_id": step_id,
             "tool_name": tool_name,
             "display_output_preview": build_preview(display_output),
             "audit_output_preview": build_preview(audit_output),
@@ -1270,6 +1485,7 @@ async def _record_tool_event(
         },
     )
     events.append(completed_event)
+    await _record_phase_change(session=session, context=context, phase="running")
     return events
 
 
@@ -1279,6 +1495,7 @@ async def _record_run_event(
     context: dict[str, object],
     event_type: str,
     payload: dict[str, Any],
+    step_id: str | None = None,
     tool_call_ref: str | None = None,
 ) -> RunEvent:
     agent_run = context.get("agent_run")
@@ -1291,6 +1508,7 @@ async def _record_run_event(
         event_id=_new_event_id(),
         run_id=agent_run.id,
         assistant_message_id=assistant_message.id,
+        step_id=step_id,
         tool_call_ref=tool_call_ref,
         sequence=agent_run.last_sequence,
         event_type=event_type,
@@ -1304,6 +1522,7 @@ async def _record_run_event(
         context=context,
         event_type=event_type,
         payload=payload,
+        step_id=step_id,
         tool_call_ref=tool_call_ref,
         sequence=event.sequence,
     )
@@ -1317,6 +1536,7 @@ async def _apply_projection_for_event(
     context: dict[str, object],
     event_type: str,
     payload: dict[str, Any],
+    step_id: str | None,
     tool_call_ref: str | None,
     sequence: int,
 ) -> None:
@@ -1327,24 +1547,30 @@ async def _apply_projection_for_event(
     assert isinstance(conversation, Conversation)
     assert isinstance(agent_run, AgentRun)
 
-    current_parts = parts_from_message(assistant_message.parts_json)
-    next_parts = apply_run_event_to_parts(
-        current_parts,
-        event_type=event_type,
-        payload=payload,
-        tool_call_ref=tool_call_ref,
-    )
-    if next_parts != current_parts or assistant_message.parts_json is None:
-        assistant_message.parts_json = json_dumps(next_parts)
-        assistant_message.parts_schema_version = PARTS_SCHEMA_VERSION
-        assistant_message.parts_updated_at = utcnow_naive()
-        assistant_message.content = aggregate_text_from_parts(next_parts)
+    if event_type.startswith("message.") or event_type in {"run.failed", "run.cancelled"}:
+        current_parts = parts_from_message(assistant_message.parts_json)
+        next_parts = apply_run_event_to_parts(
+            current_parts,
+            event_type=event_type,
+            payload=payload,
+            tool_call_ref=tool_call_ref,
+        )
+        if next_parts != current_parts or assistant_message.parts_json is None:
+            assistant_message.parts_json = json_dumps(next_parts)
+            assistant_message.parts_schema_version = PARTS_SCHEMA_VERSION
+            assistant_message.parts_updated_at = utcnow_naive()
+            assistant_message.content = aggregate_text_from_parts(next_parts)
 
-    if event_type == "tool_call.approval.requested":
+    if event_type == "run.phase.changed":
+        metadata = _run_metadata(agent_run)
+        metadata["phase"] = str(payload.get("phase") or "")
+        _set_run_metadata(agent_run, metadata)
+    elif event_type == "tool_call.approval.requested":
         agent_run.status = RUN_STATUS_WAITING_APPROVAL
         metadata = _run_metadata(agent_run)
         metadata["pending_approval"] = {
             "tool_call_ref": tool_call_ref,
+            "step_id": step_id,
             "tool_name": str(payload.get("tool_name") or ""),
             "arguments_preview": str(payload.get("display_input_preview") or ""),
             "requested_at": utcnow_naive().isoformat(),
@@ -1368,6 +1594,7 @@ async def _apply_projection_for_event(
             assistant_message=assistant_message,
             event_type=event_type,
             payload=payload,
+            step_id=step_id,
             tool_call_ref=tool_call_ref,
             sequence=sequence,
         )
@@ -1381,6 +1608,7 @@ async def _project_tool_call_event(
     assistant_message: Message,
     event_type: str,
     payload: dict[str, Any],
+    step_id: str | None,
     tool_call_ref: str | None,
     sequence: int,
 ) -> None:
@@ -1497,7 +1725,7 @@ def _find_open_tool_call_entry(*, state: dict[str, object], tool_name: str) -> d
     return None
 
 
-def _pop_open_tool_call_ref(*, state: dict[str, object], tool_name: str) -> str | None:
+def _pop_open_tool_call_entry(*, state: dict[str, object], tool_name: str) -> dict[str, object] | None:
     open_tool_calls = state.get("open_tool_calls")
     if not isinstance(open_tool_calls, list):
         return None
@@ -1508,8 +1736,7 @@ def _pop_open_tool_call_ref(*, state: dict[str, object], tool_name: str) -> str 
         if item.get("tool_name") != tool_name or item.get("completed") is True:
             continue
         item["completed"] = True
-        tool_call_ref = item.get("tool_call_ref")
-        return str(tool_call_ref) if tool_call_ref else None
+        return item
     return None
 
 
@@ -1534,6 +1761,7 @@ async def _build_prompt_transcript(
     user_content: str | None = None,
     context_mode: str = "full",
     context_root_message_id: int | None = None,
+    context_message_count: int | None = None,
     history: list[Message] | None = None,
     include_memory_context: bool = True,
     include_memory_tool_guidance: bool = False,
@@ -1563,10 +1791,25 @@ async def _build_prompt_transcript(
             root_message = by_id[context_root_message_id]
             if root_message.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
                 context_messages.append(root_message)
+    elif context_mode == "last_n":
+        root_id = context_root_message_id or parent_id
+        if root_id is not None:
+            lineage_messages = [
+                item
+                for item in _lineage_messages(by_id, root_id)
+                if item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}
+            ]
+            # last_n means: include the root message itself plus the N messages
+            # immediately before it on the ancestor chain.
+            message_count = max(context_message_count or 1, 1) + 1
+            context_messages.extend(lineage_messages[-message_count:])
     elif parent_id is not None:
-        for item in _lineage_messages(by_id, parent_id):
-            if item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}:
-                context_messages.append(item)
+        lineage_messages = [
+            item
+            for item in _lineage_messages(by_id, parent_id)
+            if item.status in {MessageStatus.COMPLETED, MessageStatus.PARTIAL}
+        ]
+        context_messages.extend(lineage_messages)
 
     transcript.extend(await build_message_history_transcript(session=session, messages=context_messages))
     if user_content is not None:
@@ -1582,6 +1825,7 @@ async def _build_prompt_messages(
     user_content: str | None = None,
     context_mode: str = "full",
     context_root_message_id: int | None = None,
+    context_message_count: int | None = None,
     history: list[Message] | None = None,
     include_memory_context: bool = True,
     include_memory_tool_guidance: bool = False,
@@ -1593,6 +1837,7 @@ async def _build_prompt_messages(
         user_content=user_content,
         context_mode=context_mode,
         context_root_message_id=context_root_message_id,
+        context_message_count=context_message_count,
         history=history,
         include_memory_context=include_memory_context,
         include_memory_tool_guidance=include_memory_tool_guidance,
@@ -1622,19 +1867,31 @@ def _build_context_tool_executor(
                         session=session,
                         context=context,
                         event_type="tool_call.approval.granted",
+                        step_id=str(entry.get("step_id") or "") or None,
                         tool_call_ref=tool_call_ref,
                         payload={
+                            "step_id": str(entry.get("step_id") or "") or None,
                             "tool_name": tool_name,
                             "reviewer_id": decision.reviewer_id,
                             "comment": decision.comment,
                         },
                     )
+                    await _record_commentary(
+                        session=session,
+                        context=context,
+                        step_id=str(entry.get("step_id") or "") or None,
+                        text="Approval granted.",
+                        source="system",
+                        style="status",
+                    )
                     await _record_run_event(
                         session=session,
                         context=context,
                         event_type="tool_call.started",
+                        step_id=str(entry.get("step_id") or "") or None,
                         tool_call_ref=tool_call_ref,
                         payload={
+                            "step_id": str(entry.get("step_id") or "") or None,
                             "tool_name": tool_name,
                             "input_for_model_json": tool_arguments,
                             "display_input_preview": build_preview(
@@ -1642,13 +1899,16 @@ def _build_context_tool_executor(
                             ),
                         },
                     )
+                    await _record_phase_change(session=session, context=context, phase="running_tool")
                 else:
                     await _record_run_event(
                         session=session,
                         context=context,
                         event_type="tool_call.approval.denied",
+                        step_id=str(entry.get("step_id") or "") or None,
                         tool_call_ref=tool_call_ref,
                         payload={
+                            "step_id": str(entry.get("step_id") or "") or None,
                             "tool_name": tool_name,
                             "reviewer_id": decision.reviewer_id,
                             "comment": decision.comment,
@@ -1668,6 +1928,7 @@ async def _collect_reply_from_stream(
     user_id: int,
 ) -> tuple[str, dict[str, int] | None]:
     accumulated = ""
+    round_buffer = ""
     usage: dict[str, int] | None = None
 
     async def capture_usage(value: dict[str, int] | None) -> None:
@@ -1689,13 +1950,41 @@ async def _collect_reply_from_stream(
         chunk_type = str(chunk.get("type") or "")
         if chunk_type == "content":
             content = str(chunk.get("content") or "")
-            accumulated += content
-            await _record_text_delta(session=session, context=context, text=content)
+            if content:
+                round_buffer += content
+                await _record_text_delta(session=session, context=context, text=content)
+        elif chunk_type == "content_retracted":
+            # This round ended in a tool_use: the streamed text was only a
+            # tool-round preamble, not part of the final answer. Drop it from
+            # parts_json (the retained commentary/model_text paths keep it
+            # visible in the RunView and in the model transcript).
+            retracted_text = str(chunk.get("content") or "")
+            if retracted_text:
+                await _record_text_retraction(session=session, context=context, text=retracted_text)
+            round_buffer = ""
+        elif chunk_type == "round_commentary":
+            text = str(chunk.get("text") or "")
+            if text:
+                pending_commentary = context.setdefault("pending_commentary", [])
+                assert isinstance(pending_commentary, list)
+                pending_commentary.append(text)
+        elif chunk_type == "commentary":
+            step_id = str(chunk.get("step_id") or "") or None
+            if step_id:
+                await _record_commentary(
+                    session=session,
+                    context=context,
+                    step_id=step_id,
+                    text=str(chunk.get("content") or ""),
+                    source=str(chunk.get("source") or "model"),
+                    style=str(chunk.get("style") or "progress"),
+                )
         elif chunk_type == "tool":
             tool = chunk.get("tool")
             if isinstance(tool, dict):
                 await _record_tool_event(session=session, context=context, tool=tool)
 
+    accumulated += round_buffer
     return accumulated, usage
 
 
@@ -1780,9 +2069,9 @@ async def _stream_reply(
     if provider == "openai":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
         async def emit_tool_event(tool: dict[str, object]) -> None:
-            yield_event.append({"type": "tool", "tool": tool})
+            if context is not None:
+                await _record_tool_event(session=session, context=context, tool=tool)
 
-        yield_event: list[dict[str, object]] = []
         async for chunk in stream_openai_compatible_reply(
             api_key=api_key,
             model=model,
@@ -1794,18 +2083,14 @@ async def _stream_reply(
             tool_event_callback=emit_tool_event,
             usage_callback=usage_callback,
         ):
-            while yield_event:
-                yield yield_event.pop(0)
             yield chunk
-        while yield_event:
-            yield yield_event.pop(0)
         return
     if provider == "anthropic":
         api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
         async def emit_tool_event(tool: dict[str, object]) -> None:
-            yield_event.append({"type": "tool", "tool": tool})
+            if context is not None:
+                await _record_tool_event(session=session, context=context, tool=tool)
 
-        yield_event: list[dict[str, object]] = []
         async for chunk in stream_anthropic_reply(
             api_key=api_key,
             model=model,
@@ -1815,12 +2100,9 @@ async def _stream_reply(
             tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
             tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
+            usage_callback=usage_callback,
         ):
-            while yield_event:
-                yield yield_event.pop(0)
-            yield {"type": "content", "content": chunk}
-        while yield_event:
-            yield yield_event.pop(0)
+            yield chunk
         return
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
 
@@ -1836,11 +2118,23 @@ async def _finalize_success(
     usage: dict[str, int] | None,
     activate_branch: bool,
 ) -> None:
+    current_parts = parts_from_message(assistant_message.parts_json)
+    completed_parts = _merge_reply_content_into_parts(parts=current_parts, reply_content=reply_content)
+    if completed_parts != current_parts or assistant_message.parts_json is None:
+        assistant_message.parts_json = json_dumps(completed_parts)
+        assistant_message.parts_schema_version = PARTS_SCHEMA_VERSION
+        assistant_message.parts_updated_at = utcnow_naive()
+    await _record_phase_change(session=session, context=context, phase="finalizing")
     await _record_run_event(
         session=session,
         context=context,
         event_type="message.completed",
-        payload={"status": MessageStatus.COMPLETED.value},
+        payload={
+            "status": MessageStatus.COMPLETED.value,
+            "content": reply_content,
+            "parts": completed_parts,
+            "parts_schema_version": assistant_message.parts_schema_version,
+        },
     )
     assistant_message.content = reply_content
     assistant_message.status = MessageStatus.COMPLETED
@@ -1864,6 +2158,42 @@ async def _finalize_success(
     await session.refresh(conversation)
 
 
+def _merge_reply_content_into_parts(
+    *,
+    parts: list[dict[str, Any]],
+    reply_content: str,
+) -> list[dict[str, Any]]:
+    if not reply_content:
+        return [dict(part) for part in parts]
+
+    current_text = aggregate_text_from_parts(parts)
+    if current_text == reply_content:
+        return [dict(part) for part in parts]
+
+    next_parts = [dict(part) for part in parts]
+    if reply_content.startswith(current_text):
+        suffix = reply_content[len(current_text):]
+        if suffix:
+            if next_parts and next_parts[-1].get("type") == "text":
+                next_parts[-1]["text"] = str(next_parts[-1].get("text") or "") + suffix
+            else:
+                next_parts.append({"type": "text", "text": suffix})
+        return next_parts
+
+    # Reaching here means accumulated reply_content diverged from parts' own text
+    # instead of being a pure suffix extension. With the retraction fix in place
+    # this should only happen for legacy/partial messages; log it so regressions
+    # in the Anthropic tool-round text handling are easy to spot.
+    logger.warning(
+        "reply_content did not extend existing parts text; falling back to collapsing parts (current_text=%r, reply_content=%r)",
+        current_text,
+        reply_content,
+    )
+    non_text_parts = [dict(part) for part in next_parts if part.get("type") != "text"]
+    non_text_parts.append({"type": "text", "text": reply_content})
+    return non_text_parts
+
+
 async def _mark_failed(
     *,
     session: AsyncSession,
@@ -1884,8 +2214,10 @@ async def _mark_failed(
                 session=session,
                 context=context,
                 event_type="tool_call.failed",
+                step_id=str(pending_tool.get("step_id") or "") or None,
                 tool_call_ref=str(pending_tool.get("tool_call_ref") or ""),
                 payload={
+                    "step_id": str(pending_tool.get("step_id") or "") or None,
                     "tool_name": str(pending_tool.get("tool_name") or ""),
                     "error_message": message,
                 },
@@ -1935,8 +2267,10 @@ async def _mark_cancelled(
                 session=session,
                 context=context,
                 event_type="tool_call.failed",
+                step_id=str(pending_tool.get("step_id") or "") or None,
                 tool_call_ref=str(pending_tool.get("tool_call_ref") or ""),
                 payload={
+                    "step_id": str(pending_tool.get("step_id") or "") or None,
                     "tool_name": str(pending_tool.get("tool_name") or ""),
                     "error_message": message,
                 },
@@ -2282,6 +2616,7 @@ def serialize_run_event(event: RunEvent) -> dict[str, Any]:
         "run_id": event.run_id,
         "sequence": event.sequence,
         "assistant_message_id": event.assistant_message_id,
+        "step_id": event.step_id,
         "tool_call_ref": event.tool_call_ref,
         "created_at": event.created_at,
         "payload": payload,

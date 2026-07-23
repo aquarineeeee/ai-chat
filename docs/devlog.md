@@ -38,3 +38,20 @@
 - `npm run build` 通过，仅有 React Flow 引入后 bundle 超过 500KB 的 Vite 提示。
 - `..\.venv\Scripts\python.exe -m unittest discover tests` 通过，19 个后端测试全部 OK。
 - 本地 dev server 启动后 `http://127.0.0.1:5173` 返回 200。
+
+### 6.28
+调整分支面板的上下文携带策略，支持用户为新分支手动指定“根节点前 N 条 + 根节点本身”的上下文窗口。
+
+后端调整：
+- `MessageCreateRequest`、`MessageRegenerateRequest`、`MessageEditRequest` 新增 `context_message_count`，并允许 `context_mode="last_n"`。
+- prompt transcript 构造逻辑改为：当分支面板使用 `last_n` 模式时，以 `context_root_message_id` 作为分支根节点，截取该根节点祖先链上的最近 N 条消息，再附上根节点本身。
+- 保留 `full` 和 `root_only` 兼容逻辑，避免影响主聊天页和已有分支行为。
+
+前端调整：
+- `BranchPane.jsx` 将原来的上下文二元切换改成模式选择器，支持“全部上下文”和“根节点前 N 条 + 根节点”。
+- 分支面板新增上下文条数字段，默认值为 6。
+- 分支发送消息、重新生成、分支编辑时，统一透传 `context_mode`、`context_message_count` 和 `context_root_message_id`。
+
+验证：
+- `..\.venv\Scripts\python.exe -m unittest tests.test_memory_mcp` 通过。
+- `npm run build` 通过，仅有既有的 bundle 超过 500KB 提示。

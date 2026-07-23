@@ -19,8 +19,9 @@ class MessageCreateRequest(BaseModel):
     temperature: Decimal | None = None
     max_tokens: int | None = None
     activate_branch: bool = True
-    context_mode: Literal["full", "root_only"] = "full"
+    context_mode: Literal["full", "root_only", "last_n"] = "full"
     context_root_message_id: int | None = None
+    context_message_count: int | None = Field(default=None, ge=1)
 
 
 class MessageRegenerateRequest(BaseModel):
@@ -30,16 +31,18 @@ class MessageRegenerateRequest(BaseModel):
     temperature: Decimal | None = None
     max_tokens: int | None = None
     activate_branch: bool = True
-    context_mode: Literal["full", "root_only"] = "full"
+    context_mode: Literal["full", "root_only", "last_n"] = "full"
     context_root_message_id: int | None = None
+    context_message_count: int | None = Field(default=None, ge=1)
 
 
 class MessageEditRequest(BaseModel):
     content: str
     mode: Literal["update", "branch"] = "update"
     branch_id: int | None = None
-    context_mode: Literal["full", "root_only"] = "full"
+    context_mode: Literal["full", "root_only", "last_n"] = "full"
     context_root_message_id: int | None = None
+    context_message_count: int | None = Field(default=None, ge=1)
 
 
 class MessageNodeResponse(BaseModel):

@@ -15,8 +15,8 @@ import {
 } from 'lucide-react'
 
 const EDIT_MODE_OPTIONS = [
-  { value: 'update', label: '仅编辑消息' },
-  { value: 'branch', label: '从这里创建分支' },
+  { value: 'update', label: 'Edit message' },
+  { value: 'branch', label: 'Create branch here' },
 ]
 
 function padNumber(value) {
@@ -35,7 +35,7 @@ function formatMessageTime(value) {
 
   const now = new Date()
   if (date.getTime() > now.getTime()) {
-    return '时间有误，请检查系统时间'
+    return 'Time looks incorrect'
   }
 
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate())
@@ -43,8 +43,8 @@ function formatMessageTime(value) {
   const dayDiff = Math.round((todayStart.getTime() - dateStart.getTime()) / 86400000)
   const clock = formatClock(date)
 
-  if (dayDiff === 0) return `今天 ${clock}`
-  if (dayDiff === 1) return `昨天 ${clock}`
+  if (dayDiff === 0) return `Today ${clock}`
+  if (dayDiff === 1) return `Yesterday ${clock}`
 
   if (date.getFullYear() === now.getFullYear()) {
     return `${padNumber(date.getMonth() + 1)}-${padNumber(date.getDate())} ${clock}`
@@ -58,18 +58,52 @@ function formatTokenCount(value) {
   return new Intl.NumberFormat('zh-CN').format(value)
 }
 
-function toolPartLabel(part) {
+function renderMarkdown(markdown) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+      {markdown || ''}
+    </ReactMarkdown>
+  )
+}
+
+function timelineToolLabel(part) {
+  const toolName = part?.tool_name || 'tool'
+  if (part?.status === 'waiting_approval') return `${toolName} waiting for approval`
+  if (part?.status === 'running') return `${toolName} running`
+  if (part?.status === 'completed') return `${toolName} completed`
+  if (part?.status === 'error') return `${toolName} failed`
+  if (part?.status === 'denied') return `${toolName} denied`
+  return `${toolName} queued`
+}
+
+function legacyToolLabel(part) {
   const toolName = part?.tool_name || 'tool'
   if (part?.type === 'approval') {
-    if (part?.status === 'granted') return `${toolName} 已批准`
-    if (part?.status === 'denied') return `${toolName} 已拒绝`
-    return `${toolName} 等待批准`
+    if (part?.status === 'granted') return `${toolName} approved`
+    if (part?.status === 'denied') return `${toolName} denied`
+    return `${toolName} waiting for approval`
   }
   if (part?.type === 'tool_call') {
-    return part?.status === 'running' ? `${toolName} 正在执行` : `${toolName} 已调用`
+    return part?.status === 'running' ? `${toolName} running` : `${toolName} called`
   }
-  if (part?.type === 'tool_result') return `${toolName} 已返回结果`
-  return `${toolName} 执行失败`
+  if (part?.type === 'tool_result') return `${toolName} result`
+  return `${toolName} failed`
+}
+
+function toolPartLabel(part) {
+  if (part?.type === 'tool_step') return timelineToolLabel(part)
+  return legacyToolLabel(part)
+}
+
+function toolPartContent(part) {
+  if (part?.type === 'tool_step') {
+    if (part?.status === 'completed') {
+      return part?.result_preview || part?.arguments_preview || ''
+    }
+    return part?.arguments_preview || part?.result_preview || ''
+  }
+  if (part?.type === 'tool_call') return part?.arguments_preview || ''
+  return part?.content || part?.message || ''
 }
 
 function ToolPartCard({
@@ -80,13 +114,14 @@ function ToolPartCard({
   canApproveToolCall,
 }) {
   const [expanded, setExpanded] = useState(false)
-  const content = part?.type === 'tool_call'
-    ? (part?.arguments_preview || '')
-    : (part?.content || part?.message || '')
+  const content = toolPartContent(part)
   const canToggle = !!String(content).trim()
-  const showApprovalActions = part?.type === 'approval'
-    && part?.status === 'requested'
-    && part?.tool_call_id
+  const approvalTarget = part?.tool_call_ref || part?.tool_call_id
+  const showApprovalActions = (
+    (part?.type === 'approval' && part?.status === 'requested')
+    || (part?.type === 'tool_step' && part?.status === 'waiting_approval')
+  )
+    && approvalTarget
     && canApproveToolCall !== false
     && (onApproveToolCall || onDenyToolCall)
 
@@ -135,7 +170,7 @@ function ToolPartCard({
         >
           <button
             type="button"
-            onClick={() => onDenyToolCall?.(part.tool_call_id)}
+            onClick={() => onDenyToolCall?.(approvalTarget)}
             disabled={isApprovalSubmitting}
             className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
@@ -144,11 +179,11 @@ function ToolPartCard({
               border: '1px solid var(--border)',
             }}
           >
-            拒绝
+            Deny
           </button>
           <button
             type="button"
-            onClick={() => onApproveToolCall?.(part.tool_call_id)}
+            onClick={() => onApproveToolCall?.(approvalTarget)}
             disabled={isApprovalSubmitting}
             className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
@@ -156,7 +191,7 @@ function ToolPartCard({
               color: 'var(--text-primary)',
             }}
           >
-            {isApprovalSubmitting ? '处理中…' : '批准'}
+            {isApprovalSubmitting ? 'Submitting' : 'Approve'}
           </button>
         </div>
       )}
@@ -164,7 +199,78 @@ function ToolPartCard({
   )
 }
 
-function AssistantBody({
+function ProcessedGroupCard({ item, defaultExpanded = false }) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
+  const commentary = Array.isArray(item?.commentary) ? item.commentary : []
+  const content = commentary
+    .map(entry => String(entry?.text || '').trim())
+    .filter(Boolean)
+    .join('\n\n')
+
+  if (!content) return null
+
+  return (
+    <div
+      className="my-3 rounded-2xl border overflow-hidden"
+      style={{
+        background: 'color-mix(in srgb, var(--bg-surface) 84%, transparent)',
+        borderColor: 'var(--border)',
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded(value => !value)}
+        className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left"
+        style={{ color: 'var(--text-secondary)' }}
+      >
+        <span className="text-xs">{item?.label || 'Processed'}</span>
+        <ChevronDown
+          className="w-3.5 h-3.5 shrink-0"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
+        />
+      </button>
+      {expanded && (
+        <div
+          className="px-3 py-2 text-xs whitespace-pre-wrap break-words border-t"
+          style={{
+            color: 'var(--text-primary)',
+            borderColor: 'var(--border)',
+            background: 'var(--bg-elevated)',
+          }}
+        >
+          {content}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function FinalAnswerBody({ message }) {
+  const parts = Array.isArray(message?.parts) ? message.parts : []
+  const textParts = parts.filter(part => part?.type === 'text' && String(part?.text || '').trim())
+
+  if (textParts.length > 0) {
+    return (
+      <div>
+        {textParts.map((part, index) => (
+          <div key={`text-${index}`} className="prose-chat">
+            {renderMarkdown(part.text || '')}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  if (!message?.content) return null
+
+  return (
+    <div className="prose-chat">
+      {renderMarkdown(message.content || '')}
+    </div>
+  )
+}
+
+function LegacyAssistantBody({
   message,
   onApproveToolCall,
   onDenyToolCall,
@@ -176,9 +282,7 @@ function AssistantBody({
   if (!parts || parts.length === 0) {
     return (
       <div className="prose-chat">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-          {message.content || ''}
-        </ReactMarkdown>
+        {renderMarkdown(message.content || '')}
       </div>
     )
   }
@@ -189,9 +293,7 @@ function AssistantBody({
         if (part?.type === 'text') {
           return (
             <div key={`part-${index}`} className="prose-chat">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
-                {part.text || ''}
-              </ReactMarkdown>
+              {renderMarkdown(part.text || '')}
             </div>
           )
         }
@@ -215,6 +317,61 @@ function AssistantBody({
   )
 }
 
+function AssistantBody({
+  message,
+  runView,
+  onApproveToolCall,
+  onDenyToolCall,
+  isApprovalSubmitting,
+  canApproveToolCall,
+}) {
+  const runItems = Array.isArray(runView?.items) ? runView.items : []
+
+  if (runItems.length === 0) {
+    return (
+      <LegacyAssistantBody
+        message={message}
+        onApproveToolCall={onApproveToolCall}
+        onDenyToolCall={onDenyToolCall}
+        isApprovalSubmitting={isApprovalSubmitting}
+        canApproveToolCall={canApproveToolCall}
+      />
+    )
+  }
+
+  return (
+    <div>
+      {runItems.map((item, index) => {
+        if (item?.type === 'tool_step') {
+          return (
+            <ToolPartCard
+              key={`timeline-${item?.step_id || index}`}
+              part={item}
+              onApproveToolCall={onApproveToolCall}
+              onDenyToolCall={onDenyToolCall}
+              isApprovalSubmitting={isApprovalSubmitting?.(item?.tool_call_ref)}
+              canApproveToolCall={canApproveToolCall?.(item?.tool_call_ref)}
+            />
+          )
+        }
+
+        if (item?.type === 'processed_group') {
+          return (
+            <ProcessedGroupCard
+              key={`timeline-${item?.group_id || index}`}
+              item={item}
+              defaultExpanded={item?.status === 'active'}
+            />
+          )
+        }
+
+        return null
+      })}
+      <FinalAnswerBody message={message} />
+    </div>
+  )
+}
+
 function IconButton({ label, onClick, disabled, children, pulse = false }) {
   return (
     <button
@@ -230,11 +387,11 @@ function IconButton({ label, onClick, disabled, children, pulse = false }) {
         opacity: disabled ? 0.7 : 1,
         cursor: disabled ? 'not-allowed' : 'pointer',
       }}
-      onMouseEnter={e => {
-        if (!disabled) e.currentTarget.style.background = 'var(--bg-elevated)'
+      onMouseEnter={event => {
+        if (!disabled) event.currentTarget.style.background = 'var(--bg-elevated)'
       }}
-      onMouseLeave={e => {
-        e.currentTarget.style.background = 'transparent'
+      onMouseLeave={event => {
+        event.currentTarget.style.background = 'transparent'
       }}
     >
       <span className={pulse ? 'animate-spin' : ''}>
@@ -249,13 +406,13 @@ function SiblingNavigator({ message, onPrevSibling, onNextSibling, disabled }) {
 
   return (
     <div className="flex items-center gap-1 text-xs" style={{ color: 'var(--text-muted)' }}>
-      <IconButton label="上一条分支" onClick={onPrevSibling} disabled={disabled}>
+      <IconButton label="Previous sibling" onClick={onPrevSibling} disabled={disabled}>
         <ChevronLeft className="w-3.5 h-3.5" />
       </IconButton>
       <span className="min-w-[44px] text-center">
         {message.sibling_index}/{message.sibling_count}
       </span>
-      <IconButton label="下一条分支" onClick={onNextSibling} disabled={disabled}>
+      <IconButton label="Next sibling" onClick={onNextSibling} disabled={disabled}>
         <ChevronRight className="w-3.5 h-3.5" />
       </IconButton>
     </div>
@@ -275,10 +432,10 @@ function InlineEditComposer({
   const textareaRef = useRef(null)
 
   useEffect(() => {
-    const ta = textareaRef.current
-    if (!ta) return
-    ta.style.height = 'auto'
-    ta.style.height = `${Math.min(ta.scrollHeight, 220)}px`
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`
   }, [value])
 
   function submit() {
@@ -318,7 +475,7 @@ function InlineEditComposer({
           className="px-3 py-1.5 rounded-xl text-sm transition disabled:opacity-50"
           style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
         >
-          取消
+          Cancel
         </button>
         <div className="relative">
           <div
@@ -335,7 +492,7 @@ function InlineEditComposer({
               disabled={!value.trim() || disabled}
               className="w-11 h-8 flex items-center justify-center transition disabled:cursor-not-allowed"
               style={{ color: 'var(--text-primary)' }}
-              aria-label="发送编辑"
+              aria-label="Submit edit"
             >
               <Send className="w-3.5 h-3.5" />
             </button>
@@ -346,7 +503,7 @@ function InlineEditComposer({
               disabled={disabled}
               className="w-10 h-8 flex items-center justify-center transition disabled:cursor-not-allowed"
               style={{ color: 'var(--text-primary)' }}
-              aria-label="选择编辑模式"
+              aria-label="Choose edit mode"
               title={EDIT_MODE_OPTIONS.find(option => option.value === mode)?.label || EDIT_MODE_OPTIONS[0].label}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
@@ -392,6 +549,7 @@ function InlineEditComposer({
 
 export default function MessageBubble({
   message,
+  runView = null,
   onRegenerate,
   onCreateBranch,
   onDelete,
@@ -424,7 +582,7 @@ export default function MessageBubble({
   const promptTokensLabel = formatTokenCount(Number(message.prompt_tokens))
   const completionTokensLabel = formatTokenCount(Number(message.completion_tokens))
   const usageLabel = !isUser && (promptTokensLabel || completionTokensLabel)
-    ? `输入 ${promptTokensLabel || 0} / 输出 ${completionTokensLabel || 0}`
+    ? `Input ${promptTokensLabel || 0} / Output ${completionTokensLabel || 0}`
     : ''
 
   if (isUser) {
@@ -462,27 +620,27 @@ export default function MessageBubble({
               )}
               <div className="flex items-center gap-1 ml-auto">
                 {!hideActions && onCopy && (
-                  <IconButton label="复制" onClick={onCopy} disabled={actionDisabled}>
+                  <IconButton label="Copy" onClick={onCopy} disabled={actionDisabled}>
                     <Copy className="w-3.5 h-3.5" />
                   </IconButton>
                 )}
                 {!hideActions && onEdit && (
-                  <IconButton label="编辑" onClick={onEdit} disabled={actionDisabled}>
+                  <IconButton label="Edit" onClick={onEdit} disabled={actionDisabled}>
                     <Pencil className="w-3.5 h-3.5" />
                   </IconButton>
                 )}
                 {!hideActions && onDelete && (
-                  <IconButton label={isDeleting ? '删除中' : '删除消息'} onClick={onDelete} disabled={actionDisabled}>
+                  <IconButton label={isDeleting ? 'Deleting' : 'Delete message'} onClick={onDelete} disabled={actionDisabled}>
                     <Trash2 className={`w-3.5 h-3.5 ${isDeleting ? 'animate-pulse' : ''}`} />
                   </IconButton>
                 )}
                 {!hideActions && onCreateBranch && (
-                  <IconButton label={isCreatingBranch ? '创建分支中' : '创建分支'} onClick={onCreateBranch} disabled={actionDisabled}>
+                  <IconButton label={isCreatingBranch ? 'Creating branch' : 'Create branch'} onClick={onCreateBranch} disabled={actionDisabled}>
                     <GitBranch className={`w-3.5 h-3.5 ${isCreatingBranch ? 'animate-pulse' : ''}`} />
                   </IconButton>
                 )}
                 {!hideActions && onRegenerate && (
-                  <IconButton label={isRegenerating ? '重新回答中' : '重新回答'} onClick={onRegenerate} disabled={actionDisabled}>
+                  <IconButton label={isRegenerating ? 'Regenerating' : 'Regenerate'} onClick={onRegenerate} disabled={actionDisabled}>
                     <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
                   </IconButton>
                 )}
@@ -509,6 +667,7 @@ export default function MessageBubble({
         >
           <AssistantBody
             message={message}
+            runView={runView}
             onApproveToolCall={onApproveToolCall}
             onDenyToolCall={onDenyToolCall}
             isApprovalSubmitting={isApprovalSubmitting}
@@ -516,7 +675,7 @@ export default function MessageBubble({
           />
           {message.status === 'failed' && (
             <p className="text-xs mt-1" style={{ color: 'var(--error-text)' }}>
-              {message.error_message || '生成失败'}
+              {message.error_message || 'Generation failed'}
             </p>
           )}
           {(timeLabel || usageLabel || !hideActions) && (
@@ -538,22 +697,22 @@ export default function MessageBubble({
                     disabled={actionDisabled}
                   />
                   {onCopy && (
-                    <IconButton label="复制" onClick={onCopy} disabled={actionDisabled}>
+                    <IconButton label="Copy" onClick={onCopy} disabled={actionDisabled}>
                       <Copy className="w-3.5 h-3.5" />
                     </IconButton>
                   )}
                   {onDelete && (
-                    <IconButton label={isDeleting ? '删除中' : '删除消息'} onClick={onDelete} disabled={actionDisabled}>
+                    <IconButton label={isDeleting ? 'Deleting' : 'Delete message'} onClick={onDelete} disabled={actionDisabled}>
                       <Trash2 className={`w-3.5 h-3.5 ${isDeleting ? 'animate-pulse' : ''}`} />
                     </IconButton>
                   )}
                   {onCreateBranch && (
-                    <IconButton label={isCreatingBranch ? '创建分支中' : '创建分支'} onClick={onCreateBranch} disabled={actionDisabled}>
+                    <IconButton label={isCreatingBranch ? 'Creating branch' : 'Create branch'} onClick={onCreateBranch} disabled={actionDisabled}>
                       <GitBranch className={`w-3.5 h-3.5 ${isCreatingBranch ? 'animate-pulse' : ''}`} />
                     </IconButton>
                   )}
                   {onRegenerate && (
-                    <IconButton label={isRegenerating ? '重新生成中' : '重新生成'} onClick={onRegenerate} disabled={actionDisabled}>
+                    <IconButton label={isRegenerating ? 'Regenerating' : 'Regenerate'} onClick={onRegenerate} disabled={actionDisabled}>
                       <RotateCw className={`w-3.5 h-3.5 ${isRegenerating ? 'animate-spin' : ''}`} />
                     </IconButton>
                   )}

@@ -120,6 +120,7 @@ export const api = {
     const qs = search.toString()
     return request('GET', `/api/conversations/${convId}/runs/${runId}/events${qs ? `?${qs}` : ''}`)
   },
+  getRunView: (convId, runId) => request('GET', `/api/conversations/${convId}/runs/${runId}/view`),
   approveRunTool: (convId, runId, data) => request('POST', `/api/conversations/${convId}/runs/${runId}/approve`, data),
   denyRunTool: (convId, runId, data) => request('POST', `/api/conversations/${convId}/runs/${runId}/deny`, data),
   getRunStreamPath: (convId, runId, params = {}) => {

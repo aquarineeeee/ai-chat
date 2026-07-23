@@ -21,6 +21,70 @@ DEFAULT_CACHE_CONTROL = {"type": "ephemeral"}
 DEFAULT_MAX_TOOL_ROUND_TRIPS = 99
 ToolExecutor = Callable[[str, str], Awaitable[str]]
 ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
+UsageCallback = Callable[[dict[str, int] | None], Awaitable[None]]
+
+
+class ReplyText(str):
+    usage: dict[str, int] | None
+
+    def __new__(cls, content: str, usage: dict[str, int] | None = None) -> "ReplyText":
+        instance = super().__new__(cls, content)
+        instance.usage = usage
+        return instance
+
+
+def _coerce_token_count(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_usage(data: dict[str, Any]) -> dict[str, int] | None:
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        return None
+
+    input_tokens = _coerce_token_count(usage.get("input_tokens"))
+    cache_creation_tokens = _coerce_token_count(usage.get("cache_creation_input_tokens"))
+    cache_read_tokens = _coerce_token_count(usage.get("cache_read_input_tokens"))
+    output_tokens = _coerce_token_count(usage.get("output_tokens"))
+    if all(value is None for value in (input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens)):
+        return None
+
+    prompt_tokens = sum(
+        value or 0
+        for value in (input_tokens, cache_creation_tokens, cache_read_tokens)
+    )
+    completion_tokens = output_tokens or 0
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+    }
+
+
+def _merge_usage(
+    current: dict[str, int] | None,
+    incoming: dict[str, int] | None,
+) -> dict[str, int] | None:
+    if incoming is None:
+        return current
+    if current is None:
+        return dict(incoming)
+    return {
+        "prompt_tokens": current.get("prompt_tokens", 0) + incoming.get("prompt_tokens", 0),
+        "completion_tokens": current.get("completion_tokens", 0) + incoming.get("completion_tokens", 0),
+        "total_tokens": current.get("total_tokens", 0) + incoming.get("total_tokens", 0),
+    }
 
 
 def normalize_anthropic_base_url(base_url: str | None) -> str | None:
@@ -363,14 +427,13 @@ async def _run_tool_round(
         tool_name = str(tool_use["name"])
         tool_input = tool_use.get("input")
         tool_arguments = _tool_arguments_json(tool_input) if isinstance(tool_input, dict) else "{}"
+        running_event: dict[str, object] = {
+            "name": tool_name,
+            "status": "running",
+            "arguments": tool_arguments,
+        }
         if event_callback is not None:
-            await event_callback(
-                {
-                    "name": tool_name,
-                    "status": "running",
-                    "arguments": tool_arguments,
-                }
-            )
+            await event_callback(running_event)
 
         tool_result = await tool_executor(tool_name, tool_arguments)
 
@@ -458,7 +521,9 @@ async def _stream_completion_round(
                 raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(fallback))
 
             accumulated_content = ""
+            emitted_content = ""
             content_blocks_by_index: dict[int, dict[str, object]] = {}
+            round_usage: dict[str, int] | None = None
 
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
@@ -480,6 +545,26 @@ async def _stream_completion_round(
                         message = str(error or "Anthropic 返回错误")
                     raise AppError(status_code=502, code="MODEL_ERROR", message=message)
 
+                if event_type == "message_start":
+                    message = data.get("message")
+                    if isinstance(message, dict):
+                        round_usage = _merge_usage(round_usage, _extract_usage(message))
+                    continue
+
+                if event_type == "message_delta":
+                    delta_usage = _extract_usage(data)
+                    if delta_usage is not None:
+                        # Anthropic's message_delta output_tokens is cumulative for
+                        # this request, so replace it rather than adding each delta.
+                        prompt_tokens = (round_usage or {}).get("prompt_tokens", 0)
+                        completion_tokens = delta_usage["completion_tokens"]
+                        round_usage = {
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
+                        }
+                    continue
+
                 if event_type == "content_block_start":
                     index = data.get("index")
                     if not isinstance(index, int):
@@ -494,6 +579,7 @@ async def _stream_completion_round(
                         content_blocks_by_index[index] = {"type": "text", "text": text}
                         if text:
                             accumulated_content += text
+                            emitted_content += text
                             yield {"type": "content", "content": text}
                     elif block_type == "tool_use":
                         tool_input = content_block.get("input")
@@ -526,6 +612,7 @@ async def _stream_completion_round(
                     block["type"] = "text"
                     block["text"] = str(block.get("text") or "") + text
                     accumulated_content += text
+                    emitted_content += text
                     yield {"type": "content", "content": text}
                 elif delta_type == "input_json_delta":
                     partial_json = str(delta.get("partial_json") or "")
@@ -547,13 +634,22 @@ async def _stream_completion_round(
             content_blocks = _finalize_stream_content_blocks(content_blocks_by_index)
             tool_uses = _extract_tool_uses(content_blocks)
             if tool_uses:
+                round_text_blocks = [
+                    str(content_blocks_by_index[index].get("text") or "")
+                    for index in sorted(content_blocks_by_index)
+                    if content_blocks_by_index[index].get("type") == "text"
+                    and str(content_blocks_by_index[index].get("text") or "")
+                ]
                 yield {
                     "type": "tool_uses",
                     "tool_uses": tool_uses,
                     "content_blocks": content_blocks,
+                    "emitted_content": emitted_content,
+                    "round_text_blocks": round_text_blocks,
+                    "usage": round_usage,
                 }
             else:
-                yield {"type": "done", "content": accumulated_content}
+                yield {"type": "done", "content": accumulated_content, "usage": round_usage}
     except AppError:
         raise
     except httpx.HTTPError as exc:
@@ -574,20 +670,21 @@ async def create_anthropic_reply(
     tools: list[dict[str, object]] | None = None,
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
-) -> str:
+) -> ReplyText:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/messages"
     if tools and tool_executor is None:
         raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(90.0, connect=15.0),
+        timeout=httpx.Timeout(180.0, connect=15.0),
         follow_redirects=True,
         trust_env=False,
         http2=False,
     ) as client:
         message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
+        total_usage: dict[str, int] | None = None
         for _ in range(max_rounds):
             payload = _messages_payload(
                 model=model,
@@ -613,6 +710,7 @@ async def create_anthropic_reply(
             try:
                 data = response.json()
                 content_blocks = _response_content_blocks(data)
+                total_usage = _merge_usage(total_usage, _extract_usage(data))
             except AppError:
                 raise
             except Exception as exc:
@@ -636,7 +734,7 @@ async def create_anthropic_reply(
 
             content = _stringify_content(content_blocks)
             if content:
-                return content
+                return ReplyText(content, total_usage)
             raise AppError(status_code=502, code="MODEL_ERROR", message="Anthropic 未返回内容")
 
     raise AppError(status_code=502, code="MODEL_ERROR", message="模型工具调用次数超出限制")
@@ -653,7 +751,8 @@ async def stream_anthropic_reply(
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
     tool_event_callback: ToolEventCallback | None = None,
-) -> AsyncIterator[str]:
+    usage_callback: UsageCallback | None = None,
+) -> AsyncIterator[dict[str, object]]:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/messages"
     if tools and tool_executor is None:
@@ -667,6 +766,7 @@ async def stream_anthropic_reply(
     ) as client:
         message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
+        total_usage: dict[str, int] | None = None
         for _ in range(max_rounds):
             payload = _messages_payload(
                 model=model,
@@ -678,8 +778,10 @@ async def stream_anthropic_reply(
             )
 
             round_content = ""
+            round_emitted_content = ""
             round_content_blocks: list[dict[str, object]] | None = None
             round_tool_uses: list[dict[str, object]] | None = None
+            round_text_blocks: list[str] = []
             async for event in _stream_completion_round(
                 client,
                 url=url,
@@ -687,16 +789,24 @@ async def stream_anthropic_reply(
                 payload=payload,
             ):
                 event_type = event.get("type")
+                total_usage = _merge_usage(
+                    total_usage,
+                    event.get("usage") if isinstance(event.get("usage"), dict) else None,
+                )
                 if event_type == "content":
                     content = str(event.get("content") or "")
                     if content:
                         round_content += content
-                        yield content
+                        round_emitted_content += content
+                        yield {"type": "content", "content": content}
                 elif event_type == "tool_uses":
                     content_blocks = event.get("content_blocks")
                     tool_uses = event.get("tool_uses")
+                    round_emitted_content = str(event.get("emitted_content") or round_emitted_content)
                     round_content_blocks = content_blocks if isinstance(content_blocks, list) else []
                     round_tool_uses = tool_uses if isinstance(tool_uses, list) else []
+                    text_blocks = event.get("round_text_blocks")
+                    round_text_blocks = [str(item) for item in text_blocks] if isinstance(text_blocks, list) else []
                 elif event_type == "done":
                     round_content = str(event.get("content") or round_content)
 
@@ -707,6 +817,10 @@ async def stream_anthropic_reply(
                         code="CONFIG_ERROR",
                         message="收到工具调用但未配置 tool_executor",
                     )
+                round_text_joined = "".join(round_text_blocks)
+                if round_text_joined:
+                    yield {"type": "content_retracted", "content": round_text_joined}
+                    yield {"type": "round_commentary", "text": round_text_joined}
                 await _run_tool_round(
                     message_history=message_history,
                     assistant_content_blocks=round_content_blocks or [],
@@ -717,6 +831,10 @@ async def stream_anthropic_reply(
                 continue
 
             if round_content:
+                if usage_callback is not None:
+                    await usage_callback(total_usage)
+                if len(round_emitted_content) < len(round_content) and round_content.startswith(round_emitted_content):
+                    yield {"type": "content", "content": round_content[len(round_emitted_content):]}
                 return
             raise AppError(status_code=502, code="MODEL_ERROR", message="Anthropic 未返回内容")
 

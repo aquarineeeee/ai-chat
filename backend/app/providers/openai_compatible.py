@@ -356,14 +356,17 @@ async def _run_tool_round(
         function = tool_call["function"]
         tool_name = str(function["name"])
         tool_arguments = str(function["arguments"])
+        running_event: dict[str, object] = {
+            "name": tool_name,
+            "status": "running",
+            "arguments": tool_arguments,
+        }
+        if index == 0 and assistant_content.strip():
+            running_event["commentary"] = assistant_content
+            running_event["commentary_source"] = "model"
+            running_event["commentary_style"] = "progress"
         if event_callback is not None:
-            await event_callback(
-                {
-                    "name": tool_name,
-                    "status": "running",
-                    "arguments": tool_arguments,
-                }
-            )
+            await event_callback(running_event)
         tool_result = await tool_executor(tool_name, tool_arguments)
         if event_callback is not None:
             await event_callback(
@@ -402,6 +405,7 @@ async def _stream_completion_round(
                 raise AppError(status_code=502, code="MODEL_ERROR", message=_extract_error_message(fallback))
 
             accumulated_content = ""
+            emitted_content = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
             saw_tool_calls = False
             usage: dict[str, int] | None = None
@@ -446,6 +450,7 @@ async def _stream_completion_round(
                 if content:
                     accumulated_content += content
                     if not saw_tool_calls:
+                        emitted_content += content
                         yield {"type": "content", "content": content}
 
             tool_calls = _finalize_stream_tool_calls(tool_calls_by_index)
@@ -454,6 +459,7 @@ async def _stream_completion_round(
                     "type": "tool_calls",
                     "tool_calls": tool_calls,
                     "content": accumulated_content,
+                    "emitted_content": emitted_content,
                     "usage": usage,
                 }
             else:
@@ -532,6 +538,7 @@ async def create_openai_compatible_reply(
                     message_history=message_history,
                     tool_calls=tool_calls,
                     tool_executor=tool_executor,
+                    assistant_content=_stringify_content(message.get("content")),
                 )
                 continue
 
@@ -581,6 +588,7 @@ async def stream_openai_compatible_reply(
             )
 
             round_content = ""
+            round_emitted_content = ""
             round_tool_calls: list[dict[str, Any]] | None = None
             async for event in _stream_completion_round(
                 client,
@@ -597,9 +605,11 @@ async def stream_openai_compatible_reply(
                     content = str(event.get("content") or "")
                     if content:
                         round_content += content
+                        round_emitted_content += content
                         yield {"type": "content", "content": content}
                 elif event_type == "tool_calls":
                     round_content = str(event.get("content") or round_content)
+                    round_emitted_content = str(event.get("emitted_content") or round_emitted_content)
                     tool_calls = event.get("tool_calls")
                     round_tool_calls = tool_calls if isinstance(tool_calls, list) else []
                 elif event_type == "done":
@@ -624,6 +634,8 @@ async def stream_openai_compatible_reply(
             if round_content:
                 if usage_callback is not None:
                     await usage_callback(total_usage)
+                if len(round_emitted_content) < len(round_content) and round_content.startswith(round_emitted_content):
+                    yield {"type": "content", "content": round_content[len(round_emitted_content):]}
                 return
             raise AppError(status_code=502, code="MODEL_ERROR", message="上游模型未返回内容")
 

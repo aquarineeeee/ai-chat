@@ -421,6 +421,73 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_build_prompt_messages_can_limit_context_to_last_n_messages(self) -> None:
+        conversation = Conversation(user_id=1, system_prompt="system")
+        now = datetime.now(UTC)
+        history = [
+            Message(
+                id=1,
+                conversation_id=1,
+                parent_id=None,
+                role=MessageRole.USER,
+                content="u1",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+            Message(
+                id=2,
+                conversation_id=1,
+                parent_id=1,
+                role=MessageRole.ASSISTANT,
+                content="a1",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+            Message(
+                id=3,
+                conversation_id=1,
+                parent_id=2,
+                role=MessageRole.USER,
+                content="u2",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+            Message(
+                id=4,
+                conversation_id=1,
+                parent_id=3,
+                role=MessageRole.ASSISTANT,
+                content="a2",
+                status=MessageStatus.COMPLETED,
+                created_at=now,
+                updated_at=now,
+            ),
+        ]
+
+        with patch("app.services.messages.search_memory", AsyncMock(return_value=None)):
+            prompt_messages = await messages._build_prompt_messages(
+                session=AsyncMock(),
+                conversation=conversation,
+                parent_id=4,
+                history=history,
+                context_mode="last_n",
+                context_message_count=2,
+                context_root_message_id=3,
+            )
+
+        self.assertEqual(
+            prompt_messages,
+            [
+                {"role": "system", "content": "system"},
+                {"role": "user", "content": "u1"},
+                {"role": "assistant", "content": "a1"},
+                {"role": "user", "content": "u2"},
+            ],
+        )
+
     async def test_generate_reply_for_openai_uses_memory_tools(self) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1)
@@ -580,6 +647,51 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant_message.status, MessageStatus.COMPLETED)
         self.assertEqual(run.status, messages.RUN_STATUS_COMPLETED)
         session.commit.assert_awaited_once()
+
+    async def test_finalize_success_emits_completed_snapshot_payload(self) -> None:
+        session = AsyncMock()
+        conversation = Conversation(user_id=1)
+        run = AgentRun(id=1, conversation_id=1, provider="openai", model="gpt-4.1-mini", status="running")
+        now = datetime.now(UTC)
+        assistant_message = Message(
+            id=2,
+            conversation_id=1,
+            parent_id=1,
+            role=MessageRole.ASSISTANT,
+            content="",
+            status=MessageStatus.STREAMING,
+            parts_json=messages.json_dumps(
+                [
+                    {"type": "tool_call", "tool_call_id": "tc_1", "tool_name": "memory_search", "status": "completed"},
+                    {"type": "tool_result", "tool_call_id": "tc_1", "tool_name": "memory_search", "status": "completed", "content": "found"},
+                ]
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+        record_run_event = AsyncMock()
+
+        with patch("app.services.messages._record_run_event", record_run_event):
+            await messages._finalize_success(
+                session=session,
+                context={
+                    "agent_run": run,
+                    "assistant_message": assistant_message,
+                    "conversation": conversation,
+                },
+                conversation=conversation,
+                branch=None,
+                assistant_message=assistant_message,
+                reply_content="工具调用后的最终答案",
+                usage=None,
+                activate_branch=True,
+            )
+
+        payload = record_run_event.await_args.kwargs["payload"]
+        self.assertEqual(payload["content"], "工具调用后的最终答案")
+        self.assertEqual(payload["parts"][-1], {"type": "text", "text": "工具调用后的最终答案"})
+        self.assertEqual(messages.parts_from_message(assistant_message.parts_json), payload["parts"])
+        self.assertEqual(payload["parts_schema_version"], messages.PARTS_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

@@ -327,7 +327,13 @@ class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
             ):
                 chunks.append(chunk)
 
-        self.assertEqual(chunks, ["最终", "回答"])
+        self.assertEqual(
+            chunks,
+            [
+                {"type": "content", "content": "最终"},
+                {"type": "content", "content": "回答"},
+            ],
+        )
         self.assertEqual(
             tool_events,
             [
@@ -353,6 +359,224 @@ class AnthropicToolingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_messages[1]["content"][0]["id"], "toolu-1")
         self.assertEqual(second_messages[2]["role"], "user")
         self.assertEqual(second_messages[2]["content"][0]["content"], "以下是长期记忆检索结果，仅供参考。\n项目约束")
+
+    async def test_stream_reply_retracts_and_records_commentary_for_tool_round_preamble(self) -> None:
+        api_key = ApiKey(provider="anthropic", key_encrypted="encrypted")
+        first_lines = [
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"让我先查一下记忆"}}',
+            'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu-1","name":"memory_search","input":{}}}',
+            'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"x\\"}"}}',
+            'data: {"type":"message_stop"}',
+        ]
+        second_lines = [
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"最终回答"}}',
+            'data: {"type":"message_stop"}',
+        ]
+
+        class FakeStreamResponse:
+            def __init__(self, lines):
+                self.status_code = 200
+                self.headers = {}
+                self.request = httpx.Request("POST", "https://example.com/v1/messages")
+                self._lines = list(lines)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def aiter_lines(self):
+                for line in self._lines:
+                    yield line
+
+            async def aread(self):
+                return b""
+
+        class FakeClient:
+            def __init__(self, streams):
+                self._streams = list(streams)
+                self.requests: list[dict[str, object]] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, _method, _url, headers=None, json=None):
+                self.requests.append({"headers": headers, "json": json})
+                return self._streams.pop(0)
+
+        fake_client = FakeClient([FakeStreamResponse(first_lines), FakeStreamResponse(second_lines)])
+        tool_executor = AsyncMock(return_value="ok")
+
+        with (
+            patch("app.providers.anthropic.decrypt_text", return_value="secret"),
+            patch("app.providers.anthropic.httpx.AsyncClient", return_value=fake_client),
+        ):
+            chunks = []
+            async for chunk in stream_anthropic_reply(
+                api_key=api_key,
+                model="claude-sonnet-4-20250514",
+                transcript=[user_text_item("继续")],
+                temperature=None,
+                max_tokens=800,
+                tools=[memory_search_tool_definition()],
+                tool_executor=tool_executor,
+            ):
+                chunks.append(chunk)
+
+        self.assertEqual(
+            chunks,
+            [
+                {"type": "content", "content": "让我先查一下记忆"},
+                {"type": "content_retracted", "content": "让我先查一下记忆"},
+                {"type": "round_commentary", "text": "让我先查一下记忆"},
+                {"type": "content", "content": "最终回答"},
+            ],
+        )
+
+    async def test_stream_reply_pure_text_round_emits_no_retraction(self) -> None:
+        api_key = ApiKey(provider="anthropic", key_encrypted="encrypted")
+        lines = [
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"直接回答"}}',
+            'data: {"type":"message_stop"}',
+        ]
+
+        class FakeStreamResponse:
+            def __init__(self, lines):
+                self.status_code = 200
+                self.headers = {}
+                self.request = httpx.Request("POST", "https://example.com/v1/messages")
+                self._lines = list(lines)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def aiter_lines(self):
+                for line in self._lines:
+                    yield line
+
+            async def aread(self):
+                return b""
+
+        class FakeClient:
+            def __init__(self, streams):
+                self._streams = list(streams)
+                self.requests: list[dict[str, object]] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, _method, _url, headers=None, json=None):
+                self.requests.append({"headers": headers, "json": json})
+                return self._streams.pop(0)
+
+        fake_client = FakeClient([FakeStreamResponse(lines)])
+
+        with (
+            patch("app.providers.anthropic.decrypt_text", return_value="secret"),
+            patch("app.providers.anthropic.httpx.AsyncClient", return_value=fake_client),
+        ):
+            chunks = []
+            async for chunk in stream_anthropic_reply(
+                api_key=api_key,
+                model="claude-sonnet-4-20250514",
+                transcript=[user_text_item("你好")],
+                temperature=None,
+                max_tokens=800,
+            ):
+                chunks.append(chunk)
+
+        self.assertEqual(chunks, [{"type": "content", "content": "直接回答"}])
+        self.assertTrue(all(chunk["type"] == "content" for chunk in chunks))
+
+    async def test_stream_reply_multi_tool_single_round_retracts_preamble_once(self) -> None:
+        api_key = ApiKey(provider="anthropic", key_encrypted="encrypted")
+        first_lines = [
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"我需要用两个工具"}}',
+            'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu-1","name":"memory_search","input":{}}}',
+            'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"a\\"}"}}',
+            'data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu-2","name":"memory_search","input":{}}}',
+            'data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\\"query\\":\\"b\\"}"}}',
+            'data: {"type":"message_stop"}',
+        ]
+        second_lines = [
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"最终"}}',
+            'data: {"type":"message_stop"}',
+        ]
+
+        class FakeStreamResponse:
+            def __init__(self, lines):
+                self.status_code = 200
+                self.headers = {}
+                self.request = httpx.Request("POST", "https://example.com/v1/messages")
+                self._lines = list(lines)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def aiter_lines(self):
+                for line in self._lines:
+                    yield line
+
+            async def aread(self):
+                return b""
+
+        class FakeClient:
+            def __init__(self, streams):
+                self._streams = list(streams)
+                self.requests: list[dict[str, object]] = []
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def stream(self, _method, _url, headers=None, json=None):
+                self.requests.append({"headers": headers, "json": json})
+                return self._streams.pop(0)
+
+        fake_client = FakeClient([FakeStreamResponse(first_lines), FakeStreamResponse(second_lines)])
+        tool_executor = AsyncMock(side_effect=["result-a", "result-b"])
+
+        with (
+            patch("app.providers.anthropic.decrypt_text", return_value="secret"),
+            patch("app.providers.anthropic.httpx.AsyncClient", return_value=fake_client),
+        ):
+            chunks = []
+            async for chunk in stream_anthropic_reply(
+                api_key=api_key,
+                model="claude-sonnet-4-20250514",
+                transcript=[user_text_item("继续")],
+                temperature=None,
+                max_tokens=800,
+                tools=[memory_search_tool_definition()],
+                tool_executor=tool_executor,
+            ):
+                chunks.append(chunk)
+
+        retracted_chunks = [chunk for chunk in chunks if chunk["type"] == "content_retracted"]
+        commentary_chunks = [chunk for chunk in chunks if chunk["type"] == "round_commentary"]
+        self.assertEqual(retracted_chunks, [{"type": "content_retracted", "content": "我需要用两个工具"}])
+        self.assertEqual(commentary_chunks, [{"type": "round_commentary", "text": "我需要用两个工具"}])
+        self.assertEqual(tool_executor.await_count, 2)
 
 
 class AnthropicModelListTests(unittest.IsolatedAsyncioTestCase):

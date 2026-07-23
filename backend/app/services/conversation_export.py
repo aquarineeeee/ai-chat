@@ -441,6 +441,7 @@ def _serialize_run_event(event: RunEvent) -> dict[str, object]:
         "event_id": event.event_id,
         "run_id": event.run_id,
         "assistant_message_id": event.assistant_message_id,
+        "step_id": event.step_id,
         "tool_call_ref": event.tool_call_ref,
         "sequence": event.sequence,
         "event_type": event.event_type,

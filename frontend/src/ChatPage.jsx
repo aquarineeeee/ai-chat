@@ -16,6 +16,8 @@ const MIN_BRANCH_PANE_WIDTH = 280
 const MAX_BRANCH_PANE_WIDTH = 760
 const MIN_MAIN_PANEL_WIDTH = 320
 const BRANCH_PANE_WIDTH_STORAGE_KEY = 'ai-chat.branch-pane-width'
+const STREAM_INACTIVITY_TIMEOUT_MS = 60000
+const DEFAULT_BRANCH_CONTEXT_MESSAGE_COUNT = 6
 
 function clampBranchPaneWidth(width, containerWidth) {
   if (!Number.isFinite(width)) return DEFAULT_BRANCH_PANE_WIDTH
@@ -62,6 +64,7 @@ function createBranchPane(sourceMessage, branch = null) {
     messages: [sourceMessage],
     currentLeafMessageId: sourceMessage.id,
     contextMode: 'full',
+    contextMessageCount: DEFAULT_BRANCH_CONTEXT_MESSAGE_COUNT,
     loading: true,
     sending: false,
     regeneratingMessageId: null,
@@ -75,6 +78,22 @@ function createBranchPane(sourceMessage, branch = null) {
     streamingAssistantId: null,
     error: '',
     openedAt: Date.now(),
+  }
+}
+
+function buildBranchContextPayload(pane) {
+  const contextMessageCount = Number.isInteger(pane.contextMessageCount) && pane.contextMessageCount > 0
+    ? pane.contextMessageCount
+    : DEFAULT_BRANCH_CONTEXT_MESSAGE_COUNT
+
+  return {
+    context_mode: pane.contextMode,
+    ...(pane.contextMode === 'last_n'
+      ? {
+          context_message_count: contextMessageCount,
+          context_root_message_id: pane.rootMessageId,
+        }
+      : {}),
   }
 }
 
@@ -143,11 +162,17 @@ function buildRunEventFromChunk(chunk, fallbackAssistantMessageId = null) {
   if (!chunk?.type) return null
   return {
     type: chunk.type,
+    run_id: chunk.run_id || null,
     payload: chunk.payload && typeof chunk.payload === 'object' ? chunk.payload : {},
     tool_call_ref: chunk.tool_call_ref || null,
     assistant_message_id: chunk.assistant_message_id ?? fallbackAssistantMessageId,
+    step_id: chunk.step_id || null,
     sequence: Number.isFinite(chunk.sequence) ? Number(chunk.sequence) : null,
   }
+}
+
+function isAbortError(error) {
+  return error?.name === 'AbortError'
 }
 
 function dedupeRuns(runs) {
@@ -163,7 +188,17 @@ function mapRunsByAssistantMessage(runs) {
   const byAssistantMessageId = {}
   for (const run of runs) {
     if (!run?.assistant_message_id) continue
+    if (!ACTIVE_RUN_STATUSES.includes(run?.status)) continue
     byAssistantMessageId[run.assistant_message_id] = run
+  }
+  return byAssistantMessageId
+}
+
+function mapRunIdsByAssistantMessage(runs) {
+  const byAssistantMessageId = {}
+  for (const run of runs) {
+    if (!run?.assistant_message_id || !run?.id) continue
+    byAssistantMessageId[run.assistant_message_id] = run.id
   }
   return byAssistantMessageId
 }
@@ -192,6 +227,22 @@ function applyRunEventToParts(parts, event) {
       nextParts.push({ type: 'text', text })
     }
     return nextParts
+  }
+
+  if (type === 'message.text.retracted') {
+    let remaining = String(payload?.text || '').length
+    if (!remaining) return nextParts
+
+    for (let index = nextParts.length - 1; index >= 0 && remaining > 0; index -= 1) {
+      const part = nextParts[index]
+      if (part?.type !== 'text') continue
+      const currentText = String(part.text || '')
+      const removeCount = Math.min(currentText.length, remaining)
+      part.text = currentText.slice(0, currentText.length - removeCount)
+      remaining -= removeCount
+    }
+
+    return nextParts.filter(part => part?.type !== 'text' || String(part?.text || '').length > 0)
   }
 
   if (type === 'tool_call.created') {
@@ -291,6 +342,16 @@ function applyRunEventToMessage(message, event) {
   }
 
   if (event.type === 'message.completed') {
+    const completedParts = Array.isArray(event.payload?.parts)
+      ? cloneParts(event.payload.parts)
+      : nextParts
+    nextMessage.parts = completedParts
+    nextMessage.content = typeof event.payload?.content === 'string'
+      ? event.payload.content
+      : aggregateTextFromParts(completedParts)
+    nextMessage.parts_schema_version = Number.isFinite(Number(event.payload?.parts_schema_version))
+      ? Number(event.payload.parts_schema_version)
+      : (message.parts_schema_version || 1)
     nextMessage.status = 'completed'
     nextMessage.error_message = null
     return nextMessage
@@ -304,6 +365,211 @@ function applyRunEventToMessage(message, event) {
 
   nextMessage.status = 'streaming'
   return nextMessage
+}
+
+function createRunView(runId, assistantMessageId = null) {
+  return {
+    run_id: runId,
+    assistant_message_id: assistantMessageId,
+    status: 'running',
+    phase: null,
+    last_sequence: 0,
+    pending_approval: null,
+    items: [],
+  }
+}
+
+function findTimelineIndex(items, predicate) {
+  return items.findIndex(predicate)
+}
+
+function ensureToolStepItem(items, event) {
+  const stepId = event?.step_id || `legacy-${event?.tool_call_ref || items.length}`
+  const toolCallRef = event?.tool_call_ref || null
+  let index = findTimelineIndex(items, item => item?.type === 'tool_step' && item?.step_id === stepId)
+
+  if (index < 0 && toolCallRef) {
+    index = findTimelineIndex(items, item => item?.type === 'tool_step' && item?.tool_call_ref === toolCallRef)
+  }
+
+  if (index >= 0) {
+    return { items, index, item: { ...items[index] } }
+  }
+
+  const nextItem = {
+    type: 'tool_step',
+    step_id: stepId,
+    tool_call_ref: toolCallRef,
+    tool_name: event?.payload?.tool_name || '',
+    status: 'pending',
+    started_at: null,
+    completed_at: null,
+    arguments_preview: event?.payload?.display_input_preview || '',
+    result_preview: '',
+  }
+  return {
+    items: [...items, nextItem],
+    index: items.length,
+    item: nextItem,
+  }
+}
+
+function ensureProcessedGroupItem(items, stepId) {
+  const index = findTimelineIndex(items, item => item?.type === 'processed_group' && item?.step_id === stepId)
+  if (index >= 0) {
+    return { items, index, item: { ...items[index] } }
+  }
+
+  const group = {
+    type: 'processed_group',
+    group_id: `pg_${stepId}`,
+    step_id: stepId,
+    label: 'Processed',
+    status: 'active',
+    created_at: null,
+    commentary: [],
+  }
+
+  const toolIndex = findTimelineIndex(items, item => item?.type === 'tool_step' && item?.step_id === stepId)
+  if (toolIndex < 0) {
+    return {
+      items: [...items, group],
+      index: items.length,
+      item: group,
+    }
+  }
+
+  const nextItems = [...items]
+  nextItems.splice(toolIndex + 1, 0, group)
+  return {
+    items: nextItems,
+    index: toolIndex + 1,
+    item: group,
+  }
+}
+
+function applyRunEventToRunView(runView, event) {
+  if (!event?.run_id) return runView
+
+  const nextView = runView
+    ? { ...runView, items: Array.isArray(runView.items) ? [...runView.items] : [] }
+    : createRunView(event.run_id, event.assistant_message_id || null)
+
+  nextView.assistant_message_id = event.assistant_message_id ?? nextView.assistant_message_id
+  nextView.last_sequence = Number.isFinite(event?.sequence)
+    ? Math.max(Number(event.sequence) || 0, Number(nextView.last_sequence) || 0)
+    : nextView.last_sequence
+
+  const payload = event?.payload || {}
+
+  if (event.type === 'run.phase.changed') {
+    nextView.phase = payload?.phase || nextView.phase
+    return nextView
+  }
+
+  if (event.type === 'tool_call.approval.requested') {
+    nextView.pending_approval = {
+      tool_call_ref: event.tool_call_ref || null,
+      step_id: event.step_id || null,
+      tool_name: payload?.tool_name || '',
+      arguments_preview: payload?.display_input_preview || '',
+    }
+  } else if (event.type === 'tool_call.approval.granted' || event.type === 'tool_call.approval.denied') {
+    nextView.pending_approval = null
+  }
+
+  if (event.type.startsWith('tool_call.')) {
+    const ensured = ensureToolStepItem(nextView.items, event)
+    const item = { ...ensured.item }
+    item.tool_call_ref = event.tool_call_ref || item.tool_call_ref
+    item.tool_name = payload?.tool_name || item.tool_name
+    if (payload?.display_input_preview !== undefined) item.arguments_preview = payload.display_input_preview || ''
+    if (payload?.display_output_preview !== undefined) item.result_preview = payload.display_output_preview || ''
+    if (event.type === 'tool_call.created') item.status = 'pending'
+    if (event.type === 'tool_call.arguments.completed') item.status = 'ready'
+    if (event.type === 'tool_call.approval.requested') item.status = 'waiting_approval'
+    if (event.type === 'tool_call.approval.granted') item.status = 'ready'
+    if (event.type === 'tool_call.approval.denied') item.status = 'denied'
+    if (event.type === 'tool_call.started') {
+      item.status = 'running'
+      item.started_at = item.started_at || new Date().toISOString()
+    }
+    if (event.type === 'tool_call.completed') {
+      item.status = 'completed'
+      item.completed_at = item.completed_at || new Date().toISOString()
+    }
+    if (event.type === 'tool_call.failed') {
+      item.status = 'error'
+      item.completed_at = item.completed_at || new Date().toISOString()
+    }
+    const nextItems = [...ensured.items]
+    nextItems[ensured.index] = item
+    nextView.items = nextItems
+    return nextView
+  }
+
+  if (event.type.startsWith('commentary.') && event.step_id) {
+    const ensured = ensureProcessedGroupItem(nextView.items, event.step_id)
+    const group = {
+      ...ensured.item,
+      label: ensured.item?.label || 'Processed',
+      commentary: Array.isArray(ensured.item?.commentary) ? [...ensured.item.commentary] : [],
+    }
+
+    const commentaryId = payload?.commentary_id || `cm_${event.sequence}`
+    const commentaryIndex = group.commentary.findIndex(item => item?.commentary_id === commentaryId)
+    const currentCommentary = commentaryIndex >= 0
+      ? { ...group.commentary[commentaryIndex] }
+      : {
+          commentary_id: commentaryId,
+          text: '',
+          source: payload?.source || 'model',
+          style: payload?.style || 'progress',
+        }
+
+    currentCommentary.source = payload?.source || currentCommentary.source
+    currentCommentary.style = payload?.style || currentCommentary.style
+    if (event.type === 'commentary.created') currentCommentary.text = payload?.text || ''
+    if (event.type === 'commentary.delta') currentCommentary.text = `${currentCommentary.text || ''}${payload?.text || ''}`
+    if (event.type === 'commentary.completed' && payload?.text) currentCommentary.text = payload.text
+
+    if (commentaryIndex >= 0) {
+      group.commentary[commentaryIndex] = currentCommentary
+    } else {
+      group.commentary.push(currentCommentary)
+    }
+
+    group.status = 'active'
+    group.created_at = group.created_at || new Date().toISOString()
+
+    const nextItems = [...ensured.items]
+    nextItems[ensured.index] = group
+    nextView.items = nextItems
+    return nextView
+  }
+
+  if (event.type === 'message.completed') {
+    nextView.status = 'completed'
+    nextView.pending_approval = null
+    nextView.items = nextView.items.map(item => (
+      item?.type === 'processed_group'
+        ? { ...item, status: 'completed' }
+        : item
+    ))
+    return nextView
+  }
+
+  if (event.type === 'run.failed') {
+    nextView.status = 'failed'
+    return nextView
+  }
+
+  if (event.type === 'run.cancelled') {
+    nextView.status = 'cancelled'
+    return nextView
+  }
+
+  return nextView
 }
 
 async function consumeSseJsonStream(response, onChunk) {
@@ -344,6 +610,85 @@ async function consumeSseJsonStream(response, onChunk) {
   }
 
   return { sawDone }
+}
+
+async function consumeRunStream(response, {
+  fallbackAssistantMessageId = null,
+  abortController = null,
+  inactivityTimeoutMs = STREAM_INACTIVITY_TIMEOUT_MS,
+  onChunk,
+} = {}) {
+  let streamRunId = null
+  let lastSequence = 0
+  let streamAssistantId = fallbackAssistantMessageId
+  let sawEvent = false
+  let timedOut = false
+  let inactivityTimer = null
+
+  function clearInactivityTimer() {
+    if (inactivityTimer !== null) {
+      window.clearTimeout(inactivityTimer)
+      inactivityTimer = null
+    }
+  }
+
+  function resetInactivityTimer() {
+    clearInactivityTimer()
+    if (!abortController || inactivityTimeoutMs <= 0) return
+    inactivityTimer = window.setTimeout(() => {
+      timedOut = true
+      abortController.abort()
+    }, inactivityTimeoutMs)
+  }
+
+  resetInactivityTimer()
+
+  try {
+    const { sawDone } = await consumeSseJsonStream(response, chunk => {
+      sawEvent = true
+      resetInactivityTimer()
+
+      if (chunk?.run?.id) {
+        streamRunId = chunk.run.id
+        lastSequence = Number(chunk.run.sequence) || lastSequence
+      }
+      if (chunk?.run?.assistant_message_id) {
+        streamAssistantId = chunk.run.assistant_message_id
+      }
+      if (Number.isFinite(chunk?.sequence)) {
+        lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
+      }
+
+      onChunk?.(chunk, {
+        streamRunId,
+        lastSequence,
+        streamAssistantId,
+      })
+    })
+
+    return {
+      sawDone,
+      sawEvent,
+      timedOut,
+      streamRunId,
+      lastSequence,
+      streamAssistantId,
+    }
+  } catch (error) {
+    if (timedOut && isAbortError(error)) {
+      return {
+        sawDone: false,
+        sawEvent,
+        timedOut,
+        streamRunId,
+        lastSequence,
+        streamAssistantId,
+      }
+    }
+    throw error
+  } finally {
+    clearInactivityTimer()
+  }
 }
 
 function rebuildMessageFromEvents(message, run, events) {
@@ -450,6 +795,8 @@ export default function ChatPage() {
   const [loadingBranches, setLoadingBranches] = useState({})
   const [branchPanes, setBranchPanes] = useState([])
   const [activeRunsByAssistantId, setActiveRunsByAssistantId] = useState({})
+  const [runViewsByRunId, setRunViewsByRunId] = useState({})
+  const [runIdByAssistantMessageId, setRunIdByAssistantMessageId] = useState({})
   const [approvalActions, setApprovalActions] = useState({})
   const [messageTreeOpen, setMessageTreeOpen] = useState(false)
   const [messageTreeRefreshToken, setMessageTreeRefreshToken] = useState(0)
@@ -582,17 +929,65 @@ export default function ChatPage() {
   }, [])
 
   const patchActiveRuns = useCallback((runs) => {
-    setActiveRunsByAssistantId(mapRunsByAssistantMessage(runs))
+    const items = Array.isArray(runs) ? runs : []
+    setActiveRunsByAssistantId(mapRunsByAssistantMessage(items))
+    setRunIdByAssistantMessageId(mapRunIdsByAssistantMessage(items))
   }, [])
+
+  const getRunViewForAssistant = useCallback((assistantMessageId) => {
+    const runId = runIdByAssistantMessageId[assistantMessageId]
+    if (!runId) return null
+    return runViewsByRunId[runId] || null
+  }, [runIdByAssistantMessageId, runViewsByRunId])
+
+  const hydrateRunViewsForMessages = useCallback(async (conversationId, messageItems) => {
+    if (!conversationId) {
+      patchActiveRuns([])
+      setRunViewsByRunId({})
+      setRunIdByAssistantMessageId({})
+      return
+    }
+
+    const assistantMessageIds = new Set(
+      (Array.isArray(messageItems) ? messageItems : [])
+        .filter(message => message?.role === 'assistant' && message?.id)
+        .map(message => message.id),
+    )
+
+    const runsData = await api.getAgentRuns(conversationId)
+    const allRuns = runsData?.items || []
+    patchActiveRuns(allRuns)
+
+    const visibleRuns = allRuns.filter(run => assistantMessageIds.has(run?.assistant_message_id))
+    const views = await Promise.all(
+      visibleRuns.map(async run => {
+        try {
+          const view = await api.getRunView(conversationId, run.id)
+          return [run.id, view]
+        } catch {
+          return [run.id, null]
+        }
+      }),
+    )
+
+    setRunViewsByRunId(current => {
+      const next = { ...current }
+      for (const [runId, view] of views) {
+        if (view) next[runId] = view
+      }
+      return next
+    })
+  }, [patchActiveRuns])
 
   const refreshMessages = useCallback(async (conversationId) => {
     const data = await api.getMessages(conversationId)
-    const recoveredItems = await recoverMessagesFromRuns(conversationId, data?.items || [])
-    setMessages(recoveredItems)
+    const items = data?.items || []
+    setMessages(items)
+    await hydrateRunViewsForMessages(conversationId, items)
     patchConversationBranchState(conversationId, data)
     setMessageTreeRefreshToken(token => token + 1)
-    return { ...data, items: recoveredItems }
-  }, [patchConversationBranchState])
+    return { ...data, items }
+  }, [hydrateRunViewsForMessages, patchConversationBranchState])
 
   const refreshBranchPane = useCallback(async (conversationId, paneId, options = {}) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -603,17 +998,18 @@ export default function ChatPage() {
       leafMessageId: options.leafMessageId,
       expandLeaf: options.expandLeaf,
     })
-    const recoveredItems = await recoverMessagesFromRuns(conversationId, data?.items || [])
+    const items = data?.items || []
+    await hydrateRunViewsForMessages(conversationId, items)
 
     patchBranchPane(paneId, current => ({
       ...current,
       loading: false,
-      messages: recoveredItems,
+      messages: items,
       currentLeafMessageId: data?.current_leaf_message_id ?? current.currentLeafMessageId,
       error: '',
     }))
-    return { ...data, items: recoveredItems }
-  }, [branchPanes, patchBranchPane])
+    return { ...data, items }
+  }, [branchPanes, hydrateRunViewsForMessages, patchBranchPane])
 
   const refreshBranchPanesSnapshot = useCallback(async (conversationId, panesSnapshot, deletedMessageId = null) => {
     if (!panesSnapshot.length) return
@@ -629,8 +1025,9 @@ export default function ChatPage() {
 
       try {
         const data = await api.getMessages(conversationId, { rootMessageId: pane.rootMessageId })
-        const recoveredItems = await recoverMessagesFromRuns(conversationId, data?.items || [])
-        updates.push({ paneId: pane.id, data: { ...data, items: recoveredItems } })
+        const items = data?.items || []
+        await hydrateRunViewsForMessages(conversationId, items)
+        updates.push({ paneId: pane.id, data: { ...data, items } })
       } catch {
         idsToClose.push(pane.id)
       }
@@ -649,7 +1046,7 @@ export default function ChatPage() {
         error: '',
       }))
     }
-  }, [patchBranchPane])
+  }, [hydrateRunViewsForMessages, patchBranchPane])
 
   const recoverMainInterruptedStream = useCallback(async (conversationId, runId, lastSequence) => {
     if (!conversationId || !runId) return
@@ -701,12 +1098,34 @@ export default function ChatPage() {
 
   const applyRunEventToUi = useCallback((assistantMessageId, event) => {
     if (!assistantMessageId || !event) return
+    // message.text.retracted is intentionally excluded: it only trims the
+    // persisted parts_json for the final tool-round preamble, not the live
+    // optimistic UI. Patching it here would blank out already-streamed text
+    // mid-stream; the retracted text stays visible via the processed_group
+    // (commentary) path and the eventual message.completed replaces parts wholesale.
+    const shouldPatchMessage = event.type === 'message.text.delta'
+      || event.type === 'message.completed'
+      || event.type === 'run.failed'
+      || event.type === 'run.cancelled'
 
-    setMessages(current => current.map(message => (
-      message.id === assistantMessageId
-        ? applyRunEventToMessage(message, event)
-        : message
-    )))
+    if (event.run_id) {
+      setRunIdByAssistantMessageId(current => ({
+        ...current,
+        [assistantMessageId]: event.run_id,
+      }))
+      setRunViewsByRunId(current => ({
+        ...current,
+        [event.run_id]: applyRunEventToRunView(current[event.run_id], event),
+      }))
+    }
+
+    if (shouldPatchMessage) {
+      setMessages(current => current.map(message => (
+        message.id === assistantMessageId
+          ? applyRunEventToMessage(message, event)
+          : message
+      )))
+    }
     setBranchPanes(current => current.map(pane => ({
       ...pane,
       currentLeafMessageId: event.type === 'message.completed' && pane.currentLeafMessageId !== assistantMessageId
@@ -718,7 +1137,7 @@ export default function ChatPage() {
         : pane.streamingAssistantId,
       messages: Array.isArray(pane.messages)
         ? pane.messages.map(message => (
-          message.id === assistantMessageId
+          shouldPatchMessage && message.id === assistantMessageId
             ? applyRunEventToMessage(message, event)
             : message
         ))
@@ -750,26 +1169,35 @@ export default function ChatPage() {
         throw new Error(`订阅 run ${runId} 事件流失败`)
       }
 
-      await consumeSseJsonStream(res, chunk => {
-        if (chunk?.run?.id && Number.isFinite(chunk.run.sequence)) {
-          runSequenceRef.current.set(runId, Number(chunk.run.sequence) || 0)
-        }
-        if (chunk?.run?.assistant_message_id) {
-          ensureMainAssistantPlaceholder(chunk.run.assistant_message_id)
-        }
-        if (Number.isFinite(chunk?.sequence)) {
-          const nextSequence = Math.max(
-            runSequenceRef.current.get(runId) || 0,
-            Number(chunk.sequence) || 0,
-          )
-          runSequenceRef.current.set(runId, nextSequence)
-        }
+      const streamState = await consumeRunStream(res, {
+        fallbackAssistantMessageId: assistantMessageId,
+        abortController: controller,
+        onChunk: (chunk, state) => {
+          runSequenceRef.current.set(runId, state.lastSequence)
+          if (state.streamAssistantId) {
+            ensureMainAssistantPlaceholder(state.streamAssistantId)
+          }
+          if (state.streamRunId && state.streamAssistantId) {
+            setRunIdByAssistantMessageId(current => ({
+              ...current,
+              [state.streamAssistantId]: state.streamRunId,
+            }))
+            setRunViewsByRunId(current => ({
+              ...current,
+              [state.streamRunId]: current[state.streamRunId] || createRunView(state.streamRunId, state.streamAssistantId),
+            }))
+          }
 
-        const event = buildRunEventFromChunk(chunk, assistantMessageId)
-        if (event) {
-          applyRunEventToUi(event.assistant_message_id, event)
-        }
+          const event = buildRunEventFromChunk(chunk, state.streamAssistantId)
+          if (event) {
+            applyRunEventToUi(event.assistant_message_id, event)
+          }
+        },
       })
+
+      if (streamState.timedOut) {
+        await recoverMainInterruptedStream(conversationId, runId, streamState.lastSequence)
+      }
     } catch {
       // stream discovery effect will retry while the run remains active
     } finally {
@@ -778,7 +1206,7 @@ export default function ChatPage() {
         runStreamControllersRef.current.delete(runId)
       }
     }
-  }, [applyRunEventToUi, ensureMainAssistantPlaceholder])
+  }, [applyRunEventToUi, ensureMainAssistantPlaceholder, recoverMainInterruptedStream])
 
   const loadApiKeys = useCallback(async () => {
     setKeysError('')
@@ -957,9 +1385,23 @@ export default function ChatPage() {
 
     let disposed = false
     let inFlight = false
+    let intervalId = null
     const runControllers = runStreamControllersRef.current
     const runSequences = runSequenceRef.current
     const hasForegroundRun = sending || regeneratingMessageId !== null || branchPanes.some(pane => pane.sending)
+
+    function stopSyncLoop() {
+      if (intervalId === null) return
+      window.clearInterval(intervalId)
+      intervalId = null
+    }
+
+    function ensureSyncLoop() {
+      if (intervalId !== null) return
+      intervalId = window.setInterval(() => {
+        void syncRunStreams()
+      }, 1000)
+    }
 
     async function syncRunStreams() {
       if (disposed || inFlight || hasForegroundRun) return
@@ -990,23 +1432,27 @@ export default function ChatPage() {
             afterSequence,
           })
         }
+
+        if (runs.length > 0) {
+          ensureSyncLoop()
+        } else {
+          stopSyncLoop()
+        }
       } catch {
-        // Ignore stream discovery failures; the next interval will retry.
+        // Ignore discovery failures. Active loops will retry on the next tick.
       } finally {
         inFlight = false
       }
     }
-
-    const intervalId = window.setInterval(() => {
-      void syncRunStreams()
-    }, 1000)
 
     void syncRunStreams()
 
     return () => {
       disposed = true
       setActiveRunsByAssistantId({})
-      window.clearInterval(intervalId)
+      setRunViewsByRunId({})
+      setRunIdByAssistantMessageId({})
+      stopSyncLoop()
       for (const [runId, entry] of runControllers.entries()) {
         if (entry?.conversationId === activeId) {
           entry?.controller?.abort()
@@ -1457,11 +1903,13 @@ export default function ChatPage() {
     let sawEvent = false
 
     try {
+      const controller = new AbortController()
       const res = await fetch(`/api/conversations/${convId}/messages/stream`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content, ...(branchId ? { branch_id: branchId } : {}) }),
+        signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
@@ -1476,62 +1924,37 @@ export default function ChatPage() {
         throw new Error(err?.error?.message || err?.detail || '发送失败')
       }
 
-      const reader = res.body?.getReader()
-      if (!reader) throw new Error('流式响应不可用')
-
-      const decoder = new TextDecoder()
-      let buffer = ''
       let streamError = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (raw === '[DONE]') {
-            sawDone = true
-            continue
+      const streamState = await consumeRunStream(res, {
+        abortController: controller,
+        onChunk: (chunk, state) => {
+          streamRunId = state.streamRunId
+          lastSequence = state.lastSequence
+          streamAssistantId = state.streamAssistantId
+          if (state.streamAssistantId) {
+            setMainStreamingAssistantId(state.streamAssistantId)
+            ensureMainAssistantPlaceholder(state.streamAssistantId, userMsg.id)
           }
-
-          try {
-            const chunk = JSON.parse(raw)
-            sawEvent = true
-            if (chunk.run?.id) {
-              streamRunId = chunk.run.id
-              lastSequence = Number(chunk.run.sequence) || lastSequence
-            }
-            if (chunk.run?.assistant_message_id) {
-              streamAssistantId = chunk.run.assistant_message_id
-              setMainStreamingAssistantId(streamAssistantId)
-              ensureMainAssistantPlaceholder(streamAssistantId, userMsg.id)
-            }
-            if (Number.isFinite(chunk.sequence)) {
-              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
-            }
-            const event = buildRunEventFromChunk(chunk, streamAssistantId)
-            if (event) {
-              applyRunEventToUi(event.assistant_message_id, event)
-            }
-            if (chunk.error) {
-              streamError = chunk.error
-              setError(chunk.error)
-            }
-          } catch {
-            // ignore malformed chunks
+          const event = buildRunEventFromChunk(chunk, state.streamAssistantId)
+          if (event) {
+            applyRunEventToUi(event.assistant_message_id, event)
           }
-        }
-      }
+          if (chunk.error) {
+            streamError = chunk.error
+            setError(chunk.error)
+          }
+        },
+      })
+
+      sawDone = streamState.sawDone
+      sawEvent = streamState.sawEvent
 
       if (!sawDone && streamRunId) {
         await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
+      } else {
+        await refreshMessages(convId)
+        await loadBranches(convId)
       }
-      await refreshMessages(convId)
-      await loadBranches(convId)
       if (!streamError && !sawEvent) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '发送失败，请重试')
@@ -1562,11 +1985,13 @@ export default function ChatPage() {
     let sawEvent = false
 
     try {
+      const controller = new AbortController()
       const res = await fetch(`/api/conversations/${activeId}/messages/${messageId}/regenerate/stream`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(branchId ? { branch_id: branchId } : {}),
+        signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
@@ -1581,62 +2006,37 @@ export default function ChatPage() {
         throw new Error(err?.error?.message || err?.detail || '閲嶆柊鐢熸垚澶辫触')
       }
 
-      const reader = res.body?.getReader()
-      if (!reader) throw new Error('流式响应不可用')
-
-      const decoder = new TextDecoder()
-      let buffer = ''
       let streamError = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (raw === '[DONE]') {
-            sawDone = true
-            continue
+      const streamState = await consumeRunStream(res, {
+        abortController: controller,
+        onChunk: (chunk, state) => {
+          streamRunId = state.streamRunId
+          lastSequence = state.lastSequence
+          streamAssistantId = state.streamAssistantId
+          if (state.streamAssistantId) {
+            setMainStreamingAssistantId(state.streamAssistantId)
+            ensureMainAssistantPlaceholder(state.streamAssistantId, messageId)
           }
-
-          try {
-            const chunk = JSON.parse(raw)
-            sawEvent = true
-            if (chunk.run?.id) {
-              streamRunId = chunk.run.id
-              lastSequence = Number(chunk.run.sequence) || lastSequence
-            }
-            if (chunk.run?.assistant_message_id) {
-              streamAssistantId = chunk.run.assistant_message_id
-              setMainStreamingAssistantId(streamAssistantId)
-              ensureMainAssistantPlaceholder(streamAssistantId, messageId)
-            }
-            if (Number.isFinite(chunk.sequence)) {
-              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
-            }
-            const event = buildRunEventFromChunk(chunk, streamAssistantId)
-            if (event) {
-              applyRunEventToUi(event.assistant_message_id, event)
-            }
-            if (chunk.error) {
-              streamError = chunk.error
-              setError(chunk.error)
-            }
-          } catch {
-            // ignore malformed chunks
+          const event = buildRunEventFromChunk(chunk, state.streamAssistantId)
+          if (event) {
+            applyRunEventToUi(event.assistant_message_id, event)
           }
-        }
-      }
+          if (chunk.error) {
+            streamError = chunk.error
+            setError(chunk.error)
+          }
+        },
+      })
+
+      sawDone = streamState.sawDone
+      sawEvent = streamState.sawEvent
 
       if (!sawDone && streamRunId) {
         await recoverMainInterruptedStream(activeId, streamRunId, lastSequence)
+      } else {
+        await refreshMessages(activeId)
+        await loadBranches(activeId)
       }
-      await refreshMessages(activeId)
-      await loadBranches(activeId)
       if (!streamError && !sawEvent) setError('妯″瀷娌℃湁杩斿洖鍐呭')
     } catch (e) {
       setError(e.message || '閲嶆柊鐢熸垚澶辫触锛岃閲嶈瘯')
@@ -1720,11 +2120,13 @@ export default function ChatPage() {
     switchingSiblingMessageId,
   ])
 
-  const togglePaneContextMode = useCallback((paneId) => {
-    patchBranchPane(paneId, pane => ({
-      ...pane,
-      contextMode: pane.contextMode === 'full' ? 'root_only' : 'full',
-    }))
+  const setPaneContextMode = useCallback((paneId, contextMode) => {
+    patchBranchPane(paneId, { contextMode })
+  }, [patchBranchPane])
+
+  const setPaneContextMessageCount = useCallback((paneId, contextMessageCount) => {
+    if (!Number.isInteger(contextMessageCount) || contextMessageCount < 1) return
+    patchBranchPane(paneId, { contextMessageCount })
   }, [patchBranchPane])
 
   const copyBranchMessage = useCallback(async (paneId, message) => {
@@ -1768,8 +2170,7 @@ export default function ChatPage() {
       parent_id: pane.currentLeafMessageId,
       ...(pane.branchId ? { branch_id: pane.branchId } : {}),
       activate_branch: false,
-      context_mode: pane.contextMode,
-      context_root_message_id: pane.rootMessageId,
+      ...buildBranchContextPayload(pane),
     }
 
     patchBranchPane(paneId, current => ({
@@ -1785,11 +2186,13 @@ export default function ChatPage() {
     let streamAssistantId = null
     let sawEvent = false
     try {
+      const controller = new AbortController()
       const res = await fetch(`/api/conversations/${activeId}/messages/stream`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
@@ -1804,61 +2207,36 @@ export default function ChatPage() {
         throw new Error(err?.error?.message || err?.detail || '发送失败')
       }
 
-      const reader = res.body?.getReader()
-      if (!reader) throw new Error('流式响应不可用')
-
-      const decoder = new TextDecoder()
-      let buffer = ''
       let streamError = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (raw === '[DONE]') {
-            sawDone = true
-            continue
+      const streamState = await consumeRunStream(res, {
+        abortController: controller,
+        onChunk: (chunk, state) => {
+          streamRunId = state.streamRunId
+          lastSequence = state.lastSequence
+          streamAssistantId = state.streamAssistantId
+          if (state.streamAssistantId) {
+            ensureBranchAssistantPlaceholder(paneId, state.streamAssistantId, userMsg.id)
           }
-
-          try {
-            const chunk = JSON.parse(raw)
-            sawEvent = true
-            if (chunk.run?.id) {
-              streamRunId = chunk.run.id
-              lastSequence = Number(chunk.run.sequence) || lastSequence
-            }
-            if (chunk.run?.assistant_message_id) {
-              streamAssistantId = chunk.run.assistant_message_id
-              ensureBranchAssistantPlaceholder(paneId, streamAssistantId, userMsg.id)
-            }
-            if (Number.isFinite(chunk.sequence)) {
-              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
-            }
-            const event = buildRunEventFromChunk(chunk, streamAssistantId)
-            if (event) {
-              applyRunEventToUi(event.assistant_message_id, event)
-            }
-            if (chunk.error) {
-              streamError = chunk.error
-              patchBranchPane(paneId, { error: chunk.error })
-            }
-          } catch {
-            // ignore malformed chunks
+          const event = buildRunEventFromChunk(chunk, state.streamAssistantId)
+          if (event) {
+            applyRunEventToUi(event.assistant_message_id, event)
           }
-        }
-      }
+          if (chunk.error) {
+            streamError = chunk.error
+            patchBranchPane(paneId, { error: chunk.error })
+          }
+        },
+      })
+
+      sawDone = streamState.sawDone
+      sawEvent = streamState.sawEvent
 
       if (!sawDone && streamRunId) {
         await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
+      } else {
+        await refreshBranchPane(activeId, paneId)
+        await loadBranches(activeId)
       }
-      await refreshBranchPane(activeId, paneId)
-      await loadBranches(activeId)
       if (!streamError && !sawEvent) patchBranchPane(paneId, { error: '模型没有返回内容' })
     } catch (e) {
       patchBranchPane(paneId, current => ({
@@ -1889,14 +2267,15 @@ export default function ChatPage() {
       const payload = {
         ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         activate_branch: false,
-        context_mode: pane.contextMode,
-        context_root_message_id: pane.rootMessageId,
+        ...buildBranchContextPayload(pane),
       }
+      const controller = new AbortController()
       const res = await fetch(`/api/conversations/${activeId}/messages/${messageId}/regenerate/stream`, {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
@@ -1911,59 +2290,34 @@ export default function ChatPage() {
         throw new Error(err?.error?.message || err?.detail || '閲嶆柊鐢熸垚澶辫触锛岃閲嶈瘯')
       }
 
-      const reader = res.body?.getReader()
-      if (!reader) throw new Error('娴佸紡鍝嶅簲涓嶅彲鐢?')
-
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          const raw = line.slice(6).trim()
-          if (raw === '[DONE]') {
-            sawDone = true
-            continue
+      const streamState = await consumeRunStream(res, {
+        abortController: controller,
+        onChunk: (chunk, state) => {
+          streamRunId = state.streamRunId
+          lastSequence = state.lastSequence
+          streamAssistantId = state.streamAssistantId
+          if (state.streamAssistantId) {
+            ensureBranchAssistantPlaceholder(paneId, state.streamAssistantId, messageId)
           }
-
-          try {
-            const chunk = JSON.parse(raw)
-            sawEvent = true
-            if (chunk.run?.id) {
-              streamRunId = chunk.run.id
-              lastSequence = Number(chunk.run.sequence) || lastSequence
-            }
-            if (chunk.run?.assistant_message_id) {
-              streamAssistantId = chunk.run.assistant_message_id
-              ensureBranchAssistantPlaceholder(paneId, streamAssistantId, messageId)
-            }
-            if (Number.isFinite(chunk.sequence)) {
-              lastSequence = Math.max(lastSequence, Number(chunk.sequence) || 0)
-            }
-            const event = buildRunEventFromChunk(chunk, streamAssistantId)
-            if (event) {
-              applyRunEventToUi(event.assistant_message_id, event)
-            }
-            if (chunk.error) {
-              patchBranchPane(paneId, { error: chunk.error })
-            }
-          } catch {
-            // ignore malformed chunks
+          const event = buildRunEventFromChunk(chunk, state.streamAssistantId)
+          if (event) {
+            applyRunEventToUi(event.assistant_message_id, event)
           }
-        }
-      }
+          if (chunk.error) {
+            patchBranchPane(paneId, { error: chunk.error })
+          }
+        },
+      })
+
+      sawDone = streamState.sawDone
+      sawEvent = streamState.sawEvent
 
       if (!sawDone && streamRunId) {
         await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
+      } else {
+        await refreshBranchPane(activeId, paneId)
+        await loadBranches(activeId)
       }
-      await refreshBranchPane(activeId, paneId)
-      await loadBranches(activeId)
       if (!sawEvent) {
         patchBranchPane(paneId, { error: '妯″瀷娌℃湁杩斿洖鍐呭' })
       }
@@ -2038,8 +2392,7 @@ export default function ChatPage() {
         content: pane.editingContent.trim(),
         mode: pane.editingMode,
         ...(pane.branchId ? { branch_id: pane.branchId } : {}),
-        context_mode: pane.contextMode,
-        context_root_message_id: pane.rootMessageId,
+        ...buildBranchContextPayload(pane),
       })
       await refreshMessages(activeId)
       await loadBranches(activeId)
@@ -2236,6 +2589,7 @@ export default function ChatPage() {
                         <MessageBubble
                           key={msg.id}
                           message={msg}
+                          runView={getRunViewForAssistant(msg.id)}
                           onCopy={msg.role === 'system' ? undefined : () => { void copyMainMessage(msg) }}
                           onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
                           onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
@@ -2259,7 +2613,7 @@ export default function ChatPage() {
                           onDenyToolCall={msg.role === 'assistant' ? toolCallRef => { void denyMainToolCall(msg, toolCallRef) } : undefined}
                           isApprovalSubmitting={toolCallRef => isApprovalActionPending(msg.id, toolCallRef)}
                           canApproveToolCall={toolCallRef => (
-                            activeRunsByAssistantId[msg.id]?.metadata?.pending_approval?.tool_call_ref === toolCallRef
+                            getRunViewForAssistant(msg.id)?.pending_approval?.tool_call_ref === toolCallRef
                           )}
                         />
                       )
@@ -2353,8 +2707,10 @@ export default function ChatPage() {
                             || pane.deletingMessageId !== null
                             || pane.editingSubmittingMessageId !== null,
                         }}
+                        getRunView={getRunViewForAssistant}
                         onClose={() => closeBranchPane(pane.id)}
-                        onToggleContextMode={() => togglePaneContextMode(pane.id)}
+                        onContextModeChange={contextMode => setPaneContextMode(pane.id, contextMode)}
+                        onContextMessageCountChange={count => setPaneContextMessageCount(pane.id, count)}
                         onCopy={message => copyBranchMessage(pane.id, message)}
                         onEdit={message => startBranchEdit(pane.id, message)}
                         onEditCancel={() => cancelBranchEdit(pane.id)}
@@ -2371,7 +2727,7 @@ export default function ChatPage() {
                         onDenyToolCall={(message, toolCallRef) => denyBranchToolCall(pane.id, message, toolCallRef)}
                         isApprovalSubmitting={(messageId, toolCallRef) => isApprovalActionPending(messageId, toolCallRef)}
                         canApproveToolCall={(messageId, toolCallRef) => (
-                          activeRunsByAssistantId[messageId]?.metadata?.pending_approval?.tool_call_ref === toolCallRef
+                          getRunViewForAssistant(messageId)?.pending_approval?.tool_call_ref === toolCallRef
                         )}
                         providerValue={pendingProvider}
                         providerOptions={PROVIDER_OPTIONS}
