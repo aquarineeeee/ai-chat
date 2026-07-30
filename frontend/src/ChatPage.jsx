@@ -131,11 +131,16 @@ function createStreamingAssistantMessage(id, overrides = {}) {
   }
 }
 
+function hasMessageId(messages, messageId) {
+  return Array.isArray(messages) && messages.some(item => item.id === messageId)
+}
+
+// Insert a new message at its display position. This function deliberately
+// never merges an existing message: callers that hold a fresh empty streaming
+// placeholder must not overwrite text or parts accumulated from prior events.
 function insertMessageAfter(messages, anchorId, message) {
   if (!Array.isArray(messages)) return [message]
-  if (messages.some(item => item.id === message.id)) {
-    return messages.map(item => (item.id === message.id ? { ...item, ...message } : item))
-  }
+  if (hasMessageId(messages, message.id)) return messages
   if (!anchorId) return [...messages, message]
   const anchorIndex = messages.findIndex(item => item.id === anchorId)
   if (anchorIndex < 0) return [...messages, message]
@@ -146,6 +151,12 @@ function insertMessageAfter(messages, anchorId, message) {
   ]
 }
 
+// Ensure a placeholder exists without changing an existing message. Streaming
+// content is updated exclusively by applyRunEventToMessage below.
+function ensureMessageAfter(messages, anchorId, message) {
+  if (hasMessageId(messages, message.id)) return messages
+  return insertMessageAfter(messages, anchorId, message)
+}
 
 function cloneParts(parts) {
   if (!Array.isArray(parts)) return []
@@ -1123,7 +1134,7 @@ export default function ChatPage() {
 
   const ensureMainAssistantPlaceholder = useCallback((assistantMessageId, anchorMessageId = null) => {
     if (!assistantMessageId) return
-    setMessages(current => insertMessageAfter(
+    setMessages(current => ensureMessageAfter(
       current,
       anchorMessageId,
       createStreamingAssistantMessage(assistantMessageId),
@@ -1135,7 +1146,7 @@ export default function ChatPage() {
     patchBranchPane(paneId, current => ({
       ...current,
       streamingAssistantId: assistantMessageId,
-      messages: insertMessageAfter(
+      messages: ensureMessageAfter(
         current.messages,
         anchorMessageId,
         createStreamingAssistantMessage(assistantMessageId),
