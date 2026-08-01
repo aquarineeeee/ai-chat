@@ -15,6 +15,7 @@ class MessageCreateRequest(BaseModel):
     parent_id: int | None = None
     branch_id: int | None = None
     provider: str | None = None
+    provider_id: int | None = Field(default=None, ge=1)
     model: str | None = None
     temperature: Decimal | None = None
     max_tokens: int | None = None
@@ -27,6 +28,7 @@ class MessageCreateRequest(BaseModel):
 class MessageRegenerateRequest(BaseModel):
     branch_id: int | None = None
     provider: str | None = None
+    provider_id: int | None = Field(default=None, ge=1)
     model: str | None = None
     temperature: Decimal | None = None
     max_tokens: int | None = None
@@ -54,6 +56,9 @@ class MessageNodeResponse(BaseModel):
     role: MessageRole
     content: str
     provider: str | None
+    provider_id: int | None = None
+    adapter_id: str | None = None
+    provider_name_snapshot: str | None = None
     model: str | None
     temperature: Decimal | None
     max_tokens: int | None
@@ -89,6 +94,9 @@ class MessageTreeNodeResponse(BaseModel):
     status: MessageStatus
     error_message: str | None = None
     provider: str | None
+    provider_id: int | None = None
+    adapter_id: str | None = None
+    provider_name_snapshot: str | None = None
     model: str | None
     created_at: datetime
     updated_at: datetime

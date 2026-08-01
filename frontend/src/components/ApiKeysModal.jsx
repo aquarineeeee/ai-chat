@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Key, Loader2, FlaskConical, Trash2, X } from 'lucide-react'
 
 const INITIAL_FORM = {
-  provider: 'openai',
+  preset_id: 'openai',
   display_name: 'OpenAI',
   base_url: '',
   api_key: '',
@@ -10,14 +10,29 @@ const INITIAL_FORM = {
 
 const PROVIDERS = {
   openai: {
-    label: 'OpenAI-compatible',
+    label: 'OpenAI',
     displayName: 'OpenAI',
     defaultBaseUrl: 'https://api.openai.com/v1',
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    displayName: 'OpenRouter',
+    defaultBaseUrl: 'https://openrouter.ai/api/v1',
   },
   anthropic: {
     label: 'Anthropic',
     displayName: 'Anthropic',
     defaultBaseUrl: 'https://api.anthropic.com/v1',
+  },
+  gemini: {
+    label: 'Gemini',
+    displayName: 'Gemini',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
+  },
+  custom: {
+    label: 'Custom provider',
+    displayName: 'Custom gateway',
+    defaultBaseUrl: '',
   },
 }
 
@@ -31,6 +46,7 @@ export default function ApiKeysModal({
   onCreate,
   onDelete,
   onTest,
+  embedded = false,
 }) {
   const [form, setForm] = useState(INITIAL_FORM)
   const [saving, setSaving] = useState(false)
@@ -86,24 +102,24 @@ export default function ApiKeysModal({
     return new Date(value).toLocaleString('zh-CN')
   }
 
-  function handleProviderChange(provider) {
-    const providerConfig = PROVIDERS[provider]
+  function handleProviderChange(presetId) {
+    const providerConfig = PROVIDERS[presetId]
     setForm(prev => ({
       ...prev,
-      provider,
-      display_name: providerConfig && PROVIDERS[prev.provider]?.displayName === prev.display_name
+      preset_id: presetId,
+      display_name: providerConfig && PROVIDERS[prev.preset_id]?.displayName === prev.display_name
         ? providerConfig.displayName
         : prev.display_name,
       base_url: '',
     }))
   }
 
-  const selectedProvider = PROVIDERS[form.provider] || PROVIDERS.openai
+  const selectedProvider = PROVIDERS[form.preset_id] || PROVIDERS.openai
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center p-4" style={{ background: 'var(--overlay)' }}>
+    <div className={embedded ? 'w-full' : 'fixed inset-0 z-40 flex items-center justify-center p-4'} style={embedded ? undefined : { background: 'var(--overlay)' }}>
       <div
-        className="w-full max-w-3xl max-h-[90vh] overflow-hidden rounded-3xl"
+        className={embedded ? 'w-full overflow-hidden' : 'w-full max-w-3xl max-h-[90vh] overflow-hidden rounded-3xl'}
         style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
       >
         <div
@@ -115,11 +131,11 @@ export default function ApiKeysModal({
               <Key className="w-4 h-4" style={{ color: 'var(--accent)' }} />
             </div>
             <div>
-              <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>API Keys</h2>
-              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>支持 OpenAI-compatible 与 Anthropic 原生 provider</p>
+              <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>服务商设置</h2>
+              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>配置内置服务商或自定义网关</p>
             </div>
           </div>
-          <button
+          {!embedded && <button
             onClick={onClose}
             className="p-2 rounded-xl transition"
             style={{ color: 'var(--text-muted)' }}
@@ -128,7 +144,7 @@ export default function ApiKeysModal({
             aria-label="关闭"
           >
             <X className="w-4 h-4" />
-          </button>
+          </button>}
         </div>
 
         <div className="grid md:grid-cols-[1.1fr_1fr] max-h-[calc(90vh-74px)]">
@@ -137,7 +153,7 @@ export default function ApiKeysModal({
               <div>
                 <label className="block text-xs mb-1.5" style={{ color: 'var(--text-secondary)' }}>Provider</label>
                 <select
-                  value={form.provider}
+                  value={form.preset_id}
                   onChange={e => handleProviderChange(e.target.value)}
                   className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
                   style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
@@ -163,7 +179,7 @@ export default function ApiKeysModal({
                 <input
                   value={form.base_url}
                   onChange={e => setForm(prev => ({ ...prev, base_url: e.target.value }))}
-                  placeholder={`留空默认使用 ${selectedProvider.defaultBaseUrl}`}
+                  placeholder={selectedProvider.defaultBaseUrl ? `留空默认使用 ${selectedProvider.defaultBaseUrl}` : '自定义网关地址，例如 https://gateway.example.com/v1'}
                   className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
                   style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
                 />
@@ -196,7 +212,7 @@ export default function ApiKeysModal({
                 style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
               >
                 {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                {saving ? '保存中...' : '保存 API Key'}
+                {saving ? '保存中...' : '添加服务商'}
               </button>
             </form>
           </div>
@@ -230,14 +246,14 @@ export default function ApiKeysModal({
                         <div className="flex items-center gap-2">
                           <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{item.display_name}</span>
                           <span className="text-[11px] px-2 py-0.5 rounded-lg" style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}>
-                            {item.provider}
+                            {item.preset_id}
                           </span>
                         </div>
                         <p className="text-xs mt-1 break-all" style={{ color: 'var(--text-secondary)' }}>
-                          {item.base_url || PROVIDERS[item.provider]?.defaultBaseUrl || '默认 Base URL'}
+                          {item.base_url || PROVIDERS[item.preset_id]?.defaultBaseUrl || '默认 Base URL'}
                         </p>
                         <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
-                          Key 尾号: {item.key_last_four || '未知'}
+                          Key 尾号: {item.credential_hint || '未配置'}
                         </p>
                         <p className="text-xs mt-1" style={{ color: item.last_test_status === 'success' ? 'var(--text-secondary)' : 'var(--text-muted)' }}>
                           最近测试: {formatTime(item.last_tested_at)}

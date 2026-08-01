@@ -182,3 +182,211 @@
     border-right-color: var(--border);
   }
 }
+
+.settings-page {
+  --settings-tab-depth: 12px;
+}
+
+.settings-footer > :not(:first-child) {
+  display: none;
+}
+
+.settings-footer > :first-child {
+  font-size: 0;
+}
+
+.settings-footer > :first-child::after {
+  content: '\8bbe\7f6e';
+  font-size: 0.875rem;
+}
+
+.settings-tabs {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  padding: 0 8px;
+}
+
+.settings-tab {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 112px;
+  padding: 13px 20px 16px;
+  border: 0;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  clip-path: polygon(10px 0, calc(100% - 10px) 0, 100% 100%, 0 100%);
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.settings-tab:hover {
+  background: var(--bg-elevated);
+}
+
+.settings-tab[aria-selected='true'] {
+  z-index: 1;
+  margin-bottom: -1px;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  box-shadow: 0 -1px 0 var(--border);
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.settings-content {
+  width: 100%;
+  max-width: none;
+  padding: 32px 8px 64px;
+}
+
+.settings-section-heading {
+  margin-bottom: 22px;
+}
+
+.settings-section-heading h1 {
+  margin: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.settings-section-heading p,
+.settings-row-help {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.settings-profile {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 0 28px;
+}
+
+.settings-avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 18px 0;
+  border-top: 1px solid var(--border);
+}
+
+.settings-row-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.settings-row-column {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.settings-outline-button,
+.settings-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  padding: 8px 12px;
+  font-size: 0.8rem;
+}
+
+.settings-outline-button:hover,
+.settings-select:hover {
+  border-color: var(--accent-border);
+  color: var(--text-primary);
+}
+
+.settings-select {
+  width: 100%;
+  outline: none;
+}
+
+.settings-field-label {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.settings-mode-toggle {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 0;
+  border-radius: 10px;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  font-size: 0.75rem;
+}
+
+.settings-mode-toggle span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 10px;
+  border-radius: 7px;
+}
+
+.settings-mode-toggle span.is-selected {
+  color: var(--text-primary);
+  background: var(--bg-base);
+  box-shadow: 0 1px 3px var(--overlay);
+}
+
+.settings-palette {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  border: 2px solid transparent;
+  border-radius: 50%;
+  color: #fff;
+  cursor: pointer;
+  transition: transform 160ms ease, outline 160ms ease;
+}
+
+.settings-swatch[aria-checked='true'] {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 3px;
+  transform: scale(1.08);
+}
+
+@media (max-width: 640px) {
+  .settings-tabs { padding: 0; }
+  .settings-tab { min-width: 94px; padding-inline: 14px; font-size: 0.8rem; }
+  .settings-content { padding-inline: 0; }
+  .settings-row { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .settings-outline-button, .settings-mode-toggle, .settings-palette { align-self: flex-start; }
+}

@@ -9,9 +9,18 @@ from app.models.conversation import Conversation
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.services.branches import create_main_branch_for_conversation
 from app.services.markdown_import import import_markdown_conversation
+from app.services.providers import get_provider
 
 
 settings = get_settings()
+
+
+def _runtime_provider_for_instance(instance) -> str:
+    if instance.default_adapter_id == "anthropic_messages":
+        return "anthropic"
+    if instance.default_adapter_id in {"openai_chat_completions", "openai_responses"}:
+        return "openai"
+    return instance.preset_id
 
 
 async def list_conversations(session: AsyncSession, user_id: int) -> list[Conversation]:
@@ -36,12 +45,20 @@ async def get_conversation(session: AsyncSession, user_id: int, conversation_id:
 
 
 async def create_conversation(session: AsyncSession, user_id: int, payload: ConversationCreate) -> Conversation:
+    provider_instance_id = payload.provider_id
+    provider_name = payload.provider or settings.default_provider
+    provider_model = payload.model or settings.default_model
+    if provider_instance_id is not None:
+        instance = await get_provider(session, user_id, provider_instance_id)
+        provider_name = _runtime_provider_for_instance(instance)
+        provider_model = payload.model or instance.default_model_id
     conversation = Conversation(
         user_id=user_id,
         title=payload.title,
         system_prompt=payload.system_prompt,
-        provider=payload.provider or settings.default_provider,
-        model=payload.model or settings.default_model,
+        provider=provider_name,
+        provider_instance_id=provider_instance_id,
+        model=provider_model,
         temperature=payload.temperature if payload.temperature is not None else settings.default_temperature,
         max_tokens=payload.max_tokens if payload.max_tokens is not None else settings.default_max_tokens,
     )
@@ -61,6 +78,13 @@ async def update_conversation(
 ) -> Conversation:
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     update_data = payload.model_dump(exclude_unset=True)
+    provider_id = update_data.pop("provider_id", None)
+    if provider_id is not None:
+        instance = await get_provider(session, user_id, provider_id)
+        conversation.provider_instance_id = provider_id
+        conversation.provider = _runtime_provider_for_instance(instance)
+        if "model" not in update_data and instance.default_model_id:
+            conversation.model = instance.default_model_id
 
     for field, value in update_data.items():
         setattr(conversation, field, value)

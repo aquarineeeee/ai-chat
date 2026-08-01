@@ -46,9 +46,18 @@ from app.services.messages import (
     stream_run_events,
     submit_tool_approval_decision,
 )
+from app.services.providers import get_provider
 
 
 router = APIRouter()
+
+
+def _runtime_provider_for_instance(instance) -> str:
+    if instance.default_adapter_id == "anthropic_messages":
+        return "anthropic"
+    if instance.default_adapter_id in {"openai_chat_completions", "openai_responses"}:
+        return "openai"
+    return instance.preset_id
 
 
 def _resolve_after_sequence(*, after_sequence: int, request: Request) -> int:
@@ -254,6 +263,9 @@ async def messages_create(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> MessageSendResponse:
+    if payload.provider_id is not None:
+        provider_instance = await get_provider(session, current_user.id, payload.provider_id)
+        payload = payload.model_copy(update={"provider": _runtime_provider_for_instance(provider_instance)})
     return await create_message_pair(
         session=session,
         user_id=current_user.id,
@@ -269,6 +281,9 @@ async def messages_create_stream(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> StreamingResponse:
+    if payload.provider_id is not None:
+        provider_instance = await get_provider(session, current_user.id, payload.provider_id)
+        payload = payload.model_copy(update={"provider": _runtime_provider_for_instance(provider_instance)})
     stream = await create_message_stream(
         session=session,
         user_id=current_user.id,
@@ -303,6 +318,9 @@ async def messages_regenerate(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> MessageRegenerateResponse:
+    if payload.provider_id is not None:
+        provider_instance = await get_provider(session, current_user.id, payload.provider_id)
+        payload = payload.model_copy(update={"provider": _runtime_provider_for_instance(provider_instance)})
     return await regenerate_message(
         session=session,
         user_id=current_user.id,
@@ -320,6 +338,9 @@ async def messages_regenerate_stream(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(db_session),
 ) -> StreamingResponse:
+    if payload.provider_id is not None:
+        provider_instance = await get_provider(session, current_user.id, payload.provider_id)
+        payload = payload.model_copy(update={"provider": _runtime_provider_for_instance(provider_instance)})
     stream = await regenerate_message_stream(
         session=session,
         user_id=current_user.id,

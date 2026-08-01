@@ -3,6 +3,7 @@ import { ThemeProvider } from './ThemeContext'
 import LoginPage from './LoginPage'
 import ChatPage from './ChatPage'
 import ColorPreview from './ColorPreview'
+import './App.css'
 
 function AppInner() {
   const { user, loading } = useAuth()

@@ -9,8 +9,8 @@ import {
   User,
   Sun,
   Moon,
-  Key,
   AlertTriangle,
+  Settings,
   Palette,
   FileInput,
   CheckCircle2,
@@ -28,7 +28,6 @@ const PALETTE_COLORS = {
   sage: '#5e8a6e',
   blue: '#4a72a8',
 }
-
 function buildVisibleBranchTree(branches) {
   const byParent = new Map()
   branches.forEach(branch => {
@@ -140,13 +139,13 @@ export default function Sidebar({
   onRenameBranch,
   onDeleteBranch,
   onClose,
-  onToggleTheme,
-  palette,
-  mode,
-  onSetPalette,
-  user,
-  onLogout,
-  onOpenKeys,
+  onOpenSettings,
+  onToggleTheme = () => {},
+  palette = '',
+  mode = 'dark',
+  onSetPalette = () => {},
+  user = null,
+  onLogout = () => {},
 }) {
   const [deletingId, setDeletingId] = useState(null)
   const [pendingDelete, setPendingDelete] = useState(null)
@@ -772,16 +771,16 @@ export default function Sidebar({
         )}
       </div>
 
-      <div className="shrink-0 space-y-1 px-3 py-3" style={{ borderTop: '1px solid var(--border)' }}>
+      <div className="settings-footer shrink-0 space-y-1 px-3 py-3" style={{ borderTop: '1px solid var(--border)' }}>
         <button
           type="button"
-          onClick={onOpenKeys}
+          onClick={onOpenSettings}
           className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition"
           style={{ color: 'var(--text-secondary)' }}
           {...btnHover}
         >
-          <Key className="h-4 w-4" />
-          管理 API Keys
+          <Settings className="h-4 w-4" />
+          服务商设置
         </button>
 
         <button

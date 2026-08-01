@@ -6,6 +6,7 @@ from app.models.message import Message, MessageRole, MessageStatus
 from app.models.run_event import RunEvent
 from app.models.tool_call import ToolCall
 from app.models.user import User
+from app.models.provider import ProviderInstance, ProviderModel
 
 __all__ = [
     "AgentRun",
@@ -18,4 +19,6 @@ __all__ = [
     "RunEvent",
     "ToolCall",
     "User",
+    "ProviderInstance",
+    "ProviderModel",
 ]

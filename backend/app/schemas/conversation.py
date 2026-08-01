@@ -10,6 +10,7 @@ class ConversationCreate(BaseModel):
     title: str = Field(default="新对话", min_length=1, max_length=255)
     system_prompt: str | None = None
     provider: str | None = Field(default=None, max_length=50)
+    provider_id: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=100)
     temperature: Decimal | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1)
@@ -19,6 +20,7 @@ class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     system_prompt: str | None = None
     provider: str | None = Field(default=None, max_length=50)
+    provider_id: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=100)
     temperature: Decimal | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1)
@@ -34,6 +36,7 @@ class ConversationResponse(BaseModel):
     title: str
     system_prompt: str | None
     provider: str | None
+    provider_id: int | None
     model: str | None
     temperature: Decimal | None
     max_tokens: int | None

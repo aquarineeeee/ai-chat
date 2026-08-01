@@ -17,6 +17,9 @@ class AgentRun(Base):
     user_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), index=True)
     assistant_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), index=True)
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider_instance_id: Mapped[int | None] = mapped_column(ForeignKey("provider_instances.id", ondelete="SET NULL"), index=True)
+    adapter_id: Mapped[str | None] = mapped_column(String(80))
+    provider_name_snapshot: Mapped[str | None] = mapped_column(String(100))
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued", index=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
@@ -32,3 +35,7 @@ class AgentRun(Base):
         onupdate=func.current_timestamp(),
         nullable=False,
     )
+
+    @property
+    def provider_id(self) -> int | None:
+        return self.provider_instance_id

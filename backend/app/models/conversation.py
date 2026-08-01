@@ -17,6 +17,7 @@ class Conversation(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话", server_default="新对话")
     system_prompt: Mapped[str | None] = mapped_column(Text)
     provider: Mapped[str | None] = mapped_column(String(50))
+    provider_instance_id: Mapped[int | None] = mapped_column(ForeignKey("provider_instances.id", ondelete="SET NULL"), index=True)
     model: Mapped[str | None] = mapped_column(String(100))
     temperature: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     max_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -34,3 +35,7 @@ class Conversation(Base):
     )
 
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+
+    @property
+    def provider_id(self) -> int | None:
+        return self.provider_instance_id

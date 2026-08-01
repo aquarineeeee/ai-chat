@@ -24,6 +24,9 @@ class AgentRunResponse(BaseModel):
     user_message_id: int | None = None
     assistant_message_id: int | None = None
     provider: str
+    provider_id: int | None = None
+    adapter_id: str | None = None
+    provider_name_snapshot: str | None = None
     model: str
     status: str
     started_at: datetime | None = None

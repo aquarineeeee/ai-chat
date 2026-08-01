@@ -40,6 +40,9 @@ class Message(Base):
     )
     content: Mapped[str] = mapped_column(Text().with_variant(MEDIUMTEXT(), "mysql"), nullable=False)
     provider: Mapped[str | None] = mapped_column(String(50))
+    provider_instance_id: Mapped[int | None] = mapped_column(ForeignKey("provider_instances.id", ondelete="SET NULL"), index=True)
+    adapter_id: Mapped[str | None] = mapped_column(String(80))
+    provider_name_snapshot: Mapped[str | None] = mapped_column(String(100))
     model: Mapped[str | None] = mapped_column(String(100))
     temperature: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))
     max_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -66,3 +69,7 @@ class Message(Base):
     )
 
     conversation = relationship("Conversation", back_populates="messages")
+
+    @property
+    def provider_id(self) -> int | None:
+        return self.provider_instance_id

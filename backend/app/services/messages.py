@@ -53,6 +53,7 @@ from app.services.approval_manager import ApprovalDecision, approval_manager
 from app.services.agent_runner import agent_runner
 from app.services.agent_artifacts import tool_output_should_externalize, write_tool_output_artifact
 from app.services.api_keys import get_preferred_api_key
+from app.services.providers import get_generation_connection, get_provider
 from app.services.agent_trace import (
     EVENT_SCHEMA_VERSION,
     PARTS_SCHEMA_VERSION,
@@ -911,13 +912,19 @@ async def _prepare_generation(
                 message_id=context_root_message_id,
             )
 
+    provider_instance_id = payload.provider_id or conversation.provider_instance_id
+    provider_instance = await get_provider(session, user_id, provider_instance_id) if provider_instance_id else None
     provider, model, temperature, max_tokens = _resolve_generation_options(
         conversation=conversation,
         provider=payload.provider,
-        model=payload.model,
+        model=payload.model or (provider_instance.default_model_id if provider_instance else None),
         temperature=payload.temperature,
         max_tokens=payload.max_tokens,
     )
+    if payload.provider_id is not None:
+        conversation.provider_instance_id = provider_instance_id
+        conversation.provider = provider
+        conversation.model = model
 
     user_message = Message(
         conversation_id=conversation.id,
@@ -937,6 +944,9 @@ async def _prepare_generation(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
+        provider_instance_id=provider_instance_id,
+        adapter_id=provider_instance.default_adapter_id if provider_instance else None,
+        provider_name_snapshot=provider_instance.display_name if provider_instance else None,
     )
     # Both new messages are flushed above, so this snapshot includes them and can
     # be reused for the response (expire_on_commit=False keeps the objects live).
@@ -963,6 +973,9 @@ async def _prepare_generation(
         "model": model,
         "prompt_transcript": prompt_transcript,
         "provider": provider,
+        "provider_instance_id": provider_instance_id,
+        "adapter_id": provider_instance.default_adapter_id if provider_instance else None,
+        "provider_name_snapshot": provider_instance.display_name if provider_instance else None,
         "temperature": temperature,
         "user_message": user_message,
     }
@@ -988,6 +1001,8 @@ async def _prepare_regeneration(
         conversation_id=conversation.id,
         message_id=message_id,
     )
+    provider_instance_id = payload.provider_id or target_message.provider_instance_id or conversation.provider_instance_id
+    provider_instance = await get_provider(session, user_id, provider_instance_id) if provider_instance_id else None
     if target_message.role == MessageRole.ASSISTANT:
         if target_message.status == MessageStatus.STREAMING:
             raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能重新生成")
@@ -995,7 +1010,7 @@ async def _prepare_regeneration(
         provider, model, temperature, max_tokens = _resolve_generation_options(
             conversation=conversation,
             provider=payload.provider or target_message.provider,
-            model=payload.model or target_message.model,
+            model=payload.model or target_message.model or (provider_instance.default_model_id if provider_instance else None),
             temperature=payload.temperature if payload.temperature is not None else target_message.temperature,
             max_tokens=payload.max_tokens if payload.max_tokens is not None else target_message.max_tokens,
         )
@@ -1004,7 +1019,7 @@ async def _prepare_regeneration(
         provider, model, temperature, max_tokens = _resolve_generation_options(
             conversation=conversation,
             provider=payload.provider,
-            model=payload.model,
+            model=payload.model or (provider_instance.default_model_id if provider_instance else None),
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
         )
@@ -1029,6 +1044,9 @@ async def _prepare_regeneration(
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
+        provider_instance_id=provider_instance_id,
+        adapter_id=provider_instance.default_adapter_id if provider_instance else None,
+        provider_name_snapshot=provider_instance.display_name if provider_instance else None,
     )
     # Assistant placeholder is flushed above, so this snapshot includes it and can
     # be reused for the response (expire_on_commit=False keeps the objects live).
@@ -1054,6 +1072,9 @@ async def _prepare_regeneration(
         "model": model,
         "prompt_transcript": prompt_transcript,
         "provider": provider,
+        "provider_instance_id": provider_instance_id,
+        "adapter_id": provider_instance.default_adapter_id if provider_instance else None,
+        "provider_name_snapshot": provider_instance.display_name if provider_instance else None,
         "target_message": target_message,
         "temperature": temperature,
     }
@@ -1078,6 +1099,9 @@ async def _initialize_trace_for_context(
         user_message_id=user_message.id if user_message is not None else None,
         assistant_message_id=assistant_message.id,
         provider=str(context["provider"]),
+        provider_instance_id=context.get("provider_instance_id"),
+        adapter_id=context.get("adapter_id"),
+        provider_name_snapshot=context.get("provider_name_snapshot"),
         model=str(context["model"]),
         status=RUN_STATUS_RUNNING,
         started_at=utcnow_naive(),
@@ -2107,7 +2131,11 @@ async def _generate_reply(
             "usage": None,
         }
     if provider == "openai":
-        api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        api_key = (
+            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
+            if conversation.provider_instance_id is not None
+            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        )
         reply = await create_openai_compatible_reply(
             api_key=api_key,
             model=model,
@@ -2122,7 +2150,11 @@ async def _generate_reply(
             "usage": getattr(reply, "usage", None),
         }
     if provider == "anthropic":
-        api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        api_key = (
+            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
+            if conversation.provider_instance_id is not None
+            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        )
         return {
             "content": await create_anthropic_reply(
                 api_key=api_key,
@@ -2163,7 +2195,11 @@ async def _stream_reply(
         }
         return
     if provider == "openai":
-        api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        api_key = (
+            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
+            if conversation.provider_instance_id is not None
+            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        )
         async def emit_tool_event(tool: dict[str, object]) -> None:
             if context is not None:
                 await _record_tool_event(session=session, context=context, tool=tool)
@@ -2182,7 +2218,11 @@ async def _stream_reply(
             yield chunk
         return
     if provider == "anthropic":
-        api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        api_key = (
+            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
+            if conversation.provider_instance_id is not None
+            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+        )
         async def emit_tool_event(tool: dict[str, object]) -> None:
             if context is not None:
                 await _record_tool_event(session=session, context=context, tool=tool)
@@ -2530,6 +2570,9 @@ async def _create_assistant_message(
     model: str,
     temperature,
     max_tokens,
+    provider_instance_id: int | None = None,
+    adapter_id: str | None = None,
+    provider_name_snapshot: str | None = None,
 ) -> Message:
     assistant_message = Message(
         conversation_id=conversation_id,
@@ -2540,6 +2583,9 @@ async def _create_assistant_message(
         parts_schema_version=PARTS_SCHEMA_VERSION,
         parts_updated_at=utcnow_naive(),
         provider=provider,
+        provider_instance_id=provider_instance_id,
+        adapter_id=adapter_id,
+        provider_name_snapshot=provider_name_snapshot,
         model=model,
         temperature=temperature,
         max_tokens=max_tokens,
@@ -2689,6 +2735,9 @@ def serialize_agent_run(run: AgentRun) -> dict[str, Any]:
         "user_message_id": run.user_message_id,
         "assistant_message_id": run.assistant_message_id,
         "provider": run.provider,
+        "provider_id": run.provider_instance_id,
+        "adapter_id": run.adapter_id,
+        "provider_name_snapshot": run.provider_name_snapshot,
         "model": run.model,
         "status": run.status,
         "started_at": run.started_at,

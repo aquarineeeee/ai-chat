@@ -6,9 +6,9 @@ import MessageBubble from './components/MessageBubble'
 import Sidebar from './components/Sidebar'
 import ChatInput from './components/ChatInput'
 import EmptyState from './components/EmptyState'
-import ApiKeysModal from './components/ApiKeysModal'
 import BranchPane from './components/BranchPane'
 import MessageTreePanel from './components/MessageTreePanel'
+import SettingsPage from './SettingsPage'
 import { Menu, X, Loader2, AlertCircle, Download, ChevronDown, Network } from 'lucide-react'
 
 const DEFAULT_BRANCH_PANE_WIDTH = 440
@@ -776,7 +776,7 @@ export default function ChatPage() {
   const { user, logout } = useAuth()
   const { palette, mode, toggle, setPalette } = useTheme()
   const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [keysOpen, setKeysOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [conversations, setConversations] = useState([])
   const [activeId, setActiveId] = useState(null)
   const [messages, setMessages] = useState([])
@@ -805,6 +805,8 @@ export default function ChatPage() {
   const [modelError, setModelError] = useState('')
   const [pendingProvider, setPendingProvider] = useState('openai')
   const [pendingModel, setPendingModel] = useState('')
+  const [defaultProvider, setDefaultProvider] = useState(() => window.localStorage.getItem('ai-chat.default-provider') || 'openai')
+  const [defaultModel, setDefaultModel] = useState(() => window.localStorage.getItem('ai-chat.default-model') || '')
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
   const [branchesByConversation, setBranchesByConversation] = useState({})
@@ -1270,7 +1272,7 @@ export default function ChatPage() {
     setKeysError('')
     setLoadingKeys(true)
     try {
-      const data = await api.getApiKeys()
+      const data = await api.getProviders()
       setApiKeys(data || [])
     } catch (err) {
       setKeysError(err.message || '鍔犺浇 API Keys 澶辫触')
@@ -1377,26 +1379,40 @@ export default function ChatPage() {
     }
   }, [loadBranches, refreshMessages, resetMainEdit])
 
-  const openKeysModal = useCallback(async () => {
-    setKeysOpen(true)
-    await loadApiKeys()
-  }, [loadApiKeys])
+  const openSettings = useCallback(async () => {
+    setSettingsOpen(true)
+    await Promise.all([loadApiKeys(), loadProviderModels(defaultProvider)])
+  }, [defaultProvider, loadApiKeys, loadProviderModels])
+
+  const changeDefaultProvider = useCallback(async (nextProvider) => {
+    setDefaultProvider(nextProvider)
+    setDefaultModel('')
+    window.localStorage.setItem('ai-chat.default-provider', nextProvider)
+    window.localStorage.removeItem('ai-chat.default-model')
+    await loadProviderModels(nextProvider)
+  }, [loadProviderModels])
+
+  const changeDefaultModel = useCallback(nextModel => {
+    setDefaultModel(nextModel)
+    if (nextModel) window.localStorage.setItem('ai-chat.default-model', nextModel)
+    else window.localStorage.removeItem('ai-chat.default-model')
+  }, [])
 
   const createApiKey = useCallback(async (data) => {
-    const result = await api.createApiKey(data)
+    const result = await api.createProvider(data)
     await loadProviderModels(data?.provider || activeConv?.provider || 'openai')
     return result
   }, [activeConv?.provider, loadProviderModels])
 
   const deleteApiKey = useCallback(async (id) => {
-    const result = await api.deleteApiKey(id)
+    const result = await api.deleteProvider(id)
     await loadProviderModels(activeConv?.provider || 'openai')
     return result
   }, [activeConv?.provider, loadProviderModels])
 
   const testApiKey = useCallback(async (id) => {
-    const result = await api.testApiKey(id)
-    await loadProviderModels(activeConv?.provider || result?.api_key?.provider || 'openai')
+    const result = await api.testProvider(id)
+    await loadProviderModels(activeConv?.provider || 'openai')
     return result
   }, [activeConv?.provider, loadProviderModels])
 
@@ -1657,13 +1673,13 @@ export default function ChatPage() {
 
   const createConversation = useCallback(async (title = '新对话', model = undefined, provider = undefined) => {
     const payload = { title }
-    if (provider) payload.provider = provider
-    if (model) payload.model = model
+    if (provider || defaultProvider) payload.provider = provider || defaultProvider
+    if (model || defaultModel) payload.model = model || defaultModel
     const conv = await api.createConversation(payload)
     setConversations(prev => [conv, ...prev])
     await selectConversation(conv.id)
     return conv
-  }, [selectConversation])
+  }, [defaultModel, defaultProvider, selectConversation])
 
   const reloadConversations = useCallback(async (nextActiveId = null) => {
     const items = await fetchConversations()
@@ -2518,7 +2534,7 @@ export default function ChatPage() {
     ? messages.slice(0, Math.max(regenerationCutoffIndex + 1, streamingAssistantIndex + 1))
     : messages
 
-  return (
+  const chatView = (
     <>
       <div className="flex h-screen overflow-hidden" style={{ background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
         <Sidebar
@@ -2545,11 +2561,7 @@ export default function ChatPage() {
           onRenameBranch={renameBranch}
           onDeleteBranch={deleteBranch}
           onClose={() => setSidebarOpen(false)}
-          onToggleTheme={toggle}
-          onSetPalette={setPalette}
-          onOpenKeys={openKeysModal}
-          user={user}
-          onLogout={logout}
+          onOpenSettings={openSettings}
         />
 
         {sidebarOpen && (
@@ -2851,19 +2863,33 @@ export default function ChatPage() {
         onDeleteBranch={branchId => deleteBranch(activeId, branchId)}
       />
 
-      {keysOpen && (
-        <ApiKeysModal
-          open={keysOpen}
-          onClose={() => setKeysOpen(false)}
-          apiKeys={apiKeys}
-          loading={loadingKeys}
-          loadError={keysError}
-          onRefresh={loadApiKeys}
-          onCreate={createApiKey}
-          onDelete={deleteApiKey}
-          onTest={testApiKey}
-        />
-      )}
     </>
   )
+
+  return settingsOpen ? (
+    <SettingsPage
+      user={user}
+      palette={palette}
+      mode={mode}
+      onToggleTheme={toggle}
+      onSetPalette={setPalette}
+      onLogout={logout}
+      onBack={() => setSettingsOpen(false)}
+      apiKeys={apiKeys}
+      loadingKeys={loadingKeys}
+      keysError={keysError}
+      onRefreshKeys={loadApiKeys}
+      onCreateProvider={createApiKey}
+      onDeleteProvider={deleteApiKey}
+      onTestProvider={testApiKey}
+      defaultProvider={defaultProvider}
+      defaultModel={defaultModel}
+      providerOptions={PROVIDER_OPTIONS}
+      modelOptions={modelOptions}
+      modelLoading={loadingModels}
+      modelError={modelError}
+      onDefaultProviderChange={changeDefaultProvider}
+      onDefaultModelChange={changeDefaultModel}
+    />
+  ) : chatView
 }
