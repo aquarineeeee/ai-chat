@@ -1,54 +1,47 @@
 # ai-chat
 
-单用户、自托管的 AI 聊天网站。
+单用户、自托管的 AI 聊天网站，支持流式回复、消息分支和可选的长期记忆。前端使用 React + Vite，后端使用 FastAPI 和 MySQL。
 
-## Tech
+## 功能概览
 
-- FastAPI
-- React + Vite
-- MySQL
-- OpenAI-compatible providers
-- Anthropic native provider
+- `admin` 单账户登录、会话的新建与删除，以及消息持久化。
+- OpenAI-compatible 和 Anthropic 原生服务商配置、连通性测试、模型切换与默认模型保存。
+- 流式回复；消息可复制、编辑，或从编辑处创建新的对话分支。
+- 回答可重新生成并在 sibling 版本间切换；可从 AI 消息创建、打开、重命名、归档或删除分支。
+- 分支树形展示和可视化消息树；分支面板支持即时发送、流式状态与宽度拖动。
+- 长对话游标分页：首次加载最新 40 条，向上滚动按需加载更早消息，并保持阅读位置。
+- 设置中心提供账户、外观、服务商和默认模型配置；支持日间/夜间模式和主题色。
+- 可选 MCP 长期记忆：OpenAI-compatible 与 Anthropic 模型可按需检索或写入记忆，聊天中会展示可展开的工具调用轨迹。
 
-## Current Status
+## 技术栈
 
-当前已实现一版可用的单用户聊天流程：
+- FastAPI、SQLAlchemy、Alembic、MySQL
+- React、Vite、Tailwind CSS
+- OpenAI-compatible providers、Anthropic native provider
+- 可选：兼容 Streamable HTTP 的 MCP 记忆服务（开发记录中使用 Ombre Brain）
 
-- `admin` 登录
-- 会话列表、新建、删除
-- 消息持久化
-- OpenAI-compatible / Anthropic API Key 管理
-- 流式聊天回复
+## 项目结构
 
-还未完成的主要工作：
+- `backend/`：FastAPI 应用、数据库模型、Alembic 迁移、API 路由和 provider 实现
+- `frontend/`：React + Vite 前端
+- `docs/local/devdiary.md`：功能演进和开发记录
 
-- 构建后的单服务托管验证
-- 更完整的测试
-- 正式多用户流程
-
-## Project Structure
-
-- `backend/`: FastAPI、数据库模型、Alembic、API 路由
-- `frontend/`: React + Vite 前端
-- `docs/`: 备忘和开发记录
-
-## Requirements
+## 环境要求
 
 - MySQL 8+
-- Node.js / npm
-- 项目根目录下已有 `.venv`
+- Node.js 与 npm
+- Python 3.11+（或项目根目录已有的 `.venv`）
+- 可选：长期记忆需要另行运行 MCP 服务
 
-当前仓库里的 `.venv` 已安装后端依赖，可以直接使用：
+仓库中的虚拟环境已安装后端依赖，可直接使用：
 
 - `D:\websites\ai-chat\.venv\Scripts\python.exe`
 - `D:\websites\ai-chat\.venv\Scripts\uvicorn.exe`
 - `D:\websites\ai-chat\.venv\Scripts\alembic.exe`
 
-## Backend Config
+## 配置后端
 
-后端读取 [backend/.env](/D:/websites/ai-chat/backend/.env:1)。
-
-至少需要这些配置：
+复制 [`backend/.env.example`](backend/.env.example) 为 `backend/.env` 后按实际环境修改：
 
 ```env
 APP_ENV=development
@@ -61,11 +54,10 @@ DB_NAME=ai_chat
 DB_USER=aichat
 DB_PASSWORD=change_me
 
-JWT_SECRET=change-this-jwt-secret
+JWT_SECRET=replace_with_a_long_random_string
 JWT_EXPIRE_DAYS=7
-KEY_ENCRYPTION_SECRET=change-this-key-secret
-
-LOGIN_PASSWORD_HASH=replace-me
+KEY_ENCRYPTION_SECRET=replace_with_a_second_long_random_string
+LOGIN_PASSWORD_HASH=replace_with_a_real_bcrypt_hash
 
 DEFAULT_PROVIDER=openai
 DEFAULT_MODEL=gpt-4.1-mini
@@ -73,9 +65,26 @@ DEFAULT_TEMPERATURE=0.7
 DEFAULT_MAX_TOKENS=2000
 ```
 
-## Reset Admin Password
+`LOGIN_PASSWORD_HASH`、`JWT_SECRET` 和 `KEY_ENCRYPTION_SECRET` 不应使用示例值，也不应提交到仓库。
 
-生成新的 `LOGIN_PASSWORD_HASH`：
+### 可选：启用长期记忆
+
+先部署可用的 Streamable HTTP MCP 记忆服务，再在 `backend/.env` 中配置：
+
+```env
+MEMORY_ENABLED=true
+MEMORY_MCP_URL=http://127.0.0.1:8001/mcp
+MEMORY_TIMEOUT_SECONDS=20
+MEMORY_WRITE_TIMEOUT_SECONDS=15
+MEMORY_MAX_CONTEXT_CHARS=3000
+MEMORY_WRITE_MAX_CHARS=6000
+```
+
+未部署记忆服务时保持 `MEMORY_ENABLED=false`，不会影响普通聊天。
+
+## 初始化
+
+### 1. 生成管理员密码哈希
 
 ```powershell
 cd D:\websites\ai-chat\backend
@@ -83,84 +92,69 @@ $env:PYTHONPATH=(Get-Location).Path
 D:\websites\ai-chat\.venv\Scripts\python.exe scripts\generate_password_hash.py
 ```
 
-把输出的 hash 填回 [backend/.env](/D:/websites/ai-chat/backend/.env:1) 的 `LOGIN_PASSWORD_HASH`，然后重启后端。
+将输出填入 `backend/.env` 的 `LOGIN_PASSWORD_HASH`。仅当用户表为空时，应用启动会初始化 `admin`；已有用户不会被启动流程覆盖。
 
-注意：
+### 2. 初始化数据库
 
-- 当前逻辑只会在用户表为空时初始化 `admin`
-- 如果数据库里已经有用户，重启后端不会再覆盖现有 `admin` 密码
-- 想重置密码时，需要你手动把数据库里的 `admin.password_hash` 改成新的 hash，或者后续补一个改密码流程
-
-## Database
-
-初始化库和用户可参考 [init_database.sql](/D:/websites/ai-chat/backend/sql/init_database.sql:1)。
-
-如果库已存在但表还没同步，执行：
+创建数据库与账号可参考 [`backend/sql/init_database.sql`](backend/sql/init_database.sql)。随后执行迁移：
 
 ```powershell
 cd D:\websites\ai-chat\backend
 D:\websites\ai-chat\.venv\Scripts\alembic.exe upgrade head
 ```
 
-## Development Run
+## 本地开发
 
-### 1. Start Backend
+### 1. 启动后端
 
 ```powershell
 cd D:\websites\ai-chat\backend
 D:\websites\ai-chat\.venv\Scripts\uvicorn.exe app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-### 2. Start Frontend
+### 2. 安装并启动前端
 
 ```powershell
 cd D:\websites\ai-chat\frontend
+npm ci
 npm run dev
 ```
 
-### 3. Open the App
+访问 <http://127.0.0.1:5173>，使用 `admin` 和生成密码哈希时输入的明文密码登录。
 
-浏览器打开：
+## 配置模型服务商
 
-```text
-http://127.0.0.1:5173
-```
+登录后打开“设置” → “服务商”，新增并测试服务商配置。
 
-## First Login
+| 类型 | `provider` | `base_url` |
+| --- | --- | --- |
+| OpenAI-compatible | `openai` | 官方 OpenAI 可留空；第三方服务填写 API 根地址，通常以 `/v1` 结尾 |
+| Anthropic 原生 API | `anthropic` | 官方 Anthropic 可留空；自定义网关填写 Anthropic API 根地址 |
 
-- 用户名固定是 `admin`
-- 首次初始化时，密码是你为 `LOGIN_PASSWORD_HASH` 生成 hash 时输入的明文密码
+保存成功后，可在“默认模型”中指定新建对话默认使用的服务商和模型。
 
-## Configure API Key
-
-登录后，在侧边栏打开 `管理 API Keys`，新增一条：
-
-OpenAI-compatible：
-
-- `provider`: `openai`
-- `display_name`: 任意，例如 `OpenAI`
-- `base_url`: 官方 OpenAI 留空；第三方兼容服务填它的 API 根地址，通常以 `/v1` 结尾
-- `api_key`: 你的实际 key
-
-Anthropic 原生 API：
-
-- `provider`: `anthropic`
-- `display_name`: 任意，例如 `Anthropic`
-- `base_url`: 官方 Anthropic 留空；自定义网关填 Anthropic API 根地址，通常以 `/v1` 结尾
-- `api_key`: 你的实际 Anthropic key
-
-保存后可以先点“测试”，成功后再发消息。
-
-## Build Frontend
+## 构建与验证
 
 ```powershell
 cd D:\websites\ai-chat\frontend
 npm run build
 ```
 
-当前构建产物输出到 `backend/static`。开发模式已验证可用；构建后单独由 FastAPI 直接托管前端产物的流程，后续还需要再做一次完整确认。
+前端产物输出到 `backend/static`，FastAPI 会在该目录存在时托管 SPA 静态文件。
 
-## Notes
+常用验证命令：
 
-- `messages` 表没有 `user_id`，但通过 `conversation_id -> conversations.user_id` 可以关联到用户，当前结构可继续扩展。
-- 项目现在是单用户优先，多用户注册、改密、管理员初始化收敛都还没做完。
+```powershell
+cd D:\websites\ai-chat\backend
+D:\websites\ai-chat\.venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+```powershell
+cd D:\websites\ai-chat\frontend
+npm run lint
+npm run build
+```
+
+## 当前范围
+
+项目目前以单用户自托管为目标：没有注册、多用户权限管理或完整的改密流程。分支管理、记忆服务与第三方模型服务均应在上线前结合实际 provider 和浏览器环境完成联调。
