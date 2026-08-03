@@ -7,7 +7,7 @@ import httpx
 
 from app.canonical_transcript import user_text_item
 from app.models.api_key import ApiKey
-from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
+from app.providers.openai import create_openai_reply, stream_openai_reply
 
 
 class OpenAIUsageTests(unittest.IsolatedAsyncioTestCase):
@@ -61,10 +61,10 @@ class OpenAIUsageTests(unittest.IsolatedAsyncioTestCase):
             return "tool result"
 
         with (
-            patch("app.providers.openai_compatible.decrypt_text", return_value="secret"),
-            patch("app.providers.openai_compatible.httpx.AsyncClient", return_value=FakeClient(responses)),
+            patch("app.providers.openai.decrypt_text", return_value="secret"),
+            patch("app.providers.openai.httpx.AsyncClient", return_value=FakeClient(responses)),
         ):
-            result = await create_openai_compatible_reply(
+            result = await create_openai_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
                 transcript=[user_text_item("hello")],
@@ -128,11 +128,11 @@ class OpenAIUsageTests(unittest.IsolatedAsyncioTestCase):
         ]
 
         with (
-            patch("app.providers.openai_compatible.decrypt_text", return_value="secret"),
-            patch("app.providers.openai_compatible.httpx.AsyncClient", return_value=FakeClient([FakeStreamResponse(lines)])),
+            patch("app.providers.openai.decrypt_text", return_value="secret"),
+            patch("app.providers.openai.httpx.AsyncClient", return_value=FakeClient([FakeStreamResponse(lines)])),
         ):
             chunks = []
-            async for chunk in stream_openai_compatible_reply(
+            async for chunk in stream_openai_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
                 transcript=[user_text_item("hello")],

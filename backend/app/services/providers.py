@@ -11,7 +11,7 @@ from app.core.encryption import decrypt_text, encrypt_text
 from app.core.exceptions import AppError
 from app.models.provider import ProviderInstance, ProviderModel
 from app.providers.anthropic import list_anthropic_models, normalize_anthropic_base_url, test_anthropic_key
-from app.providers.openai_compatible import list_openai_compatible_models, normalize_base_url, test_openai_compatible_key
+from app.providers.openai import list_openai_models, normalize_base_url, test_openai_key
 from app.providers.registry import get_adapter, list_adapters
 from app.schemas.provider import ProviderCreateRequest, ProviderModelCreateRequest, ProviderModelUpdateRequest, ProviderUpdateRequest
 
@@ -56,6 +56,25 @@ async def get_provider(session: AsyncSession, user_id: int, provider_id: int) ->
     if item is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="服务商不存在")
     return item
+
+
+async def get_preferred_provider_instance(
+    session: AsyncSession,
+    user_id: int,
+    preset_id: str,
+) -> ProviderInstance | None:
+    """Return the enabled instance that backs a runtime provider name."""
+    result = await session.scalars(
+        select(ProviderInstance)
+        .where(
+            ProviderInstance.user_id == user_id,
+            ProviderInstance.preset_id == preset_id,
+            ProviderInstance.enabled.is_(True),
+        )
+        .order_by(ProviderInstance.is_default.desc(), ProviderInstance.updated_at.desc(), ProviderInstance.id.desc())
+        .limit(1)
+    )
+    return result.first()
 
 
 async def create_provider(session: AsyncSession, user_id: int, payload: ProviderCreateRequest) -> ProviderInstance:
@@ -122,12 +141,10 @@ def _api_key_proxy(instance: ProviderInstance):
 
 
 async def get_generation_connection(session: AsyncSession, user_id: int, provider_id: int):
-    """Return the connection metadata used by the compatibility runtime.
+    """Return the connection metadata used by the selected provider adapter.
 
-    The old provider functions intentionally only rely on ``key_encrypted`` and
-    ``base_url``. Keeping that seam lets migrated and newly-created instances
-    share the existing, battle-tested request transport while adapters are
-    incrementally moved behind the registry.
+    Provider adapters share the encrypted-key and base-URL transport seam so
+    provider configuration remains independent from the request protocol.
     """
     instance = await get_provider(session, user_id, provider_id)
     if not instance.enabled:
@@ -141,7 +158,7 @@ async def test_provider(session: AsyncSession, user_id: int, provider_id: int) -
     if instance.default_adapter_id == "anthropic_messages":
         success, message = await test_anthropic_key(api_key=proxy)
     else:
-        success, message = await test_openai_compatible_key(api_key=proxy)
+        success, message = await test_openai_key(api_key=proxy)
     instance.last_tested_at = datetime.now(timezone.utc).replace(tzinfo=None)
     instance.last_test_status = "success" if success else "failed"
     instance.last_test_message = message
@@ -162,7 +179,7 @@ async def sync_models(session: AsyncSession, user_id: int, provider_id: int) -> 
     if instance.default_adapter_id == "anthropic_messages":
         remote = await list_anthropic_models(api_key=proxy)
     else:
-        remote = await list_openai_compatible_models(api_key=proxy)
+        remote = await list_openai_models(api_key=proxy)
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     seen: set[str] = set()
     for item in remote:

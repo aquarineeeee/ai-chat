@@ -9,7 +9,7 @@ from app.models.conversation import Conversation
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.services.branches import create_main_branch_for_conversation
 from app.services.markdown_import import import_markdown_conversation
-from app.services.providers import get_provider
+from app.services.providers import get_preferred_provider_instance, get_provider
 
 
 settings = get_settings()
@@ -48,6 +48,12 @@ async def create_conversation(session: AsyncSession, user_id: int, payload: Conv
     provider_instance_id = payload.provider_id
     provider_name = payload.provider or settings.default_provider
     provider_model = payload.model or settings.default_model
+    if provider_instance_id is None:
+        instance = await get_preferred_provider_instance(session, user_id, provider_name)
+        if instance is not None:
+            provider_instance_id = instance.id
+            provider_name = _runtime_provider_for_instance(instance)
+            provider_model = payload.model or instance.default_model_id or provider_model
     if provider_instance_id is not None:
         instance = await get_provider(session, user_id, provider_instance_id)
         provider_name = _runtime_provider_for_instance(instance)
@@ -84,6 +90,12 @@ async def update_conversation(
         conversation.provider_instance_id = provider_id
         conversation.provider = _runtime_provider_for_instance(instance)
         if "model" not in update_data and instance.default_model_id:
+            conversation.model = instance.default_model_id
+
+    if provider_id is None and "provider" in update_data:
+        instance = await get_preferred_provider_instance(session, user_id, str(update_data["provider"]))
+        conversation.provider_instance_id = instance.id if instance is not None else None
+        if instance is not None and "model" not in update_data and instance.default_model_id:
             conversation.model = instance.default_model_id
 
     for field, value in update_data.items():

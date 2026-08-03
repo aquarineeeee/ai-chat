@@ -494,7 +494,7 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("app.services.messages.get_preferred_api_key", AsyncMock(return_value="api-key")) as mock_get_key,
-            patch("app.services.messages.create_openai_compatible_reply", AsyncMock(return_value="final answer")) as mock_reply,
+            patch("app.services.messages.create_openai_reply", AsyncMock(return_value="final answer")) as mock_reply,
         ):
             result = await messages._generate_reply(
                 session=session,

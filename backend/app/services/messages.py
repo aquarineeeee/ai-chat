@@ -29,10 +29,12 @@ from app.models.run_event import RunEvent
 from app.models.tool_call import ToolCall
 from app.providers import (
     create_anthropic_reply,
-    create_openai_compatible_reply,
+    create_openai_reply,
+    create_openai_responses_reply,
     generate_mock_reply,
     stream_anthropic_reply,
-    stream_openai_compatible_reply,
+    stream_openai_reply,
+    stream_openai_responses_reply,
 )
 from app.schemas.message import (
     ConversationMessagesResponse,
@@ -53,7 +55,7 @@ from app.services.approval_manager import ApprovalDecision, approval_manager
 from app.services.agent_runner import agent_runner
 from app.services.agent_artifacts import tool_output_should_externalize, write_tool_output_artifact
 from app.services.api_keys import get_preferred_api_key
-from app.services.providers import get_generation_connection, get_provider
+from app.services.providers import get_generation_connection, get_preferred_provider_instance, get_provider
 from app.services.agent_trace import (
     EVENT_SCHEMA_VERSION,
     PARTS_SCHEMA_VERSION,
@@ -914,6 +916,10 @@ async def _prepare_generation(
 
     provider_instance_id = payload.provider_id or conversation.provider_instance_id
     provider_instance = await get_provider(session, user_id, provider_instance_id) if provider_instance_id else None
+    if provider_instance is None:
+        requested_provider = (payload.provider or conversation.provider or "").strip().lower()
+        provider_instance = await get_preferred_provider_instance(session, user_id, requested_provider)
+        provider_instance_id = provider_instance.id if provider_instance is not None else None
     provider, model, temperature, max_tokens = _resolve_generation_options(
         conversation=conversation,
         provider=payload.provider,
@@ -1003,6 +1009,10 @@ async def _prepare_regeneration(
     )
     provider_instance_id = payload.provider_id or target_message.provider_instance_id or conversation.provider_instance_id
     provider_instance = await get_provider(session, user_id, provider_instance_id) if provider_instance_id else None
+    if provider_instance is None:
+        requested_provider = (payload.provider or target_message.provider or conversation.provider or "").strip().lower()
+        provider_instance = await get_preferred_provider_instance(session, user_id, requested_provider)
+        provider_instance_id = provider_instance.id if provider_instance is not None else None
     if target_message.role == MessageRole.ASSISTANT:
         if target_message.status == MessageStatus.STREAMING:
             raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能重新生成")
@@ -2197,7 +2207,9 @@ async def _generate_reply(
             if conversation.provider_instance_id is not None
             else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
         )
-        reply = await create_openai_compatible_reply(
+        adapter_id = str((context or {}).get("adapter_id") or "openai_chat_completions")
+        create_reply = create_openai_responses_reply if adapter_id == "openai_responses" else create_openai_reply
+        reply = await create_reply(
             api_key=api_key,
             model=model,
             transcript=prompt_transcript,
@@ -2265,7 +2277,9 @@ async def _stream_reply(
             if context is not None:
                 await _record_tool_event(session=session, context=context, tool=tool)
 
-        async for chunk in stream_openai_compatible_reply(
+        adapter_id = str((context or {}).get("adapter_id") or "openai_chat_completions")
+        stream_reply = stream_openai_responses_reply if adapter_id == "openai_responses" else stream_openai_reply
+        async for chunk in stream_reply(
             api_key=api_key,
             model=model,
             transcript=prompt_transcript,

@@ -13,10 +13,10 @@ from app.providers.anthropic import (
     normalize_anthropic_base_url,
     test_anthropic_key,
 )
-from app.providers.openai_compatible import (
-    list_openai_compatible_models,
+from app.providers.openai import (
+    list_openai_models,
     normalize_base_url,
-    test_openai_compatible_key,
+    test_openai_key,
 )
 from app.schemas.api_key import ApiKeyCreateRequest
 
@@ -104,7 +104,7 @@ async def test_api_key(session: AsyncSession, user_id: int, api_key_id: int) -> 
     if api_key.provider == "anthropic":
         success, message = await test_anthropic_key(api_key=api_key)
     else:
-        success, message = await test_openai_compatible_key(api_key=api_key)
+        success, message = await test_openai_key(api_key=api_key)
     api_key.last_tested_at = datetime.now(timezone.utc).replace(tzinfo=None)
     api_key.last_test_status = "success" if success else "failed"
     api_key.last_test_message = message
@@ -117,7 +117,7 @@ async def list_provider_models(session: AsyncSession, user_id: int, provider: st
     api_key = await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
 
     if api_key.provider == "openai":
-        return await list_openai_compatible_models(api_key=api_key)
+        return await list_openai_models(api_key=api_key)
     if api_key.provider == "anthropic":
         return await list_anthropic_models(api_key=api_key)
 

@@ -8,7 +8,7 @@ import httpx
 from app.canonical_transcript import user_text_item
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
-from app.providers.openai_compatible import create_openai_compatible_reply, stream_openai_compatible_reply
+from app.providers.openai import create_openai_reply, stream_openai_reply
 from app.services.memory_tools import (
     MEMORY_DREAM_TOOL_NAME,
     MEMORY_GROW_TOOL_NAME,
@@ -313,10 +313,10 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
         tool_executor = AsyncMock(return_value="以下是长期记忆检索结果，仅供参考。\n- 项目约束 A")
 
         with (
-            patch("app.providers.openai_compatible.decrypt_text", return_value="secret"),
-            patch("app.providers.openai_compatible.httpx.AsyncClient", return_value=fake_client),
+            patch("app.providers.openai.decrypt_text", return_value="secret"),
+            patch("app.providers.openai.httpx.AsyncClient", return_value=fake_client),
         ):
-            result = await create_openai_compatible_reply(
+            result = await create_openai_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
                 transcript=[user_text_item("继续这个项目")],
@@ -339,9 +339,9 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_reply_rejects_tools_without_executor(self) -> None:
         api_key = ApiKey(provider="openai", key_encrypted="encrypted")
 
-        with patch("app.providers.openai_compatible.decrypt_text", return_value="secret"):
+        with patch("app.providers.openai.decrypt_text", return_value="secret"):
             with self.assertRaises(AppError) as ctx:
-                await create_openai_compatible_reply(
+                await create_openai_reply(
                     api_key=api_key,
                     model="gpt-4.1-mini",
                     transcript=[user_text_item("hello")],
@@ -404,8 +404,8 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
         tool_executor = AsyncMock(return_value="以下是长期记忆检索结果，仅供参考。\n项目约束")
 
         with (
-            patch("app.providers.openai_compatible.decrypt_text", return_value="secret"),
-            patch("app.providers.openai_compatible.httpx.AsyncClient", return_value=fake_client),
+            patch("app.providers.openai.decrypt_text", return_value="secret"),
+            patch("app.providers.openai.httpx.AsyncClient", return_value=fake_client),
         ):
             chunks = []
             tool_events = []
@@ -413,7 +413,7 @@ class OpenAICompatibleToolingTests(unittest.IsolatedAsyncioTestCase):
             async def on_tool_event(event):
                 tool_events.append(event)
 
-            async for chunk in stream_openai_compatible_reply(
+            async for chunk in stream_openai_reply(
                 api_key=api_key,
                 model="gpt-4.1-mini",
                 transcript=[user_text_item("继续")],

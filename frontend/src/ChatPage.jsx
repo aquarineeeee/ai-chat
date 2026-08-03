@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react'
 import { useAuth } from './AuthContext'
 import { useTheme } from './ThemeContext'
 import { api } from './api'
@@ -105,12 +105,12 @@ const EXPORT_OPTIONS = [
   { key: 'json-all_branches', label: 'JSON · 全部分支', format: 'json', scope: 'all_branches' },
 ]
 
-const PROVIDER_OPTIONS = [
-  { value: 'openai', label: 'OpenAI-compatible' },
-  { value: 'anthropic', label: 'Anthropic' },
-]
-
 const ACTIVE_RUN_STATUSES = ['running', 'waiting_approval']
+
+function parseProviderId(value) {
+  const providerId = Number(value)
+  return Number.isInteger(providerId) && providerId > 0 ? providerId : null
+}
 
 function createStreamingAssistantMessage(id, overrides = {}) {
   return {
@@ -852,9 +852,9 @@ export default function ChatPage() {
   const [loadingModels, setLoadingModels] = useState(false)
   const [savingModel, setSavingModel] = useState(false)
   const [modelError, setModelError] = useState('')
-  const [pendingProvider, setPendingProvider] = useState('openai')
+  const [pendingProvider, setPendingProvider] = useState('')
   const [pendingModel, setPendingModel] = useState('')
-  const [defaultProvider, setDefaultProvider] = useState(() => window.localStorage.getItem('ai-chat.default-provider') || 'openai')
+  const [defaultProvider, setDefaultProvider] = useState(() => window.localStorage.getItem('ai-chat.default-provider') || '')
   const [defaultModel, setDefaultModel] = useState(() => window.localStorage.getItem('ai-chat.default-model') || '')
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
@@ -886,6 +886,13 @@ export default function ChatPage() {
   const runStreamControllersRef = useRef(new Map())
   const runSequenceRef = useRef(new Map())
   const activeConv = conversations.find(c => c.id === activeId)
+  const providerOptions = useMemo(
+    () => apiKeys
+      .filter(provider => provider.enabled)
+      .map(provider => ({ value: String(provider.id), label: provider.display_name })),
+    [apiKeys],
+  )
+  const selectedProviderLabel = providerOptions.find(option => option.value === pendingProvider)?.label || ''
 
   useEffect(() => {
     if (!exportMenuOpen) return undefined
@@ -1322,16 +1329,20 @@ export default function ChatPage() {
     setLoadingKeys(true)
     try {
       const data = await api.getProviders()
-      setApiKeys(data || [])
+      const providers = Array.isArray(data) ? data : []
+      setApiKeys(providers)
+      return providers
     } catch (err) {
       setKeysError(err.message || '鍔犺浇 API Keys 澶辫触')
+      return []
     } finally {
       setLoadingKeys(false)
     }
   }, [])
 
-  const loadProviderModels = useCallback(async (provider) => {
-    if (!provider) {
+  const loadProviderModels = useCallback(async (providerValue) => {
+    const providerId = parseProviderId(providerValue)
+    if (!providerId) {
       modelLoadSeqRef.current += 1
       setModelOptions([])
       setModelError('')
@@ -1344,24 +1355,25 @@ export default function ChatPage() {
     setModelError('')
     setLoadingModels(true)
 
-    let request = modelLoadInFlightRef.current.get(provider)
+    const requestKey = String(providerId)
+    let request = modelLoadInFlightRef.current.get(requestKey)
     if (!request) {
-      request = api.getProviderModels(provider)
-      modelLoadInFlightRef.current.set(provider, request)
+      request = api.syncProviderModels(providerId)
+      modelLoadInFlightRef.current.set(requestKey, request)
       request.then(() => {
-        if (modelLoadInFlightRef.current.get(provider) === request) {
-          modelLoadInFlightRef.current.delete(provider)
+        if (modelLoadInFlightRef.current.get(requestKey) === request) {
+          modelLoadInFlightRef.current.delete(requestKey)
         }
       }, () => {
-        if (modelLoadInFlightRef.current.get(provider) === request) {
-          modelLoadInFlightRef.current.delete(provider)
+        if (modelLoadInFlightRef.current.get(requestKey) === request) {
+          modelLoadInFlightRef.current.delete(requestKey)
         }
       })
     }
 
     try {
       const data = await request
-      const items = Array.isArray(data) ? data : []
+      const items = Array.isArray(data) ? data.filter(model => model.enabled) : []
       if (modelLoadSeqRef.current === requestSeq) {
         setModelOptions(items)
         setModelError('')
@@ -1430,7 +1442,9 @@ export default function ChatPage() {
 
   const openSettings = useCallback(async () => {
     setSettingsOpen(true)
-    await Promise.all([loadApiKeys(), loadProviderModels(defaultProvider)])
+    const providers = await loadApiKeys()
+    const providerValue = defaultProvider || String(providers.find(provider => provider.enabled && provider.is_default)?.id || providers.find(provider => provider.enabled)?.id || '')
+    await loadProviderModels(providerValue)
   }, [defaultProvider, loadApiKeys, loadProviderModels])
 
   const changeDefaultProvider = useCallback(async (nextProvider) => {
@@ -1449,21 +1463,28 @@ export default function ChatPage() {
 
   const createApiKey = useCallback(async (data) => {
     const result = await api.createProvider(data)
-    await loadProviderModels(data?.provider || activeConv?.provider || 'openai')
+    await loadApiKeys()
     return result
-  }, [activeConv?.provider, loadProviderModels])
+  }, [loadApiKeys])
 
   const deleteApiKey = useCallback(async (id) => {
     const result = await api.deleteProvider(id)
-    await loadProviderModels(activeConv?.provider || 'openai')
+    await loadApiKeys()
+    if (pendingProvider === String(id)) {
+      await loadProviderModels(null)
+    }
     return result
-  }, [activeConv?.provider, loadProviderModels])
+  }, [loadApiKeys, loadProviderModels, pendingProvider])
 
   const testApiKey = useCallback(async (id) => {
     const result = await api.testProvider(id)
-    await loadProviderModels(activeConv?.provider || 'openai')
+    await loadApiKeys()
     return result
-  }, [activeConv?.provider, loadProviderModels])
+  }, [loadApiKeys])
+
+  useEffect(() => {
+    void loadApiKeys()
+  }, [loadApiKeys])
 
   useEffect(() => {
     let cancelled = false
@@ -1499,18 +1520,34 @@ export default function ChatPage() {
 
   useEffect(() => {
     queueMicrotask(() => {
-      setPendingProvider(activeConv?.provider || 'openai')
+      setPendingProvider(activeConv?.provider_id ? String(activeConv.provider_id) : defaultProvider)
       setPendingModel(activeConv?.model || '')
       setModelError('')
     })
-  }, [activeId, activeConv?.model, activeConv?.provider])
+  }, [activeId, activeConv?.model, activeConv?.provider_id, defaultProvider])
 
   useEffect(() => {
-    const provider = activeConv?.provider || pendingProvider || 'openai'
+    const provider = activeConv?.provider_id ? String(activeConv.provider_id) : pendingProvider
     queueMicrotask(() => {
       void loadProviderModels(provider)
     })
-  }, [activeConv?.provider, loadProviderModels, pendingProvider])
+  }, [activeConv?.provider_id, loadProviderModels, pendingProvider])
+
+  useEffect(() => {
+    if (providerOptions.length === 0) return
+
+    const fallbackProvider = providerOptions.find(option => (
+      apiKeys.find(provider => String(provider.id) === option.value)?.is_default
+    )) || providerOptions[0]
+
+    if (!providerOptions.some(option => option.value === defaultProvider)) {
+      setDefaultProvider(fallbackProvider.value)
+      window.localStorage.setItem('ai-chat.default-provider', fallbackProvider.value)
+    }
+    if (!activeConv?.provider_id && !providerOptions.some(option => option.value === pendingProvider)) {
+      setPendingProvider(fallbackProvider.value)
+    }
+  }, [activeConv?.provider_id, apiKeys, defaultProvider, pendingProvider, providerOptions])
 
   useEffect(() => {
     if (!activeId) return undefined
@@ -1720,9 +1757,10 @@ export default function ChatPage() {
     }
   }, [activeId, patchBranchPane, submitToolApproval])
 
-  const createConversation = useCallback(async (title = '新对话', model = undefined, provider = undefined) => {
+  const createConversation = useCallback(async (title = '新对话', model = undefined, providerValue = undefined) => {
     const payload = { title }
-    if (provider || defaultProvider) payload.provider = provider || defaultProvider
+    const providerId = parseProviderId(providerValue || defaultProvider)
+    if (providerId) payload.provider_id = providerId
     if (model || defaultModel) payload.model = model || defaultModel
     const conv = await api.createConversation(payload)
     setConversations(prev => [conv, ...prev])
@@ -1894,22 +1932,23 @@ export default function ChatPage() {
     setModelError('')
     void loadProviderModels(nextProvider)
 
-    if (!activeConv || !nextProvider || nextProvider === activeConv.provider) {
+    const providerId = parseProviderId(nextProvider)
+    if (!activeConv || !providerId || providerId === activeConv.provider_id) {
       return
     }
 
     setSavingModel(true)
     try {
-      const updated = await api.updateConversation(activeConv.id, { provider: nextProvider, model: null })
+      const updated = await api.updateConversation(activeConv.id, { provider_id: providerId, model: null })
       setConversations(prev => sortConversations(prev.map(conv => (conv.id === updated.id ? updated : conv))))
     } catch (e) {
-      setPendingProvider(activeConv.provider || 'openai')
+      setPendingProvider(activeConv.provider_id ? String(activeConv.provider_id) : defaultProvider)
       setPendingModel(activeConv.model || '')
       setModelError(e.message || '保存 Provider 失败')
     } finally {
       setSavingModel(false)
     }
-  }, [activeConv, loadProviderModels])
+  }, [activeConv, defaultProvider, loadProviderModels])
 
   const openBranchPane = useCallback(async (sourceMessage, paneIdToMark = null) => {
     if (!activeId || sourceMessage?.role !== 'assistant') return
@@ -2801,10 +2840,10 @@ export default function ChatPage() {
                 onSend={sendMessage}
                 disabled={mainBusy}
                 providerValue={pendingProvider}
-                providerOptions={PROVIDER_OPTIONS}
+                providerOptions={providerOptions}
                 modelValue={pendingModel}
                 modelOptions={modelChoices}
-                modelProvider={pendingProvider}
+                modelProvider={selectedProviderLabel}
                 modelLoading={loadingModels}
                 modelSaving={savingModel}
                 modelError={modelError}
@@ -2876,10 +2915,10 @@ export default function ChatPage() {
                           getRunViewForAssistant(messageId)?.pending_approval?.tool_call_ref === toolCallRef
                         )}
                         providerValue={pendingProvider}
-                        providerOptions={PROVIDER_OPTIONS}
+                        providerOptions={providerOptions}
                         modelValue={pendingModel}
                         modelOptions={modelChoices}
-                        modelProvider={pendingProvider}
+                        modelProvider={selectedProviderLabel}
                         modelLoading={loadingModels}
                         modelSaving={savingModel}
                         modelError={modelError}
@@ -2933,7 +2972,7 @@ export default function ChatPage() {
       onTestProvider={testApiKey}
       defaultProvider={defaultProvider}
       defaultModel={defaultModel}
-      providerOptions={PROVIDER_OPTIONS}
+      providerOptions={providerOptions}
       modelOptions={modelOptions}
       modelLoading={loadingModels}
       modelError={modelError}

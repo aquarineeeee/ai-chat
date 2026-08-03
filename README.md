@@ -5,19 +5,19 @@
 ## 功能概览
 
 - `admin` 单账户登录、会话的新建与删除，以及消息持久化。
-- OpenAI-compatible 和 Anthropic 原生服务商配置、连通性测试、模型切换与默认模型保存。
+- OpenAI 和 Anthropic 原生服务商配置、连通性测试、模型切换与默认模型保存。
 - 流式回复；消息可复制、编辑，或从编辑处创建新的对话分支。
 - 回答可重新生成并在 sibling 版本间切换；可从 AI 消息创建、打开、重命名、归档或删除分支。
 - 分支树形展示和可视化消息树；分支面板支持即时发送、流式状态与宽度拖动。
 - 长对话游标分页：首次加载最新 40 条，向上滚动按需加载更早消息，并保持阅读位置。
 - 设置中心提供账户、外观、服务商和默认模型配置；支持日间/夜间模式和主题色。
-- 可选 MCP 长期记忆：OpenAI-compatible 与 Anthropic 模型可按需检索或写入记忆，聊天中会展示可展开的工具调用轨迹。
+- 可选 MCP 长期记忆：OpenAI 与 Anthropic 模型可按需检索或写入记忆，聊天中会展示可展开的工具调用轨迹。
 
 ## 技术栈
 
 - FastAPI、SQLAlchemy、Alembic、MySQL
 - React、Vite、Tailwind CSS
-- OpenAI-compatible providers、Anthropic native provider
+- OpenAI Chat Completions / Responses、Anthropic native provider
 - 可选：兼容 Streamable HTTP 的 MCP 记忆服务（开发记录中使用 Ombre Brain）
 
 ## 项目结构
@@ -128,7 +128,7 @@ npm run dev
 
 | 类型 | `provider` | `base_url` |
 | --- | --- | --- |
-| OpenAI-compatible | `openai` | 官方 OpenAI 可留空；第三方服务填写 API 根地址，通常以 `/v1` 结尾 |
+| OpenAI | `openai` | 官方 OpenAI 可留空；使用 Chat Completions 协议的第三方服务填写 API 根地址，通常以 `/v1` 结尾 |
 | Anthropic 原生 API | `anthropic` | 官方 Anthropic 可留空；自定义网关填写 Anthropic API 根地址 |
 
 保存成功后，可在“默认模型”中指定新建对话默认使用的服务商和模型。
