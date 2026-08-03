@@ -461,6 +461,27 @@ function ensureProcessedGroupItem(items, stepId) {
   }
 }
 
+function ensureThinkingGroupItem(items) {
+  const index = findTimelineIndex(items, item => item?.type === 'thinking_group')
+  if (index >= 0) {
+    return { items, index, item: { ...items[index] } }
+  }
+
+  const group = {
+    type: 'thinking_group',
+    group_id: 'thinking_group',
+    label: 'Thinking',
+    status: 'active',
+    created_at: null,
+    thinking: [],
+  }
+  return {
+    items: [group, ...items],
+    index: 0,
+    item: group,
+  }
+}
+
 function applyRunEventToRunView(runView, event) {
   if (!event?.run_id) return runView
 
@@ -489,6 +510,34 @@ function applyRunEventToRunView(runView, event) {
     }
   } else if (event.type === 'tool_call.approval.granted' || event.type === 'tool_call.approval.denied') {
     nextView.pending_approval = null
+  }
+
+  if (event.type.startsWith('thinking.')) {
+    const ensured = ensureThinkingGroupItem(nextView.items)
+    const group = {
+      ...ensured.item,
+      label: ensured.item?.label || 'Thinking',
+      thinking: Array.isArray(ensured.item?.thinking) ? [...ensured.item.thinking] : [],
+    }
+    const thinkingId = payload?.thinking_id || `thinking_${event.sequence}`
+    const thinkingIndex = group.thinking.findIndex(item => item?.thinking_id === thinkingId)
+    const currentThinking = thinkingIndex >= 0
+      ? { ...group.thinking[thinkingIndex] }
+      : { thinking_id: thinkingId, text: '', redacted: false }
+
+    if (event.type === 'thinking.created') currentThinking.text = payload?.text || ''
+    if (event.type === 'thinking.delta') currentThinking.text = `${currentThinking.text || ''}${payload?.text || ''}`
+    if (event.type === 'thinking.redacted') currentThinking.redacted = true
+
+    if (thinkingIndex >= 0) group.thinking[thinkingIndex] = currentThinking
+    else group.thinking.push(currentThinking)
+    group.status = 'active'
+    group.created_at = group.created_at || new Date().toISOString()
+
+    const nextItems = [...ensured.items]
+    nextItems[ensured.index] = group
+    nextView.items = nextItems
+    return nextView
   }
 
   if (event.type.startsWith('tool_call.')) {
@@ -565,7 +614,7 @@ function applyRunEventToRunView(runView, event) {
     nextView.status = 'completed'
     nextView.pending_approval = null
     nextView.items = nextView.items.map(item => (
-      item?.type === 'processed_group'
+      item?.type === 'processed_group' || item?.type === 'thinking_group'
         ? { ...item, status: 'completed' }
         : item
     ))

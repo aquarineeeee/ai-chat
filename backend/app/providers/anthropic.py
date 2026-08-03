@@ -166,6 +166,24 @@ def _normalize_message_content(content: object) -> str | list[dict[str, object]]
                     normalized_blocks.append(block)
                 continue
 
+            if block_type == "thinking":
+                thinking = str(item.get("thinking") or "")
+                signature = str(item.get("signature") or "")
+                normalized_blocks.append(
+                    {
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }
+                )
+                continue
+
+            if block_type == "redacted_thinking":
+                data = str(item.get("data") or "")
+                if data:
+                    normalized_blocks.append({"type": "redacted_thinking", "data": data})
+                continue
+
             if block_type == "tool_use":
                 tool_use_id = item.get("id")
                 name = item.get("name")
@@ -471,6 +489,22 @@ def _finalize_stream_content_blocks(
                 content_blocks.append({"type": "text", "text": text})
             continue
 
+        if block_type == "thinking":
+            content_blocks.append(
+                {
+                    "type": "thinking",
+                    "thinking": str(block.get("thinking") or ""),
+                    "signature": str(block.get("signature") or ""),
+                }
+            )
+            continue
+
+        if block_type == "redacted_thinking":
+            data = str(block.get("data") or "")
+            if data:
+                content_blocks.append({"type": "redacted_thinking", "data": data})
+            continue
+
         if block_type != "tool_use":
             continue
 
@@ -507,6 +541,7 @@ async def _stream_completion_round(
     url: str,
     api_key: str,
     payload: dict[str, object],
+    round_index: int,
 ) -> AsyncIterator[dict[str, object]]:
     try:
         async with client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
@@ -581,6 +616,29 @@ async def _stream_completion_round(
                             accumulated_content += text
                             emitted_content += text
                             yield {"type": "content", "content": text}
+                    elif block_type == "thinking":
+                        thinking = str(content_block.get("thinking") or "")
+                        content_blocks_by_index[index] = {
+                            "type": "thinking",
+                            "thinking": thinking,
+                            "signature": str(content_block.get("signature") or ""),
+                        }
+                        thinking_id = f"thinking-{round_index}-{index}"
+                        yield {
+                            "type": "thinking_started",
+                            "thinking_id": thinking_id,
+                            "text": thinking,
+                        }
+                    elif block_type == "redacted_thinking":
+                        data = str(content_block.get("data") or "")
+                        content_blocks_by_index[index] = {
+                            "type": "redacted_thinking",
+                            "data": data,
+                        }
+                        yield {
+                            "type": "thinking_redacted",
+                            "thinking_id": f"thinking-{round_index}-{index}",
+                        }
                     elif block_type == "tool_use":
                         tool_input = content_block.get("input")
                         content_blocks_by_index[index] = {
@@ -589,6 +647,15 @@ async def _stream_completion_round(
                             "name": str(content_block.get("name") or ""),
                             "input": _json_copy(tool_input) if isinstance(tool_input, dict) else {},
                             "_input_json": "",
+                        }
+                    continue
+
+                if event_type == "content_block_stop":
+                    index = data.get("index")
+                    if isinstance(index, int) and content_blocks_by_index.get(index, {}).get("type") == "thinking":
+                        yield {
+                            "type": "thinking_completed",
+                            "thinking_id": f"thinking-{round_index}-{index}",
                         }
                     continue
 
@@ -614,6 +681,29 @@ async def _stream_completion_round(
                     accumulated_content += text
                     emitted_content += text
                     yield {"type": "content", "content": text}
+                elif delta_type == "thinking_delta":
+                    thinking = str(delta.get("thinking") or "")
+                    if not thinking:
+                        continue
+                    block = content_blocks_by_index.setdefault(
+                        index,
+                        {"type": "thinking", "thinking": "", "signature": ""},
+                    )
+                    block["type"] = "thinking"
+                    block["thinking"] = str(block.get("thinking") or "") + thinking
+                    yield {
+                        "type": "thinking_delta",
+                        "thinking_id": f"thinking-{round_index}-{index}",
+                        "text": thinking,
+                    }
+                elif delta_type == "signature_delta":
+                    signature = str(delta.get("signature") or "")
+                    block = content_blocks_by_index.setdefault(
+                        index,
+                        {"type": "thinking", "thinking": "", "signature": ""},
+                    )
+                    block["type"] = "thinking"
+                    block["signature"] = signature
                 elif delta_type == "input_json_delta":
                     partial_json = str(delta.get("partial_json") or "")
                     if not partial_json:
@@ -685,7 +775,7 @@ async def create_anthropic_reply(
         message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
-        for _ in range(max_rounds):
+        for round_index in range(max_rounds):
             payload = _messages_payload(
                 model=model,
                 messages=message_history,
@@ -767,7 +857,7 @@ async def stream_anthropic_reply(
         message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
-        for _ in range(max_rounds):
+        for round_index in range(max_rounds):
             payload = _messages_payload(
                 model=model,
                 messages=message_history,
@@ -787,6 +877,7 @@ async def stream_anthropic_reply(
                 url=url,
                 api_key=raw_key,
                 payload=payload,
+                round_index=round_index,
             ):
                 event_type = event.get("type")
                 total_usage = _merge_usage(
@@ -799,6 +890,8 @@ async def stream_anthropic_reply(
                         round_content += content
                         round_emitted_content += content
                         yield {"type": "content", "content": content}
+                elif event_type in {"thinking_started", "thinking_delta", "thinking_completed", "thinking_redacted"}:
+                    yield event
                 elif event_type == "tool_uses":
                     content_blocks = event.get("content_blocks")
                     tool_uses = event.get("tool_uses")

@@ -1337,6 +1337,27 @@ async def _record_text_retraction(
     )
 
 
+async def _record_thinking_event(
+    *,
+    session: AsyncSession,
+    context: dict[str, object],
+    event_type: str,
+    thinking_id: str,
+    text: str = "",
+    redacted: bool = False,
+) -> RunEvent:
+    return await _record_run_event(
+        session=session,
+        context=context,
+        event_type=event_type,
+        payload={
+            "thinking_id": thinking_id,
+            "text": text,
+            "redacted": redacted,
+        },
+    )
+
+
 async def _record_commentary(
     *,
     session: AsyncSession,
@@ -2088,6 +2109,46 @@ async def _collect_reply_from_stream(
                 pending_commentary = context.setdefault("pending_commentary", [])
                 assert isinstance(pending_commentary, list)
                 pending_commentary.append(text)
+        elif chunk_type == "thinking_started":
+            thinking_id = str(chunk.get("thinking_id") or "")
+            if thinking_id:
+                await _record_thinking_event(
+                    session=session,
+                    context=context,
+                    event_type="thinking.created",
+                    thinking_id=thinking_id,
+                    text=str(chunk.get("text") or ""),
+                )
+        elif chunk_type == "thinking_delta":
+            thinking_id = str(chunk.get("thinking_id") or "")
+            text = str(chunk.get("text") or "")
+            if thinking_id and text:
+                await _record_thinking_event(
+                    session=session,
+                    context=context,
+                    event_type="thinking.delta",
+                    thinking_id=thinking_id,
+                    text=text,
+                )
+        elif chunk_type == "thinking_completed":
+            thinking_id = str(chunk.get("thinking_id") or "")
+            if thinking_id:
+                await _record_thinking_event(
+                    session=session,
+                    context=context,
+                    event_type="thinking.completed",
+                    thinking_id=thinking_id,
+                )
+        elif chunk_type == "thinking_redacted":
+            thinking_id = str(chunk.get("thinking_id") or "")
+            if thinking_id:
+                await _record_thinking_event(
+                    session=session,
+                    context=context,
+                    event_type="thinking.redacted",
+                    thinking_id=thinking_id,
+                    redacted=True,
+                )
         elif chunk_type == "commentary":
             step_id = str(chunk.get("step_id") or "") or None
             if step_id:

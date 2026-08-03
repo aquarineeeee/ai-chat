@@ -245,6 +245,59 @@ function ProcessedGroupCard({ item, defaultExpanded = false }) {
   )
 }
 
+function ThinkingGroupCard({ item, defaultExpanded = false }) {
+  const [expanded, setExpanded] = useState(defaultExpanded)
+  const entries = Array.isArray(item?.thinking) ? item.thinking : []
+  const visibleEntries = entries
+    .map(entry => String(entry?.text || '').trim())
+    .filter(Boolean)
+  const hasRedactedEntry = entries.some(entry => entry?.redacted)
+
+  if (visibleEntries.length === 0 && !hasRedactedEntry) return null
+
+  return (
+    <div
+      className="my-3 rounded-2xl border overflow-hidden"
+      style={{
+        background: 'color-mix(in srgb, var(--bg-surface) 84%, transparent)',
+        borderColor: 'var(--border)',
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setExpanded(value => !value)}
+        className="w-full flex items-center justify-between gap-3 px-3 py-2 text-left"
+        style={{ color: 'var(--text-secondary)' }}
+      >
+        <span className="text-xs">{item?.label || 'Thinking'}</span>
+        <ChevronDown
+          className="w-3.5 h-3.5 shrink-0"
+          style={{ transform: expanded ? 'rotate(180deg)' : 'rotate(0deg)' }}
+        />
+      </button>
+      {expanded && (
+        <div
+          className="px-3 py-2 text-xs whitespace-pre-wrap break-words border-t"
+          style={{
+            color: 'var(--text-primary)',
+            borderColor: 'var(--border)',
+            background: 'var(--bg-elevated)',
+          }}
+        >
+          {visibleEntries.map((text, index) => (
+            <div key={`thinking-${index}`} className={index > 0 ? 'mt-3' : ''}>{text}</div>
+          ))}
+          {hasRedactedEntry && (
+            <div className={visibleEntries.length > 0 ? 'mt-3' : ''} style={{ color: 'var(--text-muted)' }}>
+              部分思考内容因安全策略不可显示。
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function FinalAnswerBody({ message }) {
   const parts = Array.isArray(message?.parts) ? message.parts : []
   const textParts = parts.filter(part => part?.type === 'text' && String(part?.text || '').trim())
@@ -339,9 +392,17 @@ function AssistantBody({
     )
   }
 
+  const thinkingItem = runItems.find(item => item?.type === 'thinking_group')
+
   return (
     <div>
-      {runItems.map((item, index) => {
+      {thinkingItem && (
+        <ThinkingGroupCard
+          item={thinkingItem}
+          defaultExpanded={thinkingItem?.status === 'active'}
+        />
+      )}
+      {runItems.filter(item => item?.type !== 'thinking_group').map((item, index) => {
         if (item?.type === 'tool_step') {
           return (
             <ToolPartCard

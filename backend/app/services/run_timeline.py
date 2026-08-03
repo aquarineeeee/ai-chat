@@ -24,11 +24,24 @@ def project_run_view(
     phase = _phase_from_run(run)
     pending_approval = _pending_approval_from_run(run)
     steps: OrderedDict[str, dict[str, Any]] = OrderedDict()
+    thinking_entries: list[dict[str, Any]] = []
+    thinking_by_id: dict[str, dict[str, Any]] = {}
+    thinking_created_at: str | None = None
 
     for event in sorted(events, key=lambda item: (item.sequence, item.id or 0)):
         payload = json_loads(event.payload_json, default={})
         if not isinstance(payload, dict):
             payload = {}
+
+        if event.event_type.startswith("thinking."):
+            thinking_created_at = _apply_thinking_event(
+                entries=thinking_entries,
+                entries_by_id=thinking_by_id,
+                created_at=thinking_created_at,
+                event=event,
+                payload=payload,
+            )
+            continue
 
         if event.event_type == "run.phase.changed":
             next_phase = str(payload.get("phase") or "").strip()
@@ -61,6 +74,17 @@ def project_run_view(
             _apply_commentary_event_to_step(step=step_entry, event=event, payload=payload)
 
     items: list[dict[str, Any]] = []
+    if thinking_entries:
+        items.append(
+            {
+                "type": "thinking_group",
+                "group_id": f"tg_{run.id}",
+                "label": "Thinking",
+                "status": "active" if run.status in {"running", "waiting_approval"} else "completed",
+                "created_at": thinking_created_at,
+                "thinking": thinking_entries,
+            }
+        )
     for step in steps.values():
         tool_step = {
             "type": "tool_step",
@@ -246,6 +270,37 @@ def _apply_commentary_event_to_step(
 
     if event.event_type == "commentary.completed" and text:
         commentary["text"] = text
+
+
+def _apply_thinking_event(
+    *,
+    entries: list[dict[str, Any]],
+    entries_by_id: dict[str, dict[str, Any]],
+    created_at: str | None,
+    event: RunEvent,
+    payload: dict[str, Any],
+) -> str | None:
+    thinking_id = str(payload.get("thinking_id") or f"thinking_{event.sequence}")
+    entry = entries_by_id.get(thinking_id)
+    if entry is None:
+        entry = {
+            "thinking_id": thinking_id,
+            "text": "",
+            "redacted": False,
+        }
+        entries_by_id[thinking_id] = entry
+        entries.append(entry)
+        if created_at is None:
+            created_at = _dt_to_iso(event.created_at)
+
+    if event.event_type == "thinking.created":
+        entry["text"] = str(payload.get("text") or "")
+    elif event.event_type == "thinking.delta":
+        entry["text"] = f"{entry.get('text') or ''}{str(payload.get('text') or '')}"
+    elif event.event_type == "thinking.redacted":
+        entry["redacted"] = True
+
+    return created_at
 
 
 def _processed_label(step: dict[str, Any]) -> str:
