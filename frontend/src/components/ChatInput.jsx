@@ -90,7 +90,7 @@ export default function ChatInput({
               {!modelValue && <option value="">默认模型</option>}
               {modelOptions.map(option => (
                 <option key={option.id} value={option.id}>
-                  {option.id}
+                  {option.name || option.id}
                 </option>
               ))}
             </select>

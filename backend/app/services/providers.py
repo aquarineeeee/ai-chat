@@ -188,11 +188,16 @@ async def sync_models(session: AsyncSession, user_id: int, provider_id: int) -> 
             continue
         seen.add(model_id)
         model = await session.scalar(select(ProviderModel).where(ProviderModel.provider_instance_id == provider_id, ProviderModel.model_id == model_id))
+        remote_display_name = (
+            item.get("owned_by")
+            if instance.default_adapter_id == "anthropic_messages"
+            else item.get("display_name") or model_id
+        )
         if model is None:
-            model = ProviderModel(provider_instance_id=provider_id, model_id=model_id, remote_display_name=item.get("owned_by"), last_seen_at=now)
+            model = ProviderModel(provider_instance_id=provider_id, model_id=model_id, remote_display_name=remote_display_name, last_seen_at=now)
             session.add(model)
         else:
-            model.remote_display_name = item.get("owned_by")
+            model.remote_display_name = remote_display_name
             model.remote_available = True
             model.last_seen_at = now
     existing = await session.scalars(select(ProviderModel).where(ProviderModel.provider_instance_id == provider_id))

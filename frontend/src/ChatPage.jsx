@@ -1373,7 +1373,14 @@ export default function ChatPage() {
 
     try {
       const data = await request
-      const items = Array.isArray(data) ? data.filter(model => model.enabled) : []
+      const items = Array.isArray(data)
+        ? data
+          .filter(model => model.enabled)
+          .map(model => ({
+            id: model.model_id,
+            name: model.display_name_override || model.remote_display_name || model.model_id,
+          }))
+        : []
       if (modelLoadSeqRef.current === requestSeq) {
         setModelOptions(items)
         setModelError('')

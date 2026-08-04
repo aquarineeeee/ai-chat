@@ -7,10 +7,46 @@ import httpx
 
 from app.canonical_transcript import user_text_item
 from app.models.api_key import ApiKey
-from app.providers.openai import create_openai_reply, stream_openai_reply
+from app.providers.openai import create_openai_reply, list_openai_models, stream_openai_reply
 
 
 class OpenAIUsageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_list_models_keeps_model_name_separate_from_owner(self) -> None:
+        api_key = ApiKey(provider="openai", key_encrypted="encrypted")
+        response = httpx.Response(
+            status_code=200,
+            json={
+                "data": [
+                    {"id": "model-alpha", "name": "Model Alpha", "owned_by": "custom-provider"},
+                    {"id": "model-beta", "owned_by": "custom-provider"},
+                ]
+            },
+        )
+
+        class FakeClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, _url, headers=None):
+                return response
+
+        with (
+            patch("app.providers.openai.decrypt_text", return_value="secret"),
+            patch("app.providers.openai.httpx.AsyncClient", return_value=FakeClient()),
+        ):
+            models = await list_openai_models(api_key=api_key)
+
+        self.assertEqual(
+            models,
+            [
+                {"id": "model-alpha", "display_name": "Model Alpha", "owned_by": "custom-provider"},
+                {"id": "model-beta", "display_name": None, "owned_by": "custom-provider"},
+            ],
+        )
+
     async def test_create_reply_exposes_accumulated_usage_on_result(self) -> None:
         api_key = ApiKey(provider="openai", key_encrypted="encrypted")
         responses = [
