@@ -8,6 +8,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.message import MessageRole, MessageStatus
+from app.schemas.base import UTCResponseModel
 
 
 class MessageCreateRequest(BaseModel):
@@ -47,7 +48,7 @@ class MessageEditRequest(BaseModel):
     context_message_count: int | None = Field(default=None, ge=1)
 
 
-class MessageNodeResponse(BaseModel):
+class MessageNodeResponse(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -77,7 +78,7 @@ class MessageNodeResponse(BaseModel):
     next_sibling_id: int | None = None
 
 
-class MessageTreeBranchMarkerResponse(BaseModel):
+class MessageTreeBranchMarkerResponse(UTCResponseModel):
     id: int
     title: str | None = None
     auto_title: str | None = None
@@ -85,7 +86,7 @@ class MessageTreeBranchMarkerResponse(BaseModel):
     is_current_branch: bool = False
 
 
-class MessageTreeNodeResponse(BaseModel):
+class MessageTreeNodeResponse(UTCResponseModel):
     id: int
     conversation_id: int
     parent_id: int | None
@@ -109,14 +110,14 @@ class MessageTreeNodeResponse(BaseModel):
     branch_markers: list[MessageTreeBranchMarkerResponse] = Field(default_factory=list)
 
 
-class MessageTreeEdgeResponse(BaseModel):
+class MessageTreeEdgeResponse(UTCResponseModel):
     id: str
     source: int
     target: int
     is_active_path: bool = False
 
 
-class ConversationMessageTreeResponse(BaseModel):
+class ConversationMessageTreeResponse(UTCResponseModel):
     conversation_id: int
     current_branch_id: int | None = None
     current_leaf_message_id: int | None = None
@@ -127,7 +128,7 @@ class ConversationMessageTreeResponse(BaseModel):
     total_node_count: int = 0
 
 
-class ConversationMessagesResponse(BaseModel):
+class ConversationMessagesResponse(UTCResponseModel):
     conversation_id: int
     current_branch_id: int | None = None
     current_leaf_message_id: int | None
@@ -136,7 +137,7 @@ class ConversationMessagesResponse(BaseModel):
     next_before_message_id: int | None = None
 
 
-class MessageSendResponse(BaseModel):
+class MessageSendResponse(UTCResponseModel):
     conversation_id: int
     current_branch_id: int | None = None
     current_leaf_message_id: int
@@ -144,7 +145,7 @@ class MessageSendResponse(BaseModel):
     assistant_message: MessageNodeResponse
 
 
-class MessageRegenerateResponse(BaseModel):
+class MessageRegenerateResponse(UTCResponseModel):
     conversation_id: int
     current_branch_id: int | None = None
     current_leaf_message_id: int
@@ -152,7 +153,7 @@ class MessageRegenerateResponse(BaseModel):
     assistant_message: MessageNodeResponse
 
 
-class MessageEditResponse(BaseModel):
+class MessageEditResponse(UTCResponseModel):
     conversation_id: int
     message_id: int
     current_branch_id: int | None = None

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -203,7 +203,12 @@ def apply_run_event_to_parts(
 
 
 def utcnow_naive() -> datetime:
-    return datetime.utcnow()
+    """Return the current UTC clock time for storage in a MySQL DATETIME column.
+
+    MySQL DATETIME has no offset metadata, so the application's database sessions
+    are configured to UTC as well.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def _retract_text_from_parts(parts: list[dict[str, Any]], text: str) -> list[dict[str, Any]]:

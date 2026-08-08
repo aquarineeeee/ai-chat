@@ -10,7 +10,11 @@ from app.models.user import User
 
 
 settings = get_settings()
-engine = create_async_engine(settings.async_database_url, pool_pre_ping=True)
+engine = create_async_engine(
+    settings.async_database_url,
+    pool_pre_ping=True,
+    connect_args=settings.mysql_connect_args,
+)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

@@ -55,6 +55,11 @@ class Settings:
         password = quote_plus(self.db_password)
         return f"mysql+pymysql://{self.db_user}:{password}@{self.db_host}:{self.db_port}/{self.db_name}?charset=utf8mb4"
 
+    @property
+    def mysql_connect_args(self) -> dict[str, str]:
+        """Configure every MySQL session to evaluate server timestamps in UTC."""
+        return {"init_command": "SET time_zone = '+00:00'"}
+
 
 def _required(name: str, default: str | None = None) -> str:
     value = os.getenv(name, default)

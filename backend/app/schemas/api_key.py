@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCResponseModel
+
 
 class ApiKeyCreateRequest(BaseModel):
     provider: str = Field(min_length=1, max_length=50)
@@ -12,7 +14,7 @@ class ApiKeyCreateRequest(BaseModel):
     api_key: str = Field(min_length=1, max_length=1000)
 
 
-class ApiKeyResponse(BaseModel):
+class ApiKeyResponse(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -28,12 +30,12 @@ class ApiKeyResponse(BaseModel):
     updated_at: datetime
 
 
-class ApiKeyTestResponse(BaseModel):
+class ApiKeyTestResponse(UTCResponseModel):
     success: bool
     message: str
     api_key: ApiKeyResponse
 
 
-class ProviderModelResponse(BaseModel):
+class ProviderModelResponse(UTCResponseModel):
     id: str
     owned_by: str | None = None

@@ -4,8 +4,10 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCResponseModel
 
-class ProviderPresetResponse(BaseModel):
+
+class ProviderPresetResponse(UTCResponseModel):
     id: str
     display_name: str
     default_adapter_id: str
@@ -33,7 +35,7 @@ class ProviderUpdateRequest(BaseModel):
     is_default: bool | None = None
 
 
-class ProviderResponse(BaseModel):
+class ProviderResponse(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     preset_id: str
@@ -62,7 +64,7 @@ class ProviderModelUpdateRequest(BaseModel):
     enabled: bool | None = None
 
 
-class ProviderModelResponse(BaseModel):
+class ProviderModelResponse(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     provider_instance_id: int
@@ -77,7 +79,7 @@ class ProviderModelResponse(BaseModel):
     last_seen_at: datetime | None
 
 
-class ProviderTestResponse(BaseModel):
+class ProviderTestResponse(UTCResponseModel):
     success: bool
     message: str
     provider: ProviderResponse

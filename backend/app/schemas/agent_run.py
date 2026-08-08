@@ -5,8 +5,10 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.base import UTCResponseModel
 
-class RunEventResponse(BaseModel):
+
+class RunEventResponse(UTCResponseModel):
     event_id: str
     type: str
     run_id: int
@@ -18,7 +20,7 @@ class RunEventResponse(BaseModel):
     payload: dict[str, Any] = {}
 
 
-class AgentRunResponse(BaseModel):
+class AgentRunResponse(UTCResponseModel):
     id: int
     conversation_id: int
     user_message_id: int | None = None
@@ -44,17 +46,17 @@ class RunApprovalDecisionRequest(BaseModel):
     comment: str | None = None
 
 
-class AgentRunListResponse(BaseModel):
+class AgentRunListResponse(UTCResponseModel):
     items: list[AgentRunResponse]
 
 
-class RunEventListResponse(BaseModel):
+class RunEventListResponse(UTCResponseModel):
     run_id: int
     after_sequence: int
     items: list[RunEventResponse]
 
 
-class RunViewResponse(BaseModel):
+class RunViewResponse(UTCResponseModel):
     run_id: int
     assistant_message_id: int | None = None
     status: str

@@ -5,6 +5,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCResponseModel
+
 
 class ConversationCreate(BaseModel):
     title: str = Field(default="新对话", min_length=1, max_length=255)
@@ -28,7 +30,7 @@ class ConversationUpdate(BaseModel):
     current_branch_id: int | None = Field(default=None, ge=1)
 
 
-class ConversationResponse(BaseModel):
+class ConversationResponse(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -46,14 +48,14 @@ class ConversationResponse(BaseModel):
     updated_at: datetime
 
 
-class ImportedConversationSummary(BaseModel):
+class ImportedConversationSummary(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
     title: str
 
 
-class ConversationImportResponse(BaseModel):
+class ConversationImportResponse(UTCResponseModel):
     conversation: ImportedConversationSummary
     message_count: int
     ignored_count: int

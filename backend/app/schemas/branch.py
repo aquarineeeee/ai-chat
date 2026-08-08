@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.base import UTCResponseModel
+
 
 class BranchCreate(BaseModel):
     parent_branch_id: int | None = Field(default=None, ge=1)
@@ -15,7 +17,7 @@ class BranchUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
 
 
-class BranchResponse(BaseModel):
+class BranchResponse(UTCResponseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
