@@ -22,6 +22,15 @@ const STREAM_INACTIVITY_TIMEOUT_MS = 60000
 const DEFAULT_BRANCH_CONTEXT_MESSAGE_COUNT = 6
 const INITIAL_MESSAGE_PAGE_SIZE = 40
 const LOAD_EARLIER_THRESHOLD_PX = 120
+const DEFAULT_TEMPERATURE = 0.7
+
+function resolveTemperature(value) {
+  if (value === null || value === undefined || value === '') return DEFAULT_TEMPERATURE
+  const temperature = Number(value)
+  return Number.isFinite(temperature) && temperature >= 0 && temperature <= 2
+    ? temperature
+    : DEFAULT_TEMPERATURE
+}
 
 function buildConversationTurns(messageItems) {
   const turns = []
@@ -876,6 +885,7 @@ export default function ChatPage() {
   const [modelError, setModelError] = useState('')
   const [pendingProvider, setPendingProvider] = useState('')
   const [pendingModel, setPendingModel] = useState('')
+  const [pendingTemperature, setPendingTemperature] = useState(DEFAULT_TEMPERATURE)
   const [defaultProvider, setDefaultProvider] = useState(() => window.localStorage.getItem('ai-chat.default-provider') || '')
   const [defaultModel, setDefaultModel] = useState(() => window.localStorage.getItem('ai-chat.default-model') || '')
   const [importing, setImporting] = useState(false)
@@ -1558,9 +1568,10 @@ export default function ChatPage() {
     queueMicrotask(() => {
       setPendingProvider(activeConv?.provider_id ? String(activeConv.provider_id) : defaultProvider)
       setPendingModel(activeConv?.model || '')
+      setPendingTemperature(resolveTemperature(activeConv?.temperature))
       setModelError('')
     })
-  }, [activeId, activeConv?.model, activeConv?.provider_id, defaultProvider])
+  }, [activeId, activeConv?.model, activeConv?.provider_id, activeConv?.temperature, defaultProvider])
 
   useEffect(() => {
     const provider = activeConv?.provider_id ? String(activeConv.provider_id) : pendingProvider
@@ -1793,16 +1804,17 @@ export default function ChatPage() {
     }
   }, [activeId, patchBranchPane, submitToolApproval])
 
-  const createConversation = useCallback(async (title = '新对话', model = undefined, providerValue = undefined) => {
+  const createConversation = useCallback(async (title = '新对话', model = undefined, providerValue = undefined, temperature = pendingTemperature) => {
     const payload = { title }
     const providerId = parseProviderId(providerValue || defaultProvider)
     if (providerId) payload.provider_id = providerId
     if (model || defaultModel) payload.model = model || defaultModel
+    payload.temperature = resolveTemperature(temperature)
     const conv = await api.createConversation(payload)
     setConversations(prev => [conv, ...prev])
     await selectConversation(conv.id)
     return conv
-  }, [defaultModel, defaultProvider, selectConversation])
+  }, [defaultModel, defaultProvider, pendingTemperature, selectConversation])
 
   const reloadConversations = useCallback(async (nextActiveId = null) => {
     const items = await fetchConversations()
@@ -1962,6 +1974,28 @@ export default function ChatPage() {
     }
   }, [activeConv])
 
+  const changeConversationTemperature = useCallback(async (nextTemperature) => {
+    const normalized = String(nextTemperature).trim()
+    if (!/^(?:0|1|2)(?:\.[0-9])?$/.test(normalized)) return
+    const temperature = Number(normalized)
+
+    setPendingTemperature(temperature)
+    setModelError('')
+
+    if (!activeConv || (activeConv.temperature !== null && Number(activeConv.temperature) === temperature)) return
+
+    setSavingModel(true)
+    try {
+      const updated = await api.updateConversation(activeConv.id, { temperature })
+      setConversations(prev => sortConversations(prev.map(conv => (conv.id === updated.id ? updated : conv))))
+    } catch (e) {
+      setPendingTemperature(resolveTemperature(activeConv.temperature))
+      setModelError(e.message || '保存 Temperature 失败')
+    } finally {
+      setSavingModel(false)
+    }
+  }, [activeConv])
+
   const changeConversationProvider = useCallback(async (nextProvider) => {
     setPendingProvider(nextProvider)
     setPendingModel('')
@@ -2082,15 +2116,16 @@ export default function ChatPage() {
     resetMainEdit,
   ])
 
-  const sendMessage = useCallback(async (content) => {
+  const sendMessage = useCallback(async (content, temperatureOverride = pendingTemperature) => {
     if (!content.trim() || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
     setError('')
+    const requestTemperature = resolveTemperature(temperatureOverride)
 
     let convId = activeId
     let branchId = activeConv?.current_branch_id ?? null
     if (!convId) {
       try {
-        const conv = await createConversation(content.slice(0, 40), pendingModel || undefined, pendingProvider || undefined)
+        const conv = await createConversation(content.slice(0, 40), pendingModel || undefined, pendingProvider || undefined, requestTemperature)
         convId = conv.id
         branchId = conv.current_branch_id ?? null
       } catch {
@@ -2120,12 +2155,12 @@ export default function ChatPage() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, ...(branchId ? { branch_id: branchId } : {}) }),
+        body: JSON.stringify({ content, temperature: requestTemperature, ...(branchId ? { branch_id: branchId } : {}) }),
         signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
-        await api.sendMessage(convId, { content, ...(branchId ? { branch_id: branchId } : {}) })
+        await api.sendMessage(convId, { content, temperature: requestTemperature, ...(branchId ? { branch_id: branchId } : {}) })
         await refreshMessages(convId)
         await loadBranches(convId)
         return
@@ -2183,7 +2218,7 @@ export default function ChatPage() {
       setSending(false)
       setMainStreamingAssistantId(null)
     }
-  }, [activeConv, activeId, applyRunEventToUi, createConversation, ensureMainAssistantPlaceholder, loadBranches, pendingModel, pendingProvider, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, applyRunEventToUi, createConversation, ensureMainAssistantPlaceholder, loadBranches, pendingModel, pendingProvider, pendingTemperature, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const regenerateMainMessage = useCallback(async (messageId) => {
     if (!activeId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -2202,12 +2237,12 @@ export default function ChatPage() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(branchId ? { branch_id: branchId } : {}),
+        body: JSON.stringify({ temperature: pendingTemperature, ...(branchId ? { branch_id: branchId } : {}) }),
         signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
-        await api.regenerateMessage(activeId, messageId, branchId ? { branch_id: branchId } : {})
+        await api.regenerateMessage(activeId, messageId, { temperature: pendingTemperature, ...(branchId ? { branch_id: branchId } : {}) })
         await refreshMessages(activeId)
         await loadBranches(activeId)
         return
@@ -2257,7 +2292,7 @@ export default function ChatPage() {
       setRegeneratingMessageId(null)
       setMainStreamingAssistantId(null)
     }
-  }, [activeConv, activeId, applyRunEventToUi, ensureMainAssistantPlaceholder, loadBranches, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, applyRunEventToUi, ensureMainAssistantPlaceholder, loadBranches, pendingTemperature, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const switchMainSibling = useCallback(async (targetMessageId) => {
     if (!activeId || !targetMessageId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -2366,10 +2401,11 @@ export default function ChatPage() {
     })
   }, [patchBranchPane])
 
-  const sendBranchMessage = useCallback(async (paneId, content) => {
+  const sendBranchMessage = useCallback(async (paneId, content, temperatureOverride = pendingTemperature) => {
     const pane = branchPanes.find(item => item.id === paneId)
     if (!content.trim() || !activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
 
+    const requestTemperature = resolveTemperature(temperatureOverride)
     const userMsg = {
       id: Date.now(),
       role: 'user',
@@ -2380,6 +2416,7 @@ export default function ChatPage() {
     const payload = {
       content,
       parent_id: pane.currentLeafMessageId,
+      temperature: requestTemperature,
       ...(pane.branchId ? { branch_id: pane.branchId } : {}),
       activate_branch: false,
       ...buildBranchContextPayload(pane),
@@ -2459,7 +2496,7 @@ export default function ChatPage() {
     } finally {
       patchBranchPane(paneId, { sending: false, streamingAssistantId: null })
     }
-  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, recoverBranchInterruptedStream, refreshBranchPane])
+  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, pendingTemperature, recoverBranchInterruptedStream, refreshBranchPane])
 
   const regenerateBranchMessage = useCallback(async (paneId, messageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -2477,6 +2514,7 @@ export default function ChatPage() {
     let sawEvent = false
     try {
       const payload = {
+        temperature: pendingTemperature,
         ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         activate_branch: false,
         ...buildBranchContextPayload(pane),
@@ -2541,7 +2579,7 @@ export default function ChatPage() {
         streamingAssistantId: null,
       })
     }
-  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, recoverBranchInterruptedStream, refreshBranchPane])
+  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, pendingTemperature, recoverBranchInterruptedStream, refreshBranchPane])
 
   const switchBranchPaneSibling = useCallback(async (paneId, targetMessageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -2994,8 +3032,10 @@ export default function ChatPage() {
                 modelLoading={loadingModels}
                 modelSaving={savingModel}
                 modelError={modelError}
+                temperatureValue={pendingTemperature}
                 onProviderChange={changeConversationProvider}
                 onModelChange={changeConversationModel}
+                onTemperatureChange={changeConversationTemperature}
               />
             </div>
 
@@ -3049,7 +3089,7 @@ export default function ChatPage() {
                         onEditSubmit={messageId => submitBranchEdit(pane.id, messageId)}
                         onEditDraftChange={content => patchBranchPane(pane.id, { editingContent: content })}
                         onEditModeChange={mode => patchBranchPane(pane.id, { editingMode: mode })}
-                        onSend={content => sendBranchMessage(pane.id, content)}
+                        onSend={(content, temperature) => sendBranchMessage(pane.id, content, temperature)}
                         onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
                         onDelete={messageId => deleteBranchMessage(pane.id, messageId)}
                         onCreateBranch={message => openBranchPane(message, pane.id)}
@@ -3069,8 +3109,10 @@ export default function ChatPage() {
                         modelLoading={loadingModels}
                         modelSaving={savingModel}
                         modelError={modelError}
+                        temperatureValue={pendingTemperature}
                         onProviderChange={changeConversationProvider}
                         onModelChange={changeConversationModel}
+                        onTemperatureChange={changeConversationTemperature}
                       />
                     </div>
                   ))}

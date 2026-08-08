@@ -931,6 +931,8 @@ async def _prepare_generation(
         conversation.provider_instance_id = provider_instance_id
         conversation.provider = provider
         conversation.model = model
+    if payload.temperature is not None:
+        conversation.temperature = temperature
 
     user_message = Message(
         conversation_id=conversation.id,
@@ -1035,6 +1037,9 @@ async def _prepare_regeneration(
         )
     else:
         raise AppError(status_code=400, code="VALIDATION_ERROR", message="不支持重新生成此类型消息")
+
+    if payload.temperature is not None:
+        conversation.temperature = temperature
 
     context_root_message_id = payload.context_root_message_id
     if payload.context_mode in {"root_only", "last_n"}:

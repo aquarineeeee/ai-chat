@@ -32,8 +32,10 @@ export default function BranchPane({
   modelLoading = false,
   modelSaving = false,
   modelError = '',
+  temperatureValue = 0.7,
   onProviderChange,
   onModelChange,
+  onTemperatureChange,
 }) {
   const rootMessage = pane.messages[0] || pane.sourceMessage
   const branchMessages = pane.messages.length > 0 && pane.messages[0]?.id === pane.rootMessageId
@@ -216,8 +218,10 @@ export default function BranchPane({
         modelLoading={modelLoading}
         modelSaving={modelSaving}
         modelError={modelError}
+        temperatureValue={temperatureValue}
         onProviderChange={onProviderChange}
         onModelChange={onModelChange}
+        onTemperatureChange={onTemperatureChange}
       />
     </section>
   )

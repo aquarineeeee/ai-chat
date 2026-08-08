@@ -12,11 +12,18 @@ export default function ChatInput({
   modelLoading = false,
   modelSaving = false,
   modelError = '',
+  temperatureValue = 0.7,
   onProviderChange,
   onModelChange,
+  onTemperatureChange,
 }) {
   const [value, setValue] = useState('')
+  const [temperatureDraft, setTemperatureDraft] = useState(String(temperatureValue))
   const textareaRef = useRef(null)
+
+  useEffect(() => {
+    setTemperatureDraft(String(temperatureValue))
+  }, [temperatureValue])
 
   useEffect(() => {
     const ta = textareaRef.current
@@ -35,7 +42,7 @@ export default function ChatInput({
   function submit() {
     const trimmed = value.trim()
     if (!trimmed || disabled) return
-    onSend(trimmed)
+    onSend(trimmed, temperatureDraft)
     setValue('')
   }
 
@@ -94,6 +101,36 @@ export default function ChatInput({
                 </option>
               ))}
             </select>
+            <label className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs font-medium shrink-0" style={{ color: 'var(--text-muted)' }}>
+                Temperature
+              </span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={temperatureDraft}
+                onChange={e => {
+                  const nextValue = e.target.value
+                  if (/^\d?(?:\.\d?)?$/.test(nextValue)) setTemperatureDraft(nextValue)
+                }}
+                onBlur={() => {
+                  if (/^(?:0|1|2)(?:\.[0-9])?$/.test(temperatureDraft)) {
+                    onTemperatureChange?.(temperatureDraft)
+                  } else {
+                    setTemperatureDraft(String(temperatureValue))
+                  }
+                }}
+                disabled={disabled || modelSaving}
+                className="w-16 text-xs rounded-lg px-2.5 py-1.5"
+                style={{
+                  background: 'var(--bg-surface)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-primary)',
+                }}
+                aria-label="设置 Temperature"
+                title="Temperature（0 至 2）"
+              />
+            </label>
           </div>
 
           <div className="flex items-center gap-1.5 text-xs min-w-0" style={{ color: modelError ? 'var(--error-text)' : 'var(--text-muted)' }}>
