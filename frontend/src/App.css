@@ -161,6 +161,121 @@
   }
 }
 
+.conversation-ruler {
+  position: fixed;
+  z-index: 12;
+  width: 20px;
+  height: 0;
+  pointer-events: none;
+}
+
+.conversation-ruler-track {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 20px;
+  padding: 0;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.conversation-ruler-tick {
+  position: relative;
+  display: block;
+  width: 20px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  transition: transform 140ms ease;
+}
+
+.conversation-ruler-tick::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 13px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text-muted);
+  content: '';
+  opacity: 0.72;
+  transform: translate(-50%, -50%);
+  transition: width 140ms ease, opacity 140ms ease, background-color 140ms ease;
+}
+
+.conversation-ruler-tick:hover,
+.conversation-ruler-tick:focus-visible {
+  outline: none;
+}
+
+.conversation-ruler-tick:hover::after,
+.conversation-ruler-tick:focus-visible::after {
+  width: 17px;
+  opacity: 1;
+  background: var(--text-primary);
+}
+
+.conversation-ruler-tick.is-active::after {
+  width: 17px;
+  background: var(--accent);
+  opacity: 1;
+}
+
+.conversation-ruler-tooltip {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: max-content;
+  max-width: min(280px, calc(100vw - 88px));
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--bg-surface) 96%, transparent);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: left;
+  transform: translateY(-50%) translateX(-4px);
+  visibility: hidden;
+  opacity: 0;
+  transition: opacity 140ms ease, transform 140ms ease, visibility 140ms ease;
+  pointer-events: none;
+}
+
+.conversation-ruler-tooltip strong,
+.conversation-ruler-tooltip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-ruler-tooltip strong {
+  color: var(--text-primary);
+  font-weight: 650;
+  white-space: normal;
+}
+
+.conversation-ruler-tooltip span { white-space: nowrap; }
+
+.conversation-ruler-tick:hover .conversation-ruler-tooltip,
+.conversation-ruler-tick:focus-visible .conversation-ruler-tooltip {
+  visibility: visible;
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+@media (max-width: 1023px), (max-height: 580px) {
+  .conversation-ruler { display: none; }
+}
+
 .ticks {
   position: relative;
   width: 100%;
@@ -381,6 +496,70 @@
   outline: 2px solid var(--text-primary);
   outline-offset: 3px;
   transform: scale(1.08);
+}
+
+.provider-switch {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.provider-switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.provider-switch-track {
+  display: block;
+  width: 40px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.provider-switch-track::after {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: 2px;
+  border-radius: 50%;
+  background: var(--text-primary);
+  box-shadow: 0 1px 3px var(--overlay);
+  content: '';
+  transition: transform 160ms ease, background-color 160ms ease;
+}
+
+.provider-switch input:checked + .provider-switch-track {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.provider-switch input:checked + .provider-switch-track::after {
+  transform: translateX(16px);
+  background: #fff;
+}
+
+.provider-switch input:focus-visible + .provider-switch-track {
+  outline: 2px solid var(--accent-hover);
+  outline-offset: 2px;
+}
+
+.provider-switch input:disabled + .provider-switch-track {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.provider-switch:has(input:disabled) {
+  cursor: not-allowed;
 }
 
 @media (max-width: 640px) {

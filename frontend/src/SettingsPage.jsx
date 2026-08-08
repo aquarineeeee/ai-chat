@@ -32,6 +32,10 @@ export default function SettingsPage({
   onCreateProvider,
   onDeleteProvider,
   onTestProvider,
+  onUpdateProvider,
+  onLoadProviderModels,
+  onSyncProviderModels,
+  onUpdateProviderModel,
   defaultProvider,
   defaultModel,
   providerOptions,
@@ -135,6 +139,10 @@ export default function SettingsPage({
                 onCreate={onCreateProvider}
                 onDelete={onDeleteProvider}
                 onTest={onTestProvider}
+                onUpdateProvider={onUpdateProvider}
+                onLoadProviderModels={onLoadProviderModels}
+                onSyncProviderModels={onSyncProviderModels}
+                onUpdateProviderModel={onUpdateProviderModel}
               />
             </section>
           )}

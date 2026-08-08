@@ -8,7 +8,9 @@ import ChatInput from './components/ChatInput'
 import EmptyState from './components/EmptyState'
 import BranchPane from './components/BranchPane'
 import MessageTreePanel from './components/MessageTreePanel'
+import ConversationRuler from './components/ConversationRuler'
 import SettingsPage from './SettingsPage'
+import { CHAT_RULER_WINDOW_SIZE } from './config/chat'
 import { Menu, X, Loader2, AlertCircle, Download, ChevronDown, Network } from 'lucide-react'
 
 const DEFAULT_BRANCH_PANE_WIDTH = 440
@@ -20,6 +22,26 @@ const STREAM_INACTIVITY_TIMEOUT_MS = 60000
 const DEFAULT_BRANCH_CONTEXT_MESSAGE_COUNT = 6
 const INITIAL_MESSAGE_PAGE_SIZE = 40
 const LOAD_EARLIER_THRESHOLD_PX = 120
+
+function buildConversationTurns(messageItems) {
+  const turns = []
+
+  messageItems.forEach((message, index) => {
+    if (message.role !== 'user') return
+
+    const assistantMessage = messageItems.slice(index + 1).find(nextMessage => (
+      nextMessage.role === 'assistant'
+      || nextMessage.role === 'user'
+    ))
+
+    turns.push({
+      userMessage: message,
+      assistantMessage: assistantMessage?.role === 'assistant' ? assistantMessage : null,
+    })
+  })
+
+  return turns
+}
 
 function clampBranchPaneWidth(width, containerWidth) {
   if (!Number.isFinite(width)) return DEFAULT_BRANCH_PANE_WIDTH
@@ -874,15 +896,18 @@ export default function ChatPage() {
   })
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const [exportingKey, setExportingKey] = useState('')
+  const [rulerAnchorTurnId, setRulerAnchorTurnId] = useState(null)
+  const [rulerPosition, setRulerPosition] = useState(null)
   const bottomRef = useRef(null)
   const messageListRef = useRef(null)
+  const userMessageElementRefs = useRef(new Map())
+  const rulerScrollFrameRef = useRef(null)
   const activeConversationIdRef = useRef(null)
   const loadingEarlierMessagesRef = useRef(false)
   const exportMenuRef = useRef(null)
   const conversationLayoutRef = useRef(null)
   const resizeCleanupRef = useRef(null)
   const modelLoadSeqRef = useRef(0)
-  const modelLoadInFlightRef = useRef(new Map())
   const runStreamControllersRef = useRef(new Map())
   const runSequenceRef = useRef(new Map())
   const activeConv = conversations.find(c => c.id === activeId)
@@ -1355,27 +1380,13 @@ export default function ChatPage() {
     setModelError('')
     setLoadingModels(true)
 
-    const requestKey = String(providerId)
-    let request = modelLoadInFlightRef.current.get(requestKey)
-    if (!request) {
-      request = api.syncProviderModels(providerId)
-      modelLoadInFlightRef.current.set(requestKey, request)
-      request.then(() => {
-        if (modelLoadInFlightRef.current.get(requestKey) === request) {
-          modelLoadInFlightRef.current.delete(requestKey)
-        }
-      }, () => {
-        if (modelLoadInFlightRef.current.get(requestKey) === request) {
-          modelLoadInFlightRef.current.delete(requestKey)
-        }
-      })
-    }
-
     try {
-      const data = await request
+      // Model selectors only read the locally cached catalogue. Remote discovery
+      // is deliberately limited to the explicit refresh action in settings.
+      const data = await api.getProviderInstanceModels(providerId)
       const items = Array.isArray(data)
         ? data
-          .filter(model => model.enabled)
+          .filter(model => model.enabled && model.remote_available)
           .map(model => ({
             id: model.model_id,
             name: model.display_name_override || model.remote_display_name || model.model_id,
@@ -1488,6 +1499,24 @@ export default function ChatPage() {
     await loadApiKeys()
     return result
   }, [loadApiKeys])
+
+  const updateProvider = useCallback(async (id, data) => {
+    const result = await api.updateProvider(id, data)
+    await loadApiKeys()
+    return result
+  }, [loadApiKeys])
+
+  const syncProviderModels = useCallback(async (id) => {
+    const result = await api.syncProviderModels(id)
+    if (pendingProvider === String(id)) await loadProviderModels(id)
+    return result
+  }, [loadProviderModels, pendingProvider])
+
+  const updateProviderModel = useCallback(async (id, modelId, data) => {
+    const result = await api.updateProviderModel(id, modelId, data)
+    if (pendingProvider === String(id)) await loadProviderModels(id)
+    return result
+  }, [loadProviderModels, pendingProvider])
 
   useEffect(() => {
     void loadApiKeys()
@@ -2628,6 +2657,104 @@ export default function ChatPage() {
   const displayedMessages = regenerationCutoffIndex >= 0
     ? messages.slice(0, Math.max(regenerationCutoffIndex + 1, streamingAssistantIndex + 1))
     : messages
+  const conversationTurns = useMemo(
+    () => buildConversationTurns(displayedMessages),
+    [displayedMessages],
+  )
+
+  const updateRulerAnchor = useCallback(() => {
+    const container = messageListRef.current
+    if (!container || conversationTurns.length < CHAT_RULER_WINDOW_SIZE) return
+
+    const containerRect = container.getBoundingClientRect()
+    const viewportMiddle = containerRect.top + (containerRect.height / 2)
+    let closestTurnId = null
+    let closestDistance = Number.POSITIVE_INFINITY
+
+    conversationTurns.forEach(turn => {
+      const element = userMessageElementRefs.current.get(turn.userMessage.id)
+      if (!element) return
+      const rect = element.getBoundingClientRect()
+      const distance = Math.abs((rect.top + (rect.height / 2)) - viewportMiddle)
+      if (distance < closestDistance) {
+        closestDistance = distance
+        closestTurnId = turn.userMessage.id
+      }
+    })
+
+    if (closestTurnId) {
+      setRulerAnchorTurnId(current => current === closestTurnId ? current : closestTurnId)
+    }
+  }, [conversationTurns])
+
+  const updateRulerPosition = useCallback(() => {
+    const container = messageListRef.current
+    if (!container || conversationTurns.length < CHAT_RULER_WINDOW_SIZE) {
+      setRulerPosition(null)
+      return
+    }
+
+    const rect = container.getBoundingClientRect()
+    const nextPosition = {
+      top: Math.round(rect.top + (rect.height / 2)),
+      left: Math.round(rect.left + 10),
+    }
+
+    setRulerPosition(current => (
+      current?.top === nextPosition.top && current?.left === nextPosition.left
+        ? current
+        : nextPosition
+    ))
+  }, [conversationTurns.length])
+
+  useLayoutEffect(() => {
+    updateRulerAnchor()
+  }, [updateRulerAnchor])
+
+  useLayoutEffect(() => {
+    updateRulerPosition()
+    const container = messageListRef.current
+    if (!container) return undefined
+
+    const observer = new ResizeObserver(updateRulerPosition)
+    observer.observe(container)
+    window.addEventListener('resize', updateRulerPosition)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateRulerPosition)
+    }
+  }, [updateRulerPosition])
+
+  useEffect(() => () => {
+    if (rulerScrollFrameRef.current) cancelAnimationFrame(rulerScrollFrameRef.current)
+  }, [])
+
+  const handleMessageListScroll = useCallback((event) => {
+    if (event.currentTarget.scrollTop <= LOAD_EARLIER_THRESHOLD_PX) {
+      void loadEarlierMessages()
+    }
+
+    if (rulerScrollFrameRef.current) return
+    rulerScrollFrameRef.current = requestAnimationFrame(() => {
+      rulerScrollFrameRef.current = null
+      updateRulerAnchor()
+    })
+  }, [loadEarlierMessages, updateRulerAnchor])
+
+  const jumpToTurn = useCallback((messageId) => {
+    const container = messageListRef.current
+    const target = userMessageElementRefs.current.get(messageId)
+    if (!container || !target) return
+
+    setRulerAnchorTurnId(messageId)
+    const containerRect = container.getBoundingClientRect()
+    const targetRect = target.getBoundingClientRect()
+    const targetTop = container.scrollTop
+      + targetRect.top
+      - containerRect.top
+      - ((container.clientHeight - targetRect.height) / 2)
+    container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' })
+  }, [])
 
   const chatView = (
     <>
@@ -2756,11 +2883,7 @@ export default function ChatPage() {
             <div className="flex flex-col flex-1 min-w-0">
               <div
                 ref={messageListRef}
-                onScroll={event => {
-                  if (event.currentTarget.scrollTop <= LOAD_EARLIER_THRESHOLD_PX) {
-                    void loadEarlierMessages()
-                  }
-                }}
+                onScroll={handleMessageListScroll}
                 className="relative flex-1 overflow-y-auto scrollbar-thin"
               >
                 {loadingEarlierMessages && (
@@ -2775,41 +2898,57 @@ export default function ChatPage() {
                 ) : messages.length === 0 ? (
                   <EmptyState onSend={sendMessage} />
                 ) : (
-                  <div className="max-w-3xl mx-auto px-4 py-6 space-y-1">
-                    {displayedMessages.map(msg => {
-                      return (
-                        <MessageBubble
-                          key={msg.id}
-                          message={msg}
-                          runView={getRunViewForAssistant(msg.id)}
-                          onCopy={msg.role === 'system' ? undefined : () => { void copyMainMessage(msg) }}
-                          onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
-                          onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
-                          onDelete={msg.role === 'system' ? undefined : () => { void deleteMainMessage(msg.id) }}
-                          onCreateBranch={msg.role === 'assistant' ? () => { void openBranchPane(msg) } : undefined}
-                          onPrevSibling={msg.previous_sibling_id ? () => { void switchMainSibling(msg.previous_sibling_id) } : undefined}
-                          onNextSibling={msg.next_sibling_id ? () => { void switchMainSibling(msg.next_sibling_id) } : undefined}
-                          isEditing={editingMessageId === msg.id}
-                          editDraft={editingMessageId === msg.id ? editingContent : ''}
-                          editMode={editingMode}
-                          onEditDraftChange={setEditingContent}
-                          onEditModeChange={setEditingMode}
-                          onEditCancel={resetMainEdit}
-                          onEditSubmit={() => { void submitMainEdit(msg.id) }}
-                          isEditSubmitting={editingSubmittingMessageId === msg.id}
-                          disableActions={mainBusy}
-                          isRegenerating={regeneratingMessageId === msg.id}
-                          isDeleting={deletingMessageId === msg.id}
-                          isCreatingBranch={creatingBranchMessageId === msg.id}
-                          onApproveToolCall={msg.role === 'assistant' ? toolCallRef => { void approveMainToolCall(msg, toolCallRef) } : undefined}
-                          onDenyToolCall={msg.role === 'assistant' ? toolCallRef => { void denyMainToolCall(msg, toolCallRef) } : undefined}
-                          isApprovalSubmitting={toolCallRef => isApprovalActionPending(msg.id, toolCallRef)}
-                          canApproveToolCall={toolCallRef => (
-                            getRunViewForAssistant(msg.id)?.pending_approval?.tool_call_ref === toolCallRef
-                          )}
-                        />
-                      )
-                    })}
+                  <div className="relative min-h-full">
+                    <ConversationRuler
+                      turns={conversationTurns}
+                      anchorTurnId={rulerAnchorTurnId}
+                      onJump={jumpToTurn}
+                      position={rulerPosition}
+                    />
+                    <div className="max-w-3xl mx-auto px-4 py-6 space-y-1">
+                      {displayedMessages.map(msg => {
+                        return (
+                          <div
+                            key={msg.id}
+                            ref={msg.role === 'user'
+                              ? element => {
+                                  if (element) userMessageElementRefs.current.set(msg.id, element)
+                                  else userMessageElementRefs.current.delete(msg.id)
+                                }
+                              : undefined}
+                          >
+                            <MessageBubble
+                            message={msg}
+                            runView={getRunViewForAssistant(msg.id)}
+                            onCopy={msg.role === 'system' ? undefined : () => { void copyMainMessage(msg) }}
+                            onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
+                            onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
+                            onDelete={msg.role === 'system' ? undefined : () => { void deleteMainMessage(msg.id) }}
+                            onCreateBranch={msg.role === 'assistant' ? () => { void openBranchPane(msg) } : undefined}
+                            onPrevSibling={msg.previous_sibling_id ? () => { void switchMainSibling(msg.previous_sibling_id) } : undefined}
+                            onNextSibling={msg.next_sibling_id ? () => { void switchMainSibling(msg.next_sibling_id) } : undefined}
+                            isEditing={editingMessageId === msg.id}
+                            editDraft={editingMessageId === msg.id ? editingContent : ''}
+                            editMode={editingMode}
+                            onEditDraftChange={setEditingContent}
+                            onEditModeChange={setEditingMode}
+                            onEditCancel={resetMainEdit}
+                            onEditSubmit={() => { void submitMainEdit(msg.id) }}
+                            isEditSubmitting={editingSubmittingMessageId === msg.id}
+                            disableActions={mainBusy}
+                            isRegenerating={regeneratingMessageId === msg.id}
+                            isDeleting={deletingMessageId === msg.id}
+                            isCreatingBranch={creatingBranchMessageId === msg.id}
+                            onApproveToolCall={msg.role === 'assistant' ? toolCallRef => { void approveMainToolCall(msg, toolCallRef) } : undefined}
+                            onDenyToolCall={msg.role === 'assistant' ? toolCallRef => { void denyMainToolCall(msg, toolCallRef) } : undefined}
+                            isApprovalSubmitting={toolCallRef => isApprovalActionPending(msg.id, toolCallRef)}
+                            canApproveToolCall={toolCallRef => (
+                              getRunViewForAssistant(msg.id)?.pending_approval?.tool_call_ref === toolCallRef
+                            )}
+                            />
+                          </div>
+                        )
+                      })}
                     {(sending || regeneratingMessageId !== null) && !mainStreamingAssistantId && (
                       <div className="flex gap-3 py-3">
                         <div
@@ -2839,6 +2978,7 @@ export default function ChatPage() {
                       </div>
                     )}
                     <div ref={bottomRef} />
+                    </div>
                   </div>
                 )}
               </div>
@@ -2977,6 +3117,10 @@ export default function ChatPage() {
       onCreateProvider={createApiKey}
       onDeleteProvider={deleteApiKey}
       onTestProvider={testApiKey}
+      onUpdateProvider={updateProvider}
+      onLoadProviderModels={id => api.getProviderInstanceModels(id)}
+      onSyncProviderModels={syncProviderModels}
+      onUpdateProviderModel={updateProviderModel}
       defaultProvider={defaultProvider}
       defaultModel={defaultModel}
       providerOptions={providerOptions}

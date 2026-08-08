@@ -1,39 +1,62 @@
 import { useState } from 'react'
-import { Key, Loader2, FlaskConical, Trash2, X } from 'lucide-react'
-
-const INITIAL_FORM = {
-  preset_id: 'openai',
-  display_name: 'OpenAI',
-  base_url: '',
-  api_key: '',
-}
+import { ChevronDown, ChevronUp, FlaskConical, Key, Loader2, RefreshCw, Server, Trash2, X } from 'lucide-react'
 
 const PROVIDERS = {
-  openai: {
-    label: 'OpenAI',
-    displayName: 'OpenAI',
-    defaultBaseUrl: 'https://api.openai.com/v1',
-  },
-  openrouter: {
-    label: 'OpenRouter',
-    displayName: 'OpenRouter',
-    defaultBaseUrl: 'https://openrouter.ai/api/v1',
-  },
-  anthropic: {
-    label: 'Anthropic',
-    displayName: 'Anthropic',
-    defaultBaseUrl: 'https://api.anthropic.com/v1',
-  },
-  gemini: {
-    label: 'Gemini',
-    displayName: 'Gemini',
-    defaultBaseUrl: 'https://generativelanguage.googleapis.com',
-  },
-  custom: {
-    label: 'Custom provider',
-    displayName: 'Custom gateway',
-    defaultBaseUrl: '',
-  },
+  openai: { label: 'OpenAI', displayName: 'OpenAI', defaultBaseUrl: 'https://api.openai.com/v1', adapter: 'openai_responses' },
+  openrouter: { label: 'OpenRouter', displayName: 'OpenRouter', defaultBaseUrl: 'https://openrouter.ai/api/v1', adapter: 'openai_chat_completions' },
+  anthropic: { label: 'Anthropic', displayName: 'Anthropic', defaultBaseUrl: 'https://api.anthropic.com/v1', adapter: 'anthropic_messages' },
+  gemini: { label: 'Gemini', displayName: 'Gemini', defaultBaseUrl: 'https://generativelanguage.googleapis.com', adapter: 'google_gemini_generate_content' },
+  deepseek: { label: 'DeepSeek', displayName: 'DeepSeek', defaultBaseUrl: 'https://api.deepseek.com/v1', adapter: 'openai_chat_completions' },
+  qwen: { label: '通义千问', displayName: '通义千问', defaultBaseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', adapter: 'openai_chat_completions' },
+  groq: { label: 'Groq', displayName: 'Groq', defaultBaseUrl: 'https://api.groq.com/openai/v1', adapter: 'openai_chat_completions' },
+  mistral: { label: 'Mistral AI', displayName: 'Mistral AI', defaultBaseUrl: 'https://api.mistral.ai/v1', adapter: 'openai_chat_completions' },
+  xai: { label: 'xAI', displayName: 'xAI', defaultBaseUrl: 'https://api.x.ai/v1', adapter: 'openai_chat_completions' },
+  together: { label: 'Together AI', displayName: 'Together AI', defaultBaseUrl: 'https://api.together.xyz/v1', adapter: 'openai_chat_completions' },
+  custom: { label: '自定义服务商', displayName: '自定义服务商', defaultBaseUrl: '', adapter: 'openai_chat_completions' },
+}
+
+const ADAPTERS = [
+  { value: 'openai_responses', label: 'OpenAI Responses' },
+  { value: 'openai_chat_completions', label: 'OpenAI Chat Completions' },
+  { value: 'anthropic_messages', label: 'Anthropic Messages' },
+]
+
+const initialForm = () => ({ preset_id: '', display_name: '', base_url: '', api_key: '', default_adapter_id: '' })
+
+function providerDescription(item) {
+  return item.base_url || PROVIDERS[item.preset_id]?.defaultBaseUrl || '默认服务商地址'
+}
+
+function readPricing(model) {
+  try {
+    const pricing = JSON.parse(model.metadata_json || '{}')?.pricing
+    return pricing && typeof pricing === 'object' ? pricing : {}
+  } catch {
+    return {}
+  }
+}
+
+function pricePerMillion(value) {
+  const perToken = Number(value)
+  if (!Number.isFinite(perToken) || perToken < 0) return '—'
+  const amount = perToken * 1_000_000
+  return `$${amount >= 1 ? amount.toFixed(2) : amount.toPrecision(3)}/M`
+}
+
+function ModelSwitch({ checked, disabled, onChange, label }) {
+  return (
+    <label className="provider-switch" title={label}>
+      <input
+        type="checkbox"
+        role="switch"
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+        aria-label={label}
+      />
+      <span className="provider-switch-track" aria-hidden="true" />
+    </label>
+  )
 }
 
 export default function ApiKeysModal({
@@ -46,28 +69,72 @@ export default function ApiKeysModal({
   onCreate,
   onDelete,
   onTest,
+  onUpdateProvider,
+  onLoadProviderModels,
+  onSyncProviderModels,
+  onUpdateProviderModel,
   embedded = false,
 }) {
-  const [form, setForm] = useState(INITIAL_FORM)
+  const [form, setForm] = useState(initialForm)
   const [saving, setSaving] = useState(false)
   const [testingId, setTestingId] = useState(null)
   const [deletingId, setDeletingId] = useState(null)
+  const [syncingId, setSyncingId] = useState(null)
+  const [updatingId, setUpdatingId] = useState(null)
+  const [expandedId, setExpandedId] = useState(null)
+  const [modelsByProvider, setModelsByProvider] = useState({})
   const [error, setError] = useState('')
 
   if (!open) return null
 
-  async function handleSubmit(e) {
-    e.preventDefault()
+  const enabledProviders = apiKeys.filter(item => item.enabled)
+  const disabledProviders = apiKeys.filter(item => !item.enabled)
+  const selectedProvider = PROVIDERS[form.preset_id]
+
+  function updateForm(values) {
+    setForm(previous => ({ ...previous, ...values }))
+  }
+
+  function handleProviderChange(presetId) {
+    const config = PROVIDERS[presetId]
+    if (!config) {
+      setForm(initialForm())
+      return
+    }
+    setForm({
+      preset_id: presetId,
+      display_name: config.displayName,
+      base_url: '',
+      api_key: '',
+      default_adapter_id: config.adapter,
+    })
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault()
+    if (!form.preset_id) return
     setError('')
     setSaving(true)
     try {
       await onCreate(form)
-      setForm(INITIAL_FORM)
+      setForm(initialForm())
       await onRefresh()
     } catch (err) {
-      setError(err.message || '保存失败')
+      setError(err.message || '保存服务商失败')
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleToggleProvider(item) {
+    setError('')
+    setUpdatingId(item.id)
+    try {
+      await onUpdateProvider(item.id, { enabled: !item.enabled })
+    } catch (err) {
+      setError(err.message || '更新服务商状态失败')
+    } finally {
+      setUpdatingId(null)
     }
   }
 
@@ -76,7 +143,6 @@ export default function ApiKeysModal({
     setTestingId(id)
     try {
       await onTest(id)
-      await onRefresh()
     } catch (err) {
       setError(err.message || '测试失败')
     } finally {
@@ -89,212 +155,179 @@ export default function ApiKeysModal({
     setDeletingId(id)
     try {
       await onDelete(id)
-      await onRefresh()
+      setModelsByProvider(previous => {
+        const next = { ...previous }
+        delete next[id]
+        return next
+      })
     } catch (err) {
-      setError(err.message || '删除失败')
+      setError(err.message || '删除服务商失败')
     } finally {
       setDeletingId(null)
     }
   }
 
-  function formatTime(value) {
-    if (!value) return '未测试'
-    return new Date(value).toLocaleString('zh-CN')
+  async function loadModels(id, force = false) {
+    if (!force && modelsByProvider[id]) return modelsByProvider[id]
+    const models = await onLoadProviderModels(id)
+    const items = Array.isArray(models) ? models : []
+    setModelsByProvider(previous => ({ ...previous, [id]: items }))
+    return items
   }
 
-  function handleProviderChange(presetId) {
-    const providerConfig = PROVIDERS[presetId]
-    setForm(prev => ({
-      ...prev,
-      preset_id: presetId,
-      display_name: providerConfig && PROVIDERS[prev.preset_id]?.displayName === prev.display_name
-        ? providerConfig.displayName
-        : prev.display_name,
-      base_url: '',
-    }))
+  async function toggleExpand(item) {
+    setError('')
+    if (expandedId === item.id) {
+      setExpandedId(null)
+      return
+    }
+    setExpandedId(item.id)
+    try {
+      await loadModels(item.id)
+    } catch (err) {
+      setError(err.message || '读取缓存模型失败')
+    }
   }
 
-  const selectedProvider = PROVIDERS[form.preset_id] || PROVIDERS.openai
+  async function handleSync(item) {
+    setError('')
+    setSyncingId(item.id)
+    try {
+      const models = await onSyncProviderModels(item.id)
+      setModelsByProvider(previous => ({ ...previous, [item.id]: Array.isArray(models) ? models : [] }))
+      setExpandedId(item.id)
+    } catch (err) {
+      setError(err.message || '获取模型列表失败')
+    } finally {
+      setSyncingId(null)
+    }
+  }
+
+  async function handleToggleModel(providerId, model) {
+    setError('')
+    const key = `${providerId}:${model.model_id}`
+    setUpdatingId(key)
+    try {
+      const updated = await onUpdateProviderModel(providerId, model.model_id, { enabled: !model.enabled })
+      setModelsByProvider(previous => ({
+        ...previous,
+        [providerId]: (previous[providerId] || []).map(item => item.model_id === model.model_id ? updated : item),
+      }))
+    } catch (err) {
+      setError(err.message || '更新模型状态失败')
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  function CompactProviderCard({ item }) {
+    return (
+      <div className="flex items-center gap-3 rounded-2xl px-3 py-3" style={{ background: 'var(--bg-base)', border: '1px solid var(--border)' }}>
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl" style={{ background: 'var(--accent-subtle)', color: 'var(--accent)' }}>
+          <Server className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium">{item.display_name}</p>
+          <p className="truncate text-xs" style={{ color: 'var(--text-muted)' }}>{item.preset_id}</p>
+        </div>
+        <ModelSwitch checked={item.enabled} disabled={updatingId === item.id} onChange={() => handleToggleProvider(item)} label={`${item.enabled ? '禁用' : '启用'} ${item.display_name}`} />
+      </div>
+    )
+  }
+
+  function ProviderDetails({ item }) {
+    const models = modelsByProvider[item.id] || []
+    const enabledModels = models.filter(model => model.enabled)
+    const disabledModels = models.filter(model => !model.enabled)
+    const expanded = expandedId === item.id
+
+    function ModelRow({ model }) {
+      const key = `${item.id}:${model.model_id}`
+      const pricing = readPricing(model)
+      const inputPrice = pricePerMillion(pricing.prompt ?? pricing.input)
+      const outputPrice = pricePerMillion(pricing.completion ?? pricing.output)
+      const cachePrice = pricePerMillion(pricing.input_cache_read ?? pricing.cache_read ?? pricing.cache)
+      return (
+        <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-3 px-4 py-3 text-sm" style={{ borderTop: '1px solid var(--border)' }}>
+          <div className="min-w-0">
+            <p className="truncate font-medium">{model.display_name_override || model.remote_display_name || model.model_id}</p>
+            <p className="truncate text-xs" style={{ color: model.remote_available ? 'var(--text-muted)' : 'var(--error-text)' }}>{model.model_id}{model.remote_available ? '' : ' · 已从远端下线'}</p>
+          </div>
+          <span className="text-xs whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>价格 {inputPrice}/{outputPrice}</span>
+          <span className="text-xs whitespace-nowrap" style={{ color: 'var(--text-secondary)' }}>缓存命中价 {cachePrice}</span>
+          <ModelSwitch checked={model.enabled} disabled={updatingId === key} onChange={() => handleToggleModel(item.id, model)} label={`${model.enabled ? '禁用' : '启用'} ${model.model_id}`} />
+        </div>
+      )
+    }
+
+    return (
+      <article className="overflow-hidden rounded-2xl" style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
+        <div className="flex items-start gap-3 px-4 py-4">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ background: 'var(--accent-subtle)', color: 'var(--accent)' }}><Key className="h-4 w-4" /></div>
+          <button type="button" className="min-w-0 flex-1 text-left" onClick={() => toggleExpand(item)}>
+            <div className="flex items-center gap-2"><span className="truncate text-sm font-semibold">{item.display_name}</span><span className="rounded-md px-1.5 py-0.5 text-[10px]" style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}>{item.preset_id}</span></div>
+            <p className="mt-1 truncate text-xs" style={{ color: 'var(--text-muted)' }}>{providerDescription(item)}</p>
+          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            <button type="button" onClick={() => handleSync(item)} disabled={syncingId === item.id} className="rounded-lg px-2 py-1.5 text-xs disabled:opacity-50" style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }} title="从服务商刷新并保存模型列表">
+              {syncingId === item.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              <span className="ml-1.5 hidden sm:inline">获取模型列表</span>
+            </button>
+            <button type="button" onClick={() => handleTest(item.id)} disabled={testingId === item.id} className="rounded-lg p-1.5 disabled:opacity-50" style={{ color: 'var(--text-secondary)' }} title="测试连接">{testingId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}</button>
+            <button type="button" onClick={() => handleDelete(item.id)} disabled={deletingId === item.id} className="rounded-lg p-1.5 disabled:opacity-50" style={{ color: 'var(--error-text)' }} title="删除服务商">{deletingId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>
+            <button type="button" onClick={() => toggleExpand(item)} className="rounded-lg p-1.5" style={{ color: 'var(--text-muted)' }} aria-label={expanded ? '收起模型列表' : '展开模型列表'}>{expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</button>
+          </div>
+        </div>
+        {expanded && (
+          <div>
+            <div className="flex items-center justify-between px-4 py-2 text-xs" style={{ background: 'var(--bg-base)', color: 'var(--text-muted)', borderTop: '1px solid var(--border)' }}><span>已缓存模型 · 启用的模型优先显示</span><span>{models.length} 个</span></div>
+            {models.length === 0 ? <p className="px-4 py-6 text-center text-sm" style={{ color: 'var(--text-muted)' }}>还没有缓存模型。点击“获取模型列表”后会保存在本地。</p> : <>
+              {enabledModels.map(model => <ModelRow key={model.model_id} model={model} />)}
+              {disabledModels.length > 0 && <p className="px-4 py-2 text-xs" style={{ color: 'var(--text-muted)', background: 'var(--bg-base)', borderTop: '1px solid var(--border)' }}>未启用的模型</p>}
+              {disabledModels.map(model => <ModelRow key={model.model_id} model={model} />)}
+            </>}
+          </div>
+        )}
+      </article>
+    )
+  }
 
   return (
     <div className={embedded ? 'w-full' : 'fixed inset-0 z-40 flex items-center justify-center p-4'} style={embedded ? undefined : { background: 'var(--overlay)' }}>
-      <div
-        className={embedded ? 'w-full overflow-hidden' : 'w-full max-w-3xl max-h-[90vh] overflow-hidden rounded-3xl'}
-        style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
-      >
-        <div
-          className="flex items-center justify-between px-5 py-4"
-          style={{ borderBottom: '1px solid var(--border)' }}
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-2xl flex items-center justify-center" style={{ background: 'var(--accent-subtle)' }}>
-              <Key className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-            </div>
-            <div>
-              <h2 className="text-sm font-semibold" style={{ color: 'var(--text-primary)' }}>服务商设置</h2>
-              <p className="text-xs" style={{ color: 'var(--text-muted)' }}>配置内置服务商或自定义网关</p>
-            </div>
-          </div>
-          {!embedded && <button
-            onClick={onClose}
-            className="p-2 rounded-xl transition"
-            style={{ color: 'var(--text-muted)' }}
-            onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-elevated)'; e.currentTarget.style.color = 'var(--text-primary)' }}
-            onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-muted)' }}
-            aria-label="关闭"
-          >
-            <X className="w-4 h-4" />
-          </button>}
+      <div className={embedded ? 'w-full' : 'w-full max-w-6xl max-h-[90vh] overflow-auto rounded-3xl'} style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}>
+        <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
+          <div className="flex items-center gap-3"><div className="flex h-9 w-9 items-center justify-center rounded-2xl" style={{ background: 'var(--accent-subtle)', color: 'var(--accent)' }}><Key className="h-4 w-4" /></div><div><h2 className="text-sm font-semibold">服务商设置</h2><p className="text-xs" style={{ color: 'var(--text-muted)' }}>模型只会在此处刷新并缓存；聊天中的选择器不会请求远端。</p></div></div>
+          {!embedded && <button type="button" onClick={onClose} className="rounded-xl p-2" style={{ color: 'var(--text-muted)' }} aria-label="关闭"><X className="h-4 w-4" /></button>}
         </div>
 
-        <div className="grid md:grid-cols-[1.1fr_1fr] max-h-[calc(90vh-74px)]">
-          <div className="overflow-y-auto p-5 space-y-4" style={{ borderRight: '1px solid var(--border)' }}>
-            <form onSubmit={handleSubmit} className="space-y-3">
-              <div>
-                <label className="block text-xs mb-1.5" style={{ color: 'var(--text-secondary)' }}>Provider</label>
-                <select
-                  value={form.preset_id}
-                  onChange={e => handleProviderChange(e.target.value)}
-                  className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                >
-                  {Object.entries(PROVIDERS).map(([value, item]) => (
-                    <option key={value} value={value}>{item.label}</option>
-                  ))}
-                </select>
-              </div>
+        <div className="grid min-h-[520px] lg:grid-cols-[300px_minmax(0,1fr)]">
+          <aside className="space-y-4 p-4" style={{ borderRight: '1px solid var(--border)' }}>
+            <section><p className="mb-2 text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>已启用服务商</p><div className="space-y-2">{enabledProviders.length ? enabledProviders.map(item => <CompactProviderCard key={item.id} item={item} />) : <p className="rounded-xl px-3 py-4 text-xs" style={{ background: 'var(--bg-base)', color: 'var(--text-muted)' }}>尚未启用服务商</p>}</div></section>
+            <div style={{ borderTop: '1px solid var(--border)' }} />
+            <section><p className="mb-2 text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>未启用服务商</p><div className="space-y-2">{disabledProviders.map(item => <CompactProviderCard key={item.id} item={item} />)}</div></section>
+            <section className="space-y-3 pt-1">
+              <label className="block text-xs" style={{ color: 'var(--text-secondary)' }}>选择服务商</label>
+              <select value={form.preset_id} onChange={event => handleProviderChange(event.target.value)} className="w-full rounded-xl px-3 py-2.5 text-sm outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>
+                <option value="">选择服务商</option>
+                {Object.entries(PROVIDERS).filter(([id]) => id !== 'custom' && id !== 'gemini').map(([id, item]) => <option key={id} value={id}>{item.label}</option>)}
+                <option value="custom">自定义服务商…</option>
+              </select>
+              {selectedProvider && <form onSubmit={handleSubmit} className="space-y-2 rounded-2xl p-3" style={{ background: 'var(--bg-base)', border: '1px solid var(--border)' }}>
+                <p className="text-sm font-medium">{form.preset_id === 'custom' ? '自定义服务商' : `添加 ${selectedProvider.label}`}</p>
+                <input value={form.display_name} onChange={event => updateForm({ display_name: event.target.value })} placeholder="显示名称" required className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                <input value={form.base_url} onChange={event => updateForm({ base_url: event.target.value })} placeholder={selectedProvider.defaultBaseUrl || 'Base URL'} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                <input type="password" value={form.api_key} onChange={event => updateForm({ api_key: event.target.value })} placeholder="API Key" className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                {form.preset_id === 'custom' && <><label className="block pt-1 text-xs" style={{ color: 'var(--text-secondary)' }}>接口格式</label><select value={form.default_adapter_id} onChange={event => updateForm({ default_adapter_id: event.target.value })} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>{ADAPTERS.map(adapter => <option key={adapter.value} value={adapter.value}>{adapter.label}</option>)}</select></>}
+                <button type="submit" disabled={saving} className="flex w-full items-center justify-center gap-2 rounded-lg py-2 text-xs font-medium disabled:opacity-60" style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}>{saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{saving ? '保存中…' : '添加服务商'}</button>
+              </form>}
+            </section>
+          </aside>
 
-              <div>
-                <label className="block text-xs mb-1.5" style={{ color: 'var(--text-secondary)' }}>显示名称</label>
-                <input
-                  value={form.display_name}
-                  onChange={e => setForm(prev => ({ ...prev, display_name: e.target.value }))}
-                  className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs mb-1.5" style={{ color: 'var(--text-secondary)' }}>Base URL（可选）</label>
-                <input
-                  value={form.base_url}
-                  onChange={e => setForm(prev => ({ ...prev, base_url: e.target.value }))}
-                  placeholder={selectedProvider.defaultBaseUrl ? `留空默认使用 ${selectedProvider.defaultBaseUrl}` : '自定义网关地址，例如 https://gateway.example.com/v1'}
-                  className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs mb-1.5" style={{ color: 'var(--text-secondary)' }}>API Key</label>
-                <input
-                  type="password"
-                  value={form.api_key}
-                  onChange={e => setForm(prev => ({ ...prev, api_key: e.target.value }))}
-                  className="w-full rounded-xl px-3 py-2.5 text-sm focus:outline-none"
-                  style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}
-                />
-              </div>
-
-              {error && (
-                <div
-                  className="rounded-xl px-3 py-2.5 text-sm"
-                  style={{ background: 'var(--error-bg)', border: '1px solid var(--error-border)', color: 'var(--error-text)' }}
-                >
-                  {error}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={saving}
-                className="w-full rounded-xl py-2.5 text-sm font-medium flex items-center justify-center gap-2 disabled:opacity-60"
-                style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
-              >
-                {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                {saving ? '保存中...' : '添加服务商'}
-              </button>
-            </form>
-          </div>
-
-          <div className="overflow-y-auto p-5">
-            {loading ? (
-              <div className="flex items-center justify-center py-10">
-                <Loader2 className="w-5 h-5 animate-spin" style={{ color: 'var(--text-muted)' }} />
-              </div>
-            ) : loadError ? (
-              <div
-                className="rounded-2xl px-4 py-3 text-sm"
-                style={{ background: 'var(--error-bg)', border: '1px solid var(--error-border)', color: 'var(--error-text)' }}
-              >
-                {loadError}
-              </div>
-            ) : apiKeys.length === 0 ? (
-              <div className="rounded-2xl px-4 py-6 text-sm text-center" style={{ background: 'var(--bg-base)', color: 'var(--text-muted)' }}>
-                还没有配置 API Key
-              </div>
-            ) : (
-              <div className="space-y-3">
-                {apiKeys.map(item => (
-                  <div
-                    key={item.id}
-                    className="rounded-2xl px-4 py-4"
-                    style={{ background: 'var(--bg-base)', border: '1px solid var(--border)' }}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium" style={{ color: 'var(--text-primary)' }}>{item.display_name}</span>
-                          <span className="text-[11px] px-2 py-0.5 rounded-lg" style={{ background: 'var(--bg-elevated)', color: 'var(--text-muted)' }}>
-                            {item.preset_id}
-                          </span>
-                        </div>
-                        <p className="text-xs mt-1 break-all" style={{ color: 'var(--text-secondary)' }}>
-                          {item.base_url || PROVIDERS[item.preset_id]?.defaultBaseUrl || '默认 Base URL'}
-                        </p>
-                        <p className="text-xs mt-2" style={{ color: 'var(--text-muted)' }}>
-                          Key 尾号: {item.credential_hint || '未配置'}
-                        </p>
-                        <p className="text-xs mt-1" style={{ color: item.last_test_status === 'success' ? 'var(--text-secondary)' : 'var(--text-muted)' }}>
-                          最近测试: {formatTime(item.last_tested_at)}
-                        </p>
-                        {item.last_test_message && (
-                          <p className="text-xs mt-1" style={{ color: item.last_test_status === 'failed' ? 'var(--error-text)' : 'var(--text-muted)' }}>
-                            {item.last_test_message}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          onClick={() => handleTest(item.id)}
-                          disabled={testingId === item.id}
-                          className="p-2 rounded-xl transition disabled:opacity-60"
-                          style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}
-                          title="测试"
-                        >
-                          {testingId === item.id
-                            ? <Loader2 className="w-4 h-4 animate-spin" />
-                            : <FlaskConical className="w-4 h-4" />}
-                        </button>
-                        <button
-                          onClick={() => handleDelete(item.id)}
-                          disabled={deletingId === item.id}
-                          className="p-2 rounded-xl transition disabled:opacity-60"
-                          style={{ background: 'var(--error-bg)', color: 'var(--error-text)' }}
-                          title="删除"
-                        >
-                          {deletingId === item.id
-                            ? <Loader2 className="w-4 h-4 animate-spin" />
-                            : <Trash2 className="w-4 h-4" />}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+          <section className="min-w-0 p-4 sm:p-5">
+            <div className="mb-4 flex items-center justify-between"><div><h3 className="text-base font-semibold">已启用服务商</h3><p className="mt-1 text-xs" style={{ color: 'var(--text-muted)' }}>展开卡片查看已缓存模型；开关决定模型是否出现在聊天选择器中。</p></div><button type="button" onClick={onRefresh} className="rounded-lg p-2" style={{ color: 'var(--text-muted)' }} title="刷新服务商状态"><RefreshCw className="h-4 w-4" /></button></div>
+            {error && <div className="mb-4 rounded-xl px-3 py-2.5 text-sm" style={{ background: 'var(--error-bg)', border: '1px solid var(--error-border)', color: 'var(--error-text)' }}>{error}</div>}
+            {loading ? <div className="flex justify-center py-16"><Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--text-muted)' }} /></div> : loadError ? <div className="rounded-xl px-3 py-2.5 text-sm" style={{ background: 'var(--error-bg)', border: '1px solid var(--error-border)', color: 'var(--error-text)' }}>{loadError}</div> : enabledProviders.length === 0 ? <div className="rounded-2xl px-4 py-12 text-center text-sm" style={{ background: 'var(--bg-base)', color: 'var(--text-muted)' }}>从左侧选择一个服务商并配置 API Key 后，它会显示在这里。</div> : <div className="space-y-3">{enabledProviders.map(item => <ProviderDetails key={item.id} item={item} />)}</div>}
+          </section>
         </div>
       </div>
     </div>

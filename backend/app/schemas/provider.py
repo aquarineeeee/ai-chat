@@ -73,6 +73,7 @@ class ProviderModelResponse(BaseModel):
     is_manual: bool
     enabled: bool
     remote_available: bool
+    metadata_json: str | None
     last_seen_at: datetime | None
 
 

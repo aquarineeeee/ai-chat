@@ -20,6 +20,12 @@ PRESETS = {
     "openrouter": ("OpenRouter", "openai_chat_completions"),
     "anthropic": ("Anthropic", "anthropic_messages"),
     "gemini": ("Gemini", "google_gemini_generate_content"),
+    "deepseek": ("DeepSeek", "openai_chat_completions"),
+    "qwen": ("通义千问", "openai_chat_completions"),
+    "groq": ("Groq", "openai_chat_completions"),
+    "mistral": ("Mistral AI", "openai_chat_completions"),
+    "xai": ("xAI", "openai_chat_completions"),
+    "together": ("Together AI", "openai_chat_completions"),
     "custom": ("自定义服务商", "openai_chat_completions"),
 }
 
@@ -194,12 +200,20 @@ async def sync_models(session: AsyncSession, user_id: int, provider_id: int) -> 
             else item.get("display_name") or model_id
         )
         if model is None:
-            model = ProviderModel(provider_instance_id=provider_id, model_id=model_id, remote_display_name=remote_display_name, last_seen_at=now)
+            model = ProviderModel(
+                provider_instance_id=provider_id,
+                model_id=model_id,
+                remote_display_name=remote_display_name,
+                metadata_json=json.dumps({"pricing": item["pricing"]}) if isinstance(item.get("pricing"), dict) else None,
+                last_seen_at=now,
+            )
             session.add(model)
         else:
             model.remote_display_name = remote_display_name
             model.remote_available = True
             model.last_seen_at = now
+            if isinstance(item.get("pricing"), dict):
+                model.metadata_json = json.dumps({"pricing": item["pricing"]})
     existing = await session.scalars(select(ProviderModel).where(ProviderModel.provider_instance_id == provider_id))
     for model in existing:
         if model.model_id not in seen and not model.is_manual:
