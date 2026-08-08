@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import decrypt_text, encrypt_text
@@ -67,14 +67,17 @@ async def get_provider(session: AsyncSession, user_id: int, provider_id: int) ->
 async def get_preferred_provider_instance(
     session: AsyncSession,
     user_id: int,
-    preset_id: str,
+    provider_name: str,
 ) -> ProviderInstance | None:
-    """Return the enabled instance that backs a runtime provider name."""
+    """Return an enabled instance by its preset ID or configured display name."""
     result = await session.scalars(
         select(ProviderInstance)
         .where(
             ProviderInstance.user_id == user_id,
-            ProviderInstance.preset_id == preset_id,
+            or_(
+                ProviderInstance.preset_id == provider_name,
+                ProviderInstance.display_name == provider_name,
+            ),
             ProviderInstance.enabled.is_(True),
         )
         .order_by(ProviderInstance.is_default.desc(), ProviderInstance.updated_at.desc(), ProviderInstance.id.desc())

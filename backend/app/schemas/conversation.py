@@ -11,7 +11,7 @@ from app.schemas.base import UTCResponseModel
 class ConversationCreate(BaseModel):
     title: str = Field(default="新对话", min_length=1, max_length=255)
     system_prompt: str | None = None
-    provider: str | None = Field(default=None, max_length=50)
+    provider: str | None = Field(default=None, max_length=100)
     provider_id: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=100)
     temperature: Decimal | None = Field(default=None, ge=0, le=2)
@@ -21,7 +21,7 @@ class ConversationCreate(BaseModel):
 class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=255)
     system_prompt: str | None = None
-    provider: str | None = Field(default=None, max_length=50)
+    provider: str | None = Field(default=None, max_length=100)
     provider_id: int | None = Field(default=None, ge=1)
     model: str | None = Field(default=None, max_length=100)
     temperature: Decimal | None = Field(default=None, ge=0, le=2)

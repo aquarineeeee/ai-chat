@@ -16,7 +16,7 @@ class Conversation(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话", server_default="新对话")
     system_prompt: Mapped[str | None] = mapped_column(Text)
-    provider: Mapped[str | None] = mapped_column(String(50))
+    provider: Mapped[str | None] = mapped_column(String(100))
     provider_instance_id: Mapped[int | None] = mapped_column(ForeignKey("provider_instances.id", ondelete="SET NULL"), index=True)
     model: Mapped[str | None] = mapped_column(String(100))
     temperature: Mapped[Decimal | None] = mapped_column(Numeric(4, 2))

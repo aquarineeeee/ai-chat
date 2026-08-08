@@ -517,6 +517,31 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["transcript"], [user_text_item("hello")])
         self.assertTrue(callable(kwargs["tool_executor"]))
 
+    async def test_generate_reply_for_custom_provider_uses_its_openai_adapter(self) -> None:
+        session = AsyncMock()
+        conversation = Conversation(user_id=1, provider="aether", provider_instance_id=3)
+        context = {"adapter_id": "openai_chat_completions"}
+
+        with (
+            patch("app.services.messages.get_generation_connection", AsyncMock(return_value=(None, "api-key"))) as mock_connection,
+            patch("app.services.messages.create_openai_reply", AsyncMock(return_value="final answer")) as mock_reply,
+        ):
+            result = await messages._generate_reply(
+                session=session,
+                context=context,
+                user_id=1,
+                conversation=conversation,
+                provider="aether",
+                model="gpt-4.1-mini",
+                temperature=None,
+                max_tokens=1000,
+                prompt_transcript=[user_text_item("hello")],
+            )
+
+        self.assertEqual(result["content"], "final answer")
+        mock_connection.assert_awaited_once_with(session, 1, 3)
+        mock_reply.assert_awaited_once()
+
     async def test_generate_reply_for_anthropic_uses_memory_tools(self) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1)

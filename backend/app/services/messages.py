@@ -84,7 +84,13 @@ from app.services.run_timeline import project_run_view
 
 MESSAGE_TREE_PREVIEW_LENGTH = 100
 MESSAGE_TREE_MAX_NODES = 400
-MEMORY_TOOL_PROVIDERS = {"openai", "anthropic"}
+OPENAI_ADAPTERS = {"openai_chat_completions", "openai_responses"}
+ANTHROPIC_ADAPTERS = {"anthropic_messages"}
+MEMORY_TOOL_ADAPTERS = OPENAI_ADAPTERS | ANTHROPIC_ADAPTERS
+DEFAULT_ADAPTER_BY_PROVIDER = {
+    "openai": "openai_chat_completions",
+    "anthropic": "anthropic_messages",
+}
 MEMORY_TOOL_GUIDANCE = (
     "你可以按需使用长期记忆工具：当回答依赖跨会话背景、用户偏好或历史约束时，调用 memory_search；"
     "memory_search 支持按需传入 query、domain、valence、arousal、max_results、importance_min、max_tokens；"
@@ -754,6 +760,7 @@ async def create_message_stream(
                 "assistant_message_id": context["assistant_message"].id,
                 "branch_id": context["branch"].id if isinstance(context.get("branch"), ConversationBranch) else None,
                 "provider": context["provider"],
+                "adapter_id": context["adapter_id"],
                 "model": context["model"],
                 "temperature": context["temperature"],
                 "max_tokens": context["max_tokens"],
@@ -856,6 +863,7 @@ async def regenerate_message_stream(
                 "assistant_message_id": context["assistant_message"].id,
                 "branch_id": context["branch"].id if isinstance(context.get("branch"), ConversationBranch) else None,
                 "provider": context["provider"],
+                "adapter_id": context["adapter_id"],
                 "model": context["model"],
                 "temperature": context["temperature"],
                 "max_tokens": context["max_tokens"],
@@ -922,7 +930,7 @@ async def _prepare_generation(
         provider_instance_id = provider_instance.id if provider_instance is not None else None
     provider, model, temperature, max_tokens = _resolve_generation_options(
         conversation=conversation,
-        provider=payload.provider,
+        provider=provider_instance.display_name if provider_instance is not None else payload.provider,
         model=payload.model or (provider_instance.default_model_id if provider_instance else None),
         temperature=payload.temperature,
         max_tokens=payload.max_tokens,
@@ -968,8 +976,8 @@ async def _prepare_generation(
         context_root_message_id=context_root_message_id,
         context_message_count=payload.context_message_count,
         history=history,
-        include_memory_context=provider not in MEMORY_TOOL_PROVIDERS,
-        include_memory_tool_guidance=provider in MEMORY_TOOL_PROVIDERS,
+        include_memory_context=_adapter_id_for_generation(provider=provider, instance=provider_instance) not in MEMORY_TOOL_ADAPTERS,
+        include_memory_tool_guidance=_adapter_id_for_generation(provider=provider, instance=provider_instance) in MEMORY_TOOL_ADAPTERS,
     )
     return {
         "activate_branch": payload.activate_branch,
@@ -1021,7 +1029,7 @@ async def _prepare_regeneration(
         parent_id = target_message.parent_id
         provider, model, temperature, max_tokens = _resolve_generation_options(
             conversation=conversation,
-            provider=payload.provider or target_message.provider,
+            provider=provider_instance.display_name if provider_instance is not None else payload.provider or target_message.provider,
             model=payload.model or target_message.model or (provider_instance.default_model_id if provider_instance else None),
             temperature=payload.temperature if payload.temperature is not None else target_message.temperature,
             max_tokens=payload.max_tokens if payload.max_tokens is not None else target_message.max_tokens,
@@ -1030,7 +1038,7 @@ async def _prepare_regeneration(
         parent_id = target_message.id
         provider, model, temperature, max_tokens = _resolve_generation_options(
             conversation=conversation,
-            provider=payload.provider,
+            provider=provider_instance.display_name if provider_instance is not None else payload.provider,
             model=payload.model or (provider_instance.default_model_id if provider_instance else None),
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
@@ -1074,8 +1082,8 @@ async def _prepare_regeneration(
         context_root_message_id=context_root_message_id,
         context_message_count=payload.context_message_count,
         history=history,
-        include_memory_context=provider not in MEMORY_TOOL_PROVIDERS,
-        include_memory_tool_guidance=provider in MEMORY_TOOL_PROVIDERS,
+        include_memory_context=_adapter_id_for_generation(provider=provider, instance=provider_instance) not in MEMORY_TOOL_ADAPTERS,
+        include_memory_tool_guidance=_adapter_id_for_generation(provider=provider, instance=provider_instance) in MEMORY_TOOL_ADAPTERS,
     )
     return {
         "activate_branch": payload.activate_branch,
@@ -1172,6 +1180,7 @@ async def _execute_background_run(payload: dict[str, Any]) -> None:
             "branch": branch,
             "conversation": conversation,
             "provider": payload["provider"],
+            "adapter_id": payload.get("adapter_id") or run.adapter_id,
             "model": payload["model"],
             "temperature": payload.get("temperature"),
             "max_tokens": payload.get("max_tokens"),
@@ -2206,13 +2215,13 @@ async def _generate_reply(
             ),
             "usage": None,
         }
-    if provider == "openai":
+    adapter_id = _adapter_id_for_generation(provider=provider, context=context)
+    if adapter_id in OPENAI_ADAPTERS:
         api_key = (
             (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
             if conversation.provider_instance_id is not None
-            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+            else await get_preferred_api_key(session=session, user_id=user_id, provider="openai")
         )
-        adapter_id = str((context or {}).get("adapter_id") or "openai_chat_completions")
         create_reply = create_openai_responses_reply if adapter_id == "openai_responses" else create_openai_reply
         reply = await create_reply(
             api_key=api_key,
@@ -2227,11 +2236,11 @@ async def _generate_reply(
             "content": str(reply),
             "usage": getattr(reply, "usage", None),
         }
-    if provider == "anthropic":
+    if adapter_id in ANTHROPIC_ADAPTERS:
         api_key = (
             (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
             if conversation.provider_instance_id is not None
-            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+            else await get_preferred_api_key(session=session, user_id=user_id, provider="anthropic")
         )
         return {
             "content": await create_anthropic_reply(
@@ -2245,7 +2254,7 @@ async def _generate_reply(
             ),
             "usage": None,
         }
-    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
+    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 adapter '{adapter_id}'")
 
 
 async def _stream_reply(
@@ -2272,17 +2281,17 @@ async def _stream_reply(
             ),
         }
         return
-    if provider == "openai":
+    adapter_id = _adapter_id_for_generation(provider=provider, context=context)
+    if adapter_id in OPENAI_ADAPTERS:
         api_key = (
             (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
             if conversation.provider_instance_id is not None
-            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+            else await get_preferred_api_key(session=session, user_id=user_id, provider="openai")
         )
         async def emit_tool_event(tool: dict[str, object]) -> None:
             if context is not None:
                 await _record_tool_event(session=session, context=context, tool=tool)
 
-        adapter_id = str((context or {}).get("adapter_id") or "openai_chat_completions")
         stream_reply = stream_openai_responses_reply if adapter_id == "openai_responses" else stream_openai_reply
         async for chunk in stream_reply(
             api_key=api_key,
@@ -2297,11 +2306,11 @@ async def _stream_reply(
         ):
             yield chunk
         return
-    if provider == "anthropic":
+    if adapter_id in ANTHROPIC_ADAPTERS:
         api_key = (
             (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
             if conversation.provider_instance_id is not None
-            else await get_preferred_api_key(session=session, user_id=user_id, provider=provider)
+            else await get_preferred_api_key(session=session, user_id=user_id, provider="anthropic")
         )
         async def emit_tool_event(tool: dict[str, object]) -> None:
             if context is not None:
@@ -2320,7 +2329,7 @@ async def _stream_reply(
         ):
             yield chunk
         return
-    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 provider '{provider}'")
+    raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 adapter '{adapter_id}'")
 
 
 async def _finalize_success(
@@ -2694,6 +2703,20 @@ def _resolve_generation_options(
     resolved_temperature = temperature if temperature is not None else conversation.temperature
     resolved_max_tokens = max_tokens if max_tokens is not None else conversation.max_tokens
     return resolved_provider, resolved_model, resolved_temperature, resolved_max_tokens
+
+
+def _adapter_id_for_generation(
+    *,
+    provider: str,
+    context: dict[str, object] | None = None,
+    instance=None,
+) -> str:
+    """Resolve the request protocol without overloading the provider name."""
+    if context is not None and context.get("adapter_id"):
+        return str(context["adapter_id"])
+    if instance is not None:
+        return str(instance.default_adapter_id)
+    return DEFAULT_ADAPTER_BY_PROVIDER.get(provider, provider)
 
 
 def _visible_conversation_messages(

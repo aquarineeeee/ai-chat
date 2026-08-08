@@ -15,12 +15,9 @@ from app.services.providers import get_preferred_provider_instance, get_provider
 settings = get_settings()
 
 
-def _runtime_provider_for_instance(instance) -> str:
-    if instance.default_adapter_id == "anthropic_messages":
-        return "anthropic"
-    if instance.default_adapter_id in {"openai_chat_completions", "openai_responses"}:
-        return "openai"
-    return instance.preset_id
+def _provider_name_for_instance(instance) -> str:
+    """Return the configured provider name, keeping transport protocol separate."""
+    return instance.display_name
 
 
 async def list_conversations(session: AsyncSession, user_id: int) -> list[Conversation]:
@@ -52,11 +49,11 @@ async def create_conversation(session: AsyncSession, user_id: int, payload: Conv
         instance = await get_preferred_provider_instance(session, user_id, provider_name)
         if instance is not None:
             provider_instance_id = instance.id
-            provider_name = _runtime_provider_for_instance(instance)
+            provider_name = _provider_name_for_instance(instance)
             provider_model = payload.model or instance.default_model_id or provider_model
     if provider_instance_id is not None:
         instance = await get_provider(session, user_id, provider_instance_id)
-        provider_name = _runtime_provider_for_instance(instance)
+        provider_name = _provider_name_for_instance(instance)
         provider_model = payload.model or instance.default_model_id
     conversation = Conversation(
         user_id=user_id,
@@ -88,7 +85,7 @@ async def update_conversation(
     if provider_id is not None:
         instance = await get_provider(session, user_id, provider_id)
         conversation.provider_instance_id = provider_id
-        conversation.provider = _runtime_provider_for_instance(instance)
+        conversation.provider = _provider_name_for_instance(instance)
         if "model" not in update_data and instance.default_model_id:
             conversation.model = instance.default_model_id
 

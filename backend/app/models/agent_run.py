@@ -16,7 +16,7 @@ class AgentRun(Base):
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
     user_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), index=True)
     assistant_message_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="SET NULL"), index=True)
-    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    provider: Mapped[str] = mapped_column(String(100), nullable=False)
     provider_instance_id: Mapped[int | None] = mapped_column(ForeignKey("provider_instances.id", ondelete="SET NULL"), index=True)
     adapter_id: Mapped[str | None] = mapped_column(String(80))
     provider_name_snapshot: Mapped[str | None] = mapped_column(String(100))
