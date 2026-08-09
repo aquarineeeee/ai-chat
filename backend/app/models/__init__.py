@@ -7,6 +7,7 @@ from app.models.run_event import RunEvent
 from app.models.tool_call import ToolCall
 from app.models.user import User
 from app.models.provider import ProviderInstance, ProviderModel
+from app.models.mcp import McpServer, McpTool
 
 __all__ = [
     "AgentRun",
@@ -21,4 +22,6 @@ __all__ = [
     "User",
     "ProviderInstance",
     "ProviderModel",
+    "McpServer",
+    "McpTool",
 ]

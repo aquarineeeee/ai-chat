@@ -443,6 +443,25 @@
   outline: none;
 }
 
+.settings-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.settings-primary-button {
+  align-self: flex-start;
+  border-radius: 8px;
+  padding: 9px 13px;
+  background: var(--accent);
+  color: white;
+  font-size: 14px;
+}
+
 .settings-field-label {
   color: var(--text-secondary);
   font-size: 0.8rem;

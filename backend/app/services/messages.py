@@ -79,6 +79,7 @@ from app.services.branches import (
 from app.services.conversations import get_conversation
 from app.services.memory_mcp import search_memory
 from app.services.memory_tools import execute_memory_tool_call, memory_tool_definitions
+from app.services.mcp_registry import close_runtime_sessions, execute_runtime_tool, runtime_snapshot
 from app.services.run_timeline import project_run_view
 
 
@@ -765,6 +766,7 @@ async def create_message_stream(
                 "temperature": context["temperature"],
                 "max_tokens": context["max_tokens"],
                 "prompt_transcript": context["prompt_transcript"],
+                "mcp_tools": context["mcp_tools"],
                 "activate_branch": context["activate_branch"],
                 "failure_leaf_message_id": context["user_message"].id,
             }
@@ -868,6 +870,7 @@ async def regenerate_message_stream(
                 "temperature": context["temperature"],
                 "max_tokens": context["max_tokens"],
                 "prompt_transcript": context["prompt_transcript"],
+                "mcp_tools": context["mcp_tools"],
                 "activate_branch": context["activate_branch"],
                 "failure_leaf_message_id": context["target_message"].id,
             }
@@ -979,6 +982,7 @@ async def _prepare_generation(
         include_memory_context=_adapter_id_for_generation(provider=provider, instance=provider_instance) not in MEMORY_TOOL_ADAPTERS,
         include_memory_tool_guidance=_adapter_id_for_generation(provider=provider, instance=provider_instance) in MEMORY_TOOL_ADAPTERS,
     )
+    mcp_tools = await runtime_snapshot(session, user_id)
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
@@ -994,6 +998,8 @@ async def _prepare_generation(
         "provider_name_snapshot": provider_instance.display_name if provider_instance else None,
         "temperature": temperature,
         "user_message": user_message,
+        "mcp_tools": mcp_tools,
+        "mcp_tool_map": {str(item["model_tool_name"]): item for item in mcp_tools},
     }
 
 
@@ -1085,6 +1091,7 @@ async def _prepare_regeneration(
         include_memory_context=_adapter_id_for_generation(provider=provider, instance=provider_instance) not in MEMORY_TOOL_ADAPTERS,
         include_memory_tool_guidance=_adapter_id_for_generation(provider=provider, instance=provider_instance) in MEMORY_TOOL_ADAPTERS,
     )
+    mcp_tools = await runtime_snapshot(session, user_id)
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
@@ -1100,6 +1107,8 @@ async def _prepare_regeneration(
         "provider_name_snapshot": provider_instance.display_name if provider_instance else None,
         "target_message": target_message,
         "temperature": temperature,
+        "mcp_tools": mcp_tools,
+        "mcp_tool_map": {str(item["model_tool_name"]): item for item in mcp_tools},
     }
 
 
@@ -1186,6 +1195,8 @@ async def _execute_background_run(payload: dict[str, Any]) -> None:
             "max_tokens": payload.get("max_tokens"),
             "prompt_transcript": payload.get("prompt_transcript") or [],
             "activate_branch": bool(payload.get("activate_branch", True)),
+            "mcp_tools": payload.get("mcp_tools") or [],
+            "mcp_tool_map": {str(item["model_tool_name"]): item for item in (payload.get("mcp_tools") or []) if isinstance(item, dict)},
         }
 
         try:
@@ -1510,7 +1521,7 @@ async def _record_tool_event(
         display_input = sanitize_tool_input_for_display(_maybe_parse_json(raw_arguments))
         tool_call_ref = _new_event_id("tc")
         step_id = _new_event_id("step")
-        requires_approval = _tool_requires_approval(tool_name)
+        requires_approval = _tool_requires_approval(tool_name, context)
         open_tool_calls.append(
             {
                 "tool_call_ref": tool_call_ref,
@@ -1873,7 +1884,11 @@ def _set_run_metadata(run: AgentRun, metadata: dict[str, Any]) -> None:
     run.metadata_json = json_dumps(metadata)
 
 
-def _tool_requires_approval(tool_name: str) -> bool:
+def _tool_requires_approval(tool_name: str, context: dict[str, object] | None = None) -> bool:
+    if context is not None:
+        mapping = context.get("mcp_tool_map")
+        if isinstance(mapping, dict) and isinstance(mapping.get(tool_name), dict):
+            return bool(mapping[tool_name].get("requires_approval", True))
     return tool_name in APPROVAL_REQUIRED_TOOLS
 
 
@@ -2081,6 +2096,13 @@ def _build_context_tool_executor(
                         },
                     )
                     raise AppError(status_code=409, code="TOOL_APPROVAL_DENIED", message="Tool approval denied")
+        mcp_map = context.get("mcp_tool_map") if isinstance(context, dict) else None
+        if isinstance(mcp_map, dict) and tool_name in mcp_map:
+            try:
+                parsed = json_loads(tool_arguments, default={})
+                return await execute_runtime_tool(context, tool_name, parsed if isinstance(parsed, dict) else {})
+            except Exception as exc:
+                return f"工具执行失败：{str(exc)[:500]}"
         return await execute_memory_tool_call(tool_name, tool_arguments)
 
     return execute
@@ -2193,6 +2215,14 @@ async def _collect_reply_from_stream(
     return accumulated, usage
 
 
+def _runtime_tools_for_context(context: dict[str, object] | None) -> list[dict[str, object]]:
+    if context is not None:
+        items = context.get("mcp_tools")
+        if isinstance(items, list) and items:
+            return [item["definition"] for item in items if isinstance(item, dict) and isinstance(item.get("definition"), dict)]
+    return memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True)
+
+
 async def _generate_reply(
     *,
     session: AsyncSession,
@@ -2229,7 +2259,7 @@ async def _generate_reply(
             transcript=prompt_transcript,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
+            tools=_runtime_tools_for_context(context),
             tool_executor=tool_executor,
         )
         return {
@@ -2249,7 +2279,7 @@ async def _generate_reply(
                 transcript=prompt_transcript,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
+                tools=_runtime_tools_for_context(context),
                 tool_executor=tool_executor,
             ),
             "usage": None,
@@ -2299,7 +2329,7 @@ async def _stream_reply(
             transcript=prompt_transcript,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
+            tools=_runtime_tools_for_context(context),
             tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
             usage_callback=usage_callback,
@@ -2322,7 +2352,7 @@ async def _stream_reply(
             transcript=prompt_transcript,
             temperature=temperature,
             max_tokens=max_tokens,
-            tools=memory_tool_definitions(include_grow=True, include_pulse=True, include_dream=True),
+            tools=_runtime_tools_for_context(context),
             tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
             usage_callback=usage_callback,
@@ -2381,6 +2411,7 @@ async def _finalize_success(
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
+    await close_runtime_sessions(context)
 
 
 def _merge_reply_content_into_parts(
@@ -2470,6 +2501,7 @@ async def _mark_failed(
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
+    await close_runtime_sessions(context or {})
 
 
 async def _mark_cancelled(
@@ -2523,6 +2555,7 @@ async def _mark_cancelled(
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
+    await close_runtime_sessions(context or {})
 
 
 async def _build_send_response(

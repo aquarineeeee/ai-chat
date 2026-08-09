@@ -166,4 +166,11 @@ export const api = {
   createProviderModel: (id, data) => request('POST', `/api/providers/${id}/models`, data),
   updateProviderModel: (id, modelId, data) => request('PATCH', `/api/providers/${id}/models/${encodeURIComponent(modelId)}`, data),
   deleteProviderModel: (id, modelId) => request('DELETE', `/api/providers/${id}/models/${encodeURIComponent(modelId)}`),
+
+  getMcpServers: () => request('GET', '/api/mcp/servers'),
+  createMcpServer: (data) => request('POST', '/api/mcp/servers', data),
+  updateMcpServer: (id, data) => request('PATCH', `/api/mcp/servers/${id}`, data),
+  deleteMcpServer: (id) => request('DELETE', `/api/mcp/servers/${id}`),
+  testMcpServer: (id) => request('POST', `/api/mcp/servers/${id}/test`),
+  updateMcpTool: (serverId, toolId, data) => request('PATCH', `/api/mcp/servers/${serverId}/tools/${toolId}`, data),
 }

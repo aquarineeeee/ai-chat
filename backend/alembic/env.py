@@ -7,7 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.models import agent_run, api_key, branch, conversation, message, provider, user  # noqa: F401
+from app.models import agent_run, api_key, branch, conversation, mcp, message, provider, user  # noqa: F401
 
 
 config = context.config

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ArrowLeft, Check, LogOut, Moon, Sun, User } from 'lucide-react'
 import ApiKeysModal from './components/ApiKeysModal'
 import { PALETTES } from './ThemeContext'
+import { api } from './api'
 
 const PALETTE_COLORS = {
   stone: '#6e5c52',
@@ -15,6 +16,7 @@ const TABS = [
   { id: 'appearance', label: '外观' },
   { id: 'provider', label: '服务商' },
   { id: 'model', label: '默认模型' },
+  { id: 'mcp', label: 'MCP' },
 ]
 
 export default function SettingsPage({
@@ -47,6 +49,25 @@ export default function SettingsPage({
 }) {
   const [activeTab, setActiveTab] = useState('account')
   const [providerOpen] = useState(true)
+  const [mcpServers, setMcpServers] = useState([])
+  const [mcpLoading, setMcpLoading] = useState(false)
+  const [mcpError, setMcpError] = useState('')
+  const [mcpDraft, setMcpDraft] = useState({ display_name: '', url: '', headers: [] })
+
+  const loadMcp = async () => {
+    setMcpLoading(true)
+    try { setMcpServers(await api.getMcpServers()); setMcpError('') }
+    catch (error) { setMcpError(error.message) }
+    finally { setMcpLoading(false) }
+  }
+  const saveMcp = async event => {
+    event.preventDefault()
+    if (!mcpDraft.display_name.trim() || !mcpDraft.url.trim()) return
+    try {
+      await api.createMcpServer({ ...mcpDraft, display_name: mcpDraft.display_name.trim(), url: mcpDraft.url.trim(), headers: mcpDraft.headers.filter(item => item.name && item.value) })
+      setMcpDraft({ display_name: '', url: '', headers: [] }); await loadMcp()
+    } catch (error) { setMcpError(error.message) }
+  }
 
   return (
     <main className="settings-page min-h-screen overflow-y-auto" style={{ background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
@@ -72,7 +93,7 @@ export default function SettingsPage({
               aria-selected={activeTab === tab.id}
               aria-controls={`settings-panel-${tab.id}`}
               className="settings-tab"
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => { setActiveTab(tab.id); if (tab.id === 'mcp' && mcpServers.length === 0 && !mcpLoading) void loadMcp() }}
             >
               {tab.label}
             </button>
@@ -163,6 +184,29 @@ export default function SettingsPage({
                   {modelOptions.map(option => <option key={option.id || option} value={option.id || option}>{option.name || option.id || option}</option>)}
                 </select>
               </div>
+            </section>
+          )}
+
+          {activeTab === 'mcp' && (
+            <section id="settings-panel-mcp" role="tabpanel" aria-label="MCP">
+              <div className="settings-section-heading"><h1>MCP</h1><p>管理按用户隔离的 Streamable HTTP MCP 服务</p></div>
+              <form className="settings-row settings-row-column" onSubmit={saveMcp}>
+                <label className="settings-field-label">添加服务</label>
+                <input className="settings-input" placeholder="名称" value={mcpDraft.display_name} onChange={event => setMcpDraft({ ...mcpDraft, display_name: event.target.value })} />
+                <input className="settings-input" placeholder="MCP 地址（http/https）" value={mcpDraft.url} onChange={event => setMcpDraft({ ...mcpDraft, url: event.target.value })} />
+                {mcpDraft.headers.map((header, index) => <div className="flex gap-2" key={index}><input className="settings-input" placeholder="请求头名称" value={header.name} onChange={event => setMcpDraft({ ...mcpDraft, headers: mcpDraft.headers.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) })} /><input className="settings-input" placeholder="请求头值" value={header.value} onChange={event => setMcpDraft({ ...mcpDraft, headers: mcpDraft.headers.map((item, itemIndex) => itemIndex === index ? { ...item, value: event.target.value } : item) })} /><button className="settings-outline-button" type="button" onClick={() => setMcpDraft({ ...mcpDraft, headers: mcpDraft.headers.filter((_, itemIndex) => itemIndex !== index) })}>移除</button></div>)}
+                <button className="settings-outline-button" type="button" onClick={() => setMcpDraft({ ...mcpDraft, headers: [...mcpDraft.headers, { name: '', value: '' }] })}>添加请求头</button>
+                <button className="settings-primary-button" type="submit">添加并测试</button>
+              </form>
+              {mcpLoading && <p className="settings-row-help">正在加载…</p>}
+              {mcpError && <p className="settings-row-help" style={{ color: 'var(--error-text)' }}>{mcpError}</p>}
+              {!mcpLoading && mcpServers.length === 0 && <p className="settings-row-help">暂无 MCP 服务</p>}
+              {mcpServers.map(server => (
+                <div className="settings-row settings-row-column" key={server.id}>
+                  <div className="flex items-center justify-between gap-3"><div><p className="settings-row-title">{server.display_name}</p><p className="settings-row-help">{server.url} · {server.tools?.filter(tool => tool.remote_available).length || 0} 个可用工具 · {server.last_test_status === 'success' ? '可用' : server.last_test_status === 'pending' ? '待测试' : '测试失败'}</p></div><div className="flex gap-2"><button className="settings-outline-button" type="button" onClick={async () => { await api.testMcpServer(server.id); await loadMcp() }}>测试</button><button className="settings-outline-button" type="button" onClick={async () => { await api.updateMcpServer(server.id, { enabled: !server.enabled }); await loadMcp() }}>{server.enabled ? '停用' : '启用'}</button><button className="settings-outline-button" type="button" onClick={async () => { if (window.confirm('删除此 MCP 服务？')) { await api.deleteMcpServer(server.id); await loadMcp() } }}>删除</button></div></div>
+                  {(server.tools || []).map(tool => <div className="flex items-center justify-between gap-2 text-sm" key={tool.id}><span>{tool.remote_tool_name}</span><label><input type="checkbox" checked={tool.enabled} onChange={async event => { await api.updateMcpTool(server.id, tool.id, { enabled: event.target.checked }); await loadMcp() }} /> 启用</label><label><input type="checkbox" checked={tool.requires_approval} onChange={async event => { await api.updateMcpTool(server.id, tool.id, { requires_approval: event.target.checked }); await loadMcp() }} /> 调用前审批</label></div>)}
+                </div>
+              ))}
             </section>
           )}
         </div>
