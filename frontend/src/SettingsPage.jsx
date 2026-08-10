@@ -52,7 +52,7 @@ export default function SettingsPage({
   const [mcpServers, setMcpServers] = useState([])
   const [mcpLoading, setMcpLoading] = useState(false)
   const [mcpError, setMcpError] = useState('')
-  const [mcpDraft, setMcpDraft] = useState({ display_name: '', url: '', headers: [] })
+  const [mcpDraft, setMcpDraft] = useState({ display_name: '', url: '', transport: 'streamable_http', headers: [] })
 
   const loadMcp = async () => {
     setMcpLoading(true)
@@ -64,8 +64,9 @@ export default function SettingsPage({
     event.preventDefault()
     if (!mcpDraft.display_name.trim() || !mcpDraft.url.trim()) return
     try {
-      await api.createMcpServer({ ...mcpDraft, display_name: mcpDraft.display_name.trim(), url: mcpDraft.url.trim(), headers: mcpDraft.headers.filter(item => item.name && item.value) })
-      setMcpDraft({ display_name: '', url: '', headers: [] }); await loadMcp()
+      const created = await api.createMcpServer({ ...mcpDraft, display_name: mcpDraft.display_name.trim(), url: mcpDraft.url.trim(), headers: mcpDraft.headers.filter(item => item.name && item.value) })
+      setMcpDraft({ display_name: '', url: '', transport: 'streamable_http', headers: [] })
+      await api.testMcpServer(created.id); await loadMcp()
     } catch (error) { setMcpError(error.message) }
   }
 
@@ -189,8 +190,13 @@ export default function SettingsPage({
 
           {activeTab === 'mcp' && (
             <section id="settings-panel-mcp" role="tabpanel" aria-label="MCP">
-              <div className="settings-section-heading"><h1>MCP</h1><p>管理按用户隔离的 Streamable HTTP MCP 服务</p></div>
+              <div className="settings-section-heading"><h1>MCP</h1><p>管理按用户隔离的 MCP 服务，支持 Streamable HTTP 和旧版 SSE 传输。</p></div>
               <form className="settings-row settings-row-column" onSubmit={saveMcp}>
+                <label className="settings-field-label" htmlFor="mcp-transport">传输方式</label>
+                <select id="mcp-transport" className="settings-select" value={mcpDraft.transport} onChange={event => setMcpDraft({ ...mcpDraft, transport: event.target.value })}>
+                  <option value="streamable_http">Streamable HTTP</option>
+                  <option value="sse">SSE（旧版）</option>
+                </select>
                 <label className="settings-field-label">添加服务</label>
                 <input className="settings-input" placeholder="名称" value={mcpDraft.display_name} onChange={event => setMcpDraft({ ...mcpDraft, display_name: event.target.value })} />
                 <input className="settings-input" placeholder="MCP 地址（http/https）" value={mcpDraft.url} onChange={event => setMcpDraft({ ...mcpDraft, url: event.target.value })} />
@@ -203,6 +209,11 @@ export default function SettingsPage({
               {!mcpLoading && mcpServers.length === 0 && <p className="settings-row-help">暂无 MCP 服务</p>}
               {mcpServers.map(server => (
                 <div className="settings-row settings-row-column" key={server.id}>
+                  <label className="settings-field-label" htmlFor={`mcp-transport-${server.id}`}>传输方式</label>
+                  <select id={`mcp-transport-${server.id}`} className="settings-select" value={server.transport || 'streamable_http'} onChange={async event => { await api.updateMcpServer(server.id, { transport: event.target.value }); await loadMcp() }}>
+                    <option value="streamable_http">Streamable HTTP</option>
+                    <option value="sse">SSE（旧版）</option>
+                  </select>
                   <div className="flex items-center justify-between gap-3"><div><p className="settings-row-title">{server.display_name}</p><p className="settings-row-help">{server.url} · {server.tools?.filter(tool => tool.remote_available).length || 0} 个可用工具 · {server.last_test_status === 'success' ? '可用' : server.last_test_status === 'pending' ? '待测试' : '测试失败'}</p></div><div className="flex gap-2"><button className="settings-outline-button" type="button" onClick={async () => { await api.testMcpServer(server.id); await loadMcp() }}>测试</button><button className="settings-outline-button" type="button" onClick={async () => { await api.updateMcpServer(server.id, { enabled: !server.enabled }); await loadMcp() }}>{server.enabled ? '停用' : '启用'}</button><button className="settings-outline-button" type="button" onClick={async () => { if (window.confirm('删除此 MCP 服务？')) { await api.deleteMcpServer(server.id); await loadMcp() } }}>删除</button></div></div>
                   {(server.tools || []).map(tool => <div className="flex items-center justify-between gap-2 text-sm" key={tool.id}><span>{tool.remote_tool_name}</span><label><input type="checkbox" checked={tool.enabled} onChange={async event => { await api.updateMcpTool(server.id, tool.id, { enabled: event.target.checked }); await loadMcp() }} /> 启用</label><label><input type="checkbox" checked={tool.requires_approval} onChange={async event => { await api.updateMcpTool(server.id, tool.id, { requires_approval: event.target.checked }); await loadMcp() }} /> 调用前审批</label></div>)}
                 </div>

@@ -17,6 +17,7 @@ class McpServer(Base):
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     server_name: Mapped[str] = mapped_column(String(120), nullable=False)
     url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    transport: Mapped[str] = mapped_column(String(32), nullable=False, default="streamable_http", server_default="streamable_http")
     headers_encrypted_json: Mapped[str | None] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="1")
     config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")

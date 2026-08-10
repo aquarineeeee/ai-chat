@@ -115,19 +115,28 @@ def _http_error_message(prefix: str, exc: httpx.HTTPError) -> str:
 
 
 def _extract_error_message(response: httpx.Response) -> str:
+    fallback = f"上游模型服务返回 HTTP {response.status_code}"
     try:
         payload = response.json()
     except Exception:
-        return response.text or f"上游模型服务返回 HTTP {response.status_code}"
+        payload = None
 
-    error = payload.get("error")
-    if isinstance(error, dict):
-        message = error.get("message")
-        if message:
-            return str(message)
-    if isinstance(error, str):
-        return error
-    return response.text or f"上游模型服务返回 HTTP {response.status_code}"
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = error.get("message")
+            if message:
+                return str(message)
+        if isinstance(error, str):
+            return error
+
+    body = response.text.strip()
+    content_type = response.headers.get("content-type", "").lower()
+    is_html = "html" in content_type or body.lower().startswith(("<!doctype html", "<html"))
+    if is_html:
+        reason = response.reason_phrase or "上游服务异常"
+        return f"上游模型服务暂时不可用（HTTP {response.status_code} {reason}）。上游返回了 HTML 错误页，请稍后重试或检查 API 基础地址。"
+    return body or fallback
 
 
 def _stringify_content(content: object) -> str:

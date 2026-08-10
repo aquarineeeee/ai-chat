@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 from app.core.encryption import decrypt_text
 
@@ -31,11 +33,26 @@ def _jsonrpc_payload(response: httpx.Response) -> dict[str, Any]:
 class McpConnection:
     url: str
     headers: dict[str, str]
+    transport: str = "streamable_http"
     timeout: float = 30.0
     client: httpx.AsyncClient | None = None
     session_id: str | None = None
+    sse_context: Any = None
+    sse_session: ClientSession | None = None
 
     async def __aenter__(self) -> "McpConnection":
+        if self.transport == "sse":
+            self.sse_context = sse_client(
+                self.url,
+                headers=self.headers,
+                timeout=self.timeout,
+                sse_read_timeout=self.timeout,
+            )
+            read_stream, write_stream = await self.sse_context.__aenter__()
+            self.sse_session = ClientSession(read_stream, write_stream)
+            await self.sse_session.__aenter__()
+            await self.sse_session.initialize()
+            return self
         self.client = httpx.AsyncClient(
             timeout=httpx.Timeout(self.timeout, connect=min(self.timeout, 10.0)),
             follow_redirects=False,
@@ -77,6 +94,13 @@ class McpConnection:
         tools: list[dict[str, Any]] = []
         cursor: str | None = None
         while True:
+            if self.sse_session is not None:
+                body = await self.sse_session.list_tools(cursor=cursor)
+                tools.extend(tool.model_dump(by_alias=True, mode="json") for tool in body.tools)
+                cursor = body.nextCursor
+                if not cursor:
+                    return tools
+                continue
             result = await self._request("tools/list", {"cursor": cursor} if cursor else {})
             if result.get("error"):
                 raise RuntimeError(str(result["error"]))
@@ -90,6 +114,8 @@ class McpConnection:
                 return tools
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if self.sse_session is not None:
+            return (await self.sse_session.call_tool(name, arguments)).model_dump(by_alias=True, mode="json")
         response = await self._request("tools/call", {"name": name, "arguments": arguments})
         if response.get("error"):
             raise RuntimeError(str(response["error"]))
@@ -97,6 +123,15 @@ class McpConnection:
         return result if isinstance(result, dict) else {"content": [{"type": "text", "text": str(result)}]}
 
     async def __aexit__(self, *_: object) -> None:
+        if self.sse_session is not None:
+            try:
+                await self.sse_session.__aexit__(None, None, None)
+            finally:
+                self.sse_session = None
+                if self.sse_context is not None:
+                    await self.sse_context.__aexit__(None, None, None)
+                    self.sse_context = None
+            return
         if self.client is None:
             return
         if self.session_id:

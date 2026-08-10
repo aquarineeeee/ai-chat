@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -16,6 +17,7 @@ class McpHeaderInput(BaseModel):
 class McpServerCreateRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     url: str = Field(min_length=1, max_length=1000)
+    transport: Literal["streamable_http", "sse"] = "streamable_http"
     headers: list[McpHeaderInput] = Field(default_factory=list)
     enabled: bool = True
 
@@ -23,6 +25,7 @@ class McpServerCreateRequest(BaseModel):
 class McpServerUpdateRequest(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
     url: str | None = Field(default=None, min_length=1, max_length=1000)
+    transport: Literal["streamable_http", "sse"] | None = None
     headers: list[McpHeaderInput] | None = None
     enabled: bool | None = None
 
@@ -50,6 +53,7 @@ class McpServerResponse(UTCResponseModel):
     display_name: str
     server_name: str
     url: str
+    transport: Literal["streamable_http", "sse"]
     headers: list[dict[str, str]]
     enabled: bool
     config_version: int

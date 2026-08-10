@@ -75,7 +75,7 @@ def serialize_server(server: McpServer) -> dict[str, object]:
         except Exception:
             annotations = None
         tools.append({"id": tool.id, "remote_tool_name": tool.remote_tool_name, "model_tool_name": tool.model_tool_name, "description": tool.description, "input_schema": schema, "annotations": annotations, "enabled": tool.enabled, "requires_approval": tool.requires_approval, "remote_available": tool.remote_available, "synced_at": tool.synced_at})
-    return {"id": server.id, "display_name": server.display_name, "server_name": server.server_name, "url": server.url, "headers": _headers_response(server), "enabled": server.enabled, "config_version": server.config_version, "tested_config_version": server.tested_config_version, "last_test_status": server.last_test_status, "last_test_message": server.last_test_message, "last_tested_at": server.last_tested_at, "last_successful_sync_at": server.last_successful_sync_at, "tools": tools}
+    return {"id": server.id, "display_name": server.display_name, "server_name": server.server_name, "url": server.url, "transport": server.transport, "headers": _headers_response(server), "enabled": server.enabled, "config_version": server.config_version, "tested_config_version": server.tested_config_version, "last_test_status": server.last_test_status, "last_test_message": server.last_test_message, "last_tested_at": server.last_tested_at, "last_successful_sync_at": server.last_successful_sync_at, "tools": tools}
 
 
 async def list_servers(session: AsyncSession, user_id: int) -> list[McpServer]:
@@ -99,11 +99,11 @@ async def create_server(session: AsyncSession, user_id: int, payload: McpServerC
     if await session.scalar(select(McpServer.id).where(McpServer.user_id == user_id, McpServer.server_name == name)):
         raise AppError(status_code=409, code="CONFLICT", message="MCP 服务名称已存在")
     headers = normalize_headers(payload.headers)
-    server = McpServer(user_id=user_id, display_name=payload.display_name.strip(), server_name=name, url=validate_url(payload.url), headers_encrypted_json=encrypt_text(json.dumps(headers, ensure_ascii=False)) if headers else None, enabled=payload.enabled)
+    server = McpServer(user_id=user_id, display_name=payload.display_name.strip(), server_name=name, url=validate_url(payload.url), transport=payload.transport, headers_encrypted_json=encrypt_text(json.dumps(headers, ensure_ascii=False)) if headers else None, enabled=payload.enabled)
     session.add(server)
     await session.commit()
     await session.refresh(server)
-    return server
+    return await get_server(session, user_id, server.id)
 
 
 async def update_server(session: AsyncSession, user_id: int, server_id: int, payload: McpServerUpdateRequest) -> McpServer:
@@ -113,6 +113,8 @@ async def update_server(session: AsyncSession, user_id: int, server_id: int, pay
         server.display_name = payload.display_name.strip()
     if payload.url is not None and validate_url(payload.url) != server.url:
         server.url = validate_url(payload.url); changed = True
+    if payload.transport is not None and payload.transport != server.transport:
+        server.transport = payload.transport; changed = True
     if payload.headers is not None:
         headers = normalize_headers(payload.headers)
         # Masked values are intentionally treated as "not submitted".
@@ -141,7 +143,7 @@ async def update_server(session: AsyncSession, user_id: int, server_id: int, pay
 async def test_server(session: AsyncSession, user_id: int, server_id: int) -> McpServer:
     server = await get_server(session, user_id, server_id)
     try:
-        async with McpConnection(server.url, decrypt_headers(server.headers_encrypted_json)) as connection:
+        async with McpConnection(server.url, decrypt_headers(server.headers_encrypted_json), server.transport) as connection:
             remote_tools = await connection.list_tools()
         used: set[str] = set()
         existing = {tool.remote_tool_name: tool for tool in server.tools}
@@ -196,7 +198,7 @@ async def runtime_snapshot(session: AsyncSession, user_id: int) -> list[dict[str
             if name in used:
                 name = model_tool_name(server.server_name, tool.remote_tool_name, used)
             used.add(name)
-            snapshot.append({"model_tool_name": name, "server_id": server.id, "server_name": server.server_name, "url": server.url, "headers": decrypt_headers(server.headers_encrypted_json), "remote_tool_name": tool.remote_tool_name, "requires_approval": tool.requires_approval, "definition": {"type": "function", "function": {"name": name, "description": tool.description or tool.remote_tool_name, "parameters": schema}}})
+            snapshot.append({"model_tool_name": name, "server_id": server.id, "server_name": server.server_name, "url": server.url, "transport": server.transport, "headers": decrypt_headers(server.headers_encrypted_json), "remote_tool_name": tool.remote_tool_name, "requires_approval": tool.requires_approval, "definition": {"type": "function", "function": {"name": name, "description": tool.description or tool.remote_tool_name, "parameters": schema}}})
     return snapshot
 
 
@@ -211,7 +213,7 @@ async def execute_runtime_tool(context: dict[str, object], tool_name: str, argum
     key = int(item["server_id"])
     connection = connections.get(key) if isinstance(connections, dict) else None
     if connection is None:
-        connection = McpConnection(str(item["url"]), dict(item.get("headers") or {}))
+        connection = McpConnection(str(item["url"]), dict(item.get("headers") or {}), str(item.get("transport") or "streamable_http"))
         await connection.__aenter__()
         assert isinstance(connections, dict)
         connections[key] = connection
