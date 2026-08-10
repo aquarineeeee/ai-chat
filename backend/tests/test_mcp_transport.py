@@ -6,9 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 
-from app.schemas.mcp import McpServerCreateRequest
+from app.models.mcp import McpServer
+from app.schemas.mcp import McpServerCreateRequest, McpServerResponse
 from app.services.mcp_client import McpConnection
-from app.services.mcp_registry import create_server
+from app.services.mcp_registry import create_server, serialize_server
 
 
 class _Result:
@@ -75,6 +76,22 @@ class _CreateSession:
 
 
 class McpTransportTests(unittest.IsolatedAsyncioTestCase):
+    def test_server_response_does_not_expose_url(self) -> None:
+        server = McpServer(
+            id=1,
+            user_id=7,
+            display_name="Private server",
+            server_name="private-server",
+            url="https://example.test/mcp?token=secret",
+            transport="streamable_http",
+            enabled=True,
+            config_version=1,
+        )
+
+        response = McpServerResponse.model_validate(serialize_server(server))
+
+        self.assertNotIn("url", response.model_dump())
+
     def test_transport_is_limited_to_streamable_http_or_sse(self) -> None:
         self.assertEqual(
             McpServerCreateRequest(display_name="SSE", url="https://example.test/sse", transport="sse").transport,

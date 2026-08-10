@@ -52,7 +52,6 @@ class McpServerResponse(UTCResponseModel):
     id: int
     display_name: str
     server_name: str
-    url: str
     transport: Literal["streamable_http", "sse"]
     headers: list[dict[str, str]]
     enabled: bool

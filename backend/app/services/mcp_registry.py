@@ -75,7 +75,7 @@ def serialize_server(server: McpServer) -> dict[str, object]:
         except Exception:
             annotations = None
         tools.append({"id": tool.id, "remote_tool_name": tool.remote_tool_name, "model_tool_name": tool.model_tool_name, "description": tool.description, "input_schema": schema, "annotations": annotations, "enabled": tool.enabled, "requires_approval": tool.requires_approval, "remote_available": tool.remote_available, "synced_at": tool.synced_at})
-    return {"id": server.id, "display_name": server.display_name, "server_name": server.server_name, "url": server.url, "transport": server.transport, "headers": _headers_response(server), "enabled": server.enabled, "config_version": server.config_version, "tested_config_version": server.tested_config_version, "last_test_status": server.last_test_status, "last_test_message": server.last_test_message, "last_tested_at": server.last_tested_at, "last_successful_sync_at": server.last_successful_sync_at, "tools": tools}
+    return {"id": server.id, "display_name": server.display_name, "server_name": server.server_name, "transport": server.transport, "headers": _headers_response(server), "enabled": server.enabled, "config_version": server.config_version, "tested_config_version": server.tested_config_version, "last_test_status": server.last_test_status, "last_test_message": server.last_test_message, "last_tested_at": server.last_tested_at, "last_successful_sync_at": server.last_successful_sync_at, "tools": tools}
 
 
 async def list_servers(session: AsyncSession, user_id: int) -> list[McpServer]:
