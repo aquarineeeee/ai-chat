@@ -14,6 +14,7 @@ from app.models.api_key import ApiKey
 from app.providers.openai import (
     DEFAULT_MAX_TOOL_ROUND_TRIPS,
     ReplyText,
+    ToolCallLoopGuard,
     ToolEventCallback,
     ToolExecutor,
     UsageCallback,
@@ -198,9 +199,12 @@ async def _execute_tool_calls(
     calls: list[dict[str, str]],
     tool_executor: ToolExecutor,
     event_callback: ToolEventCallback | None = None,
+    loop_guard: ToolCallLoopGuard | None = None,
 ) -> list[dict[str, object]]:
     outputs: list[dict[str, object]] = []
     for call in calls:
+        if loop_guard is not None:
+            loop_guard.observe(call["name"], call["arguments"])
         if event_callback is not None:
             await event_callback({"name": call["name"], "status": "running", "arguments": call["arguments"]})
         result = await tool_executor(call["name"], call["arguments"])
@@ -228,6 +232,7 @@ async def create_openai_responses_reply(
     url = f"{_resolve_base_url(api_key.base_url)}/responses"
     input_items = _transcript_to_responses_input(transcript)
     total_usage: dict[str, int] | None = None
+    loop_guard = ToolCallLoopGuard()
     max_rounds = max_tool_round_trips if tools else 1
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=True, trust_env=False, http2=False) as client:
@@ -259,7 +264,7 @@ async def create_openai_responses_reply(
             calls = _function_calls(output)
             if calls:
                 assert tool_executor is not None
-                input_items = output + await _execute_tool_calls(calls=calls, tool_executor=tool_executor)
+                input_items = output + await _execute_tool_calls(calls=calls, tool_executor=tool_executor, loop_guard=loop_guard)
                 continue
 
             content = _output_text(output)
@@ -381,6 +386,7 @@ async def stream_openai_responses_reply(
     url = f"{_resolve_base_url(api_key.base_url)}/responses"
     input_items = _transcript_to_responses_input(transcript)
     total_usage: dict[str, int] | None = None
+    loop_guard = ToolCallLoopGuard()
     max_rounds = max_tool_round_trips if tools else 1
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=True, trust_env=False, http2=False) as client:
@@ -410,6 +416,7 @@ async def stream_openai_responses_reply(
                     calls=calls,
                     tool_executor=tool_executor,
                     event_callback=tool_event_callback,
+                    loop_guard=loop_guard,
                 )
                 continue
 

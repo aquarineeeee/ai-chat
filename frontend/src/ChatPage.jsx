@@ -533,13 +533,17 @@ function applyRunEventToRunView(runView, event) {
   }
 
   if (event.type === 'tool_call.approval.requested') {
+    nextView.status = 'waiting_approval'
     nextView.pending_approval = {
       tool_call_ref: event.tool_call_ref || null,
       step_id: event.step_id || null,
       tool_name: payload?.tool_name || '',
       arguments_preview: payload?.display_input_preview || '',
     }
-  } else if (event.type === 'tool_call.approval.granted' || event.type === 'tool_call.approval.denied') {
+  } else if (event.type === 'tool_call.approval.granted') {
+    nextView.status = 'running'
+    nextView.pending_approval = null
+  } else if (event.type === 'tool_call.approval.denied') {
     nextView.pending_approval = null
   }
 
@@ -654,11 +658,13 @@ function applyRunEventToRunView(runView, event) {
 
   if (event.type === 'run.failed') {
     nextView.status = 'failed'
+    nextView.pending_approval = null
     return nextView
   }
 
   if (event.type === 'run.cancelled') {
     nextView.status = 'cancelled'
+    nextView.pending_approval = null
     return nextView
   }
 
@@ -897,6 +903,7 @@ export default function ChatPage() {
   const [runViewsByRunId, setRunViewsByRunId] = useState({})
   const [runIdByAssistantMessageId, setRunIdByAssistantMessageId] = useState({})
   const [approvalActions, setApprovalActions] = useState({})
+  const [cancellingRuns, setCancellingRuns] = useState({})
   const [messageTreeOpen, setMessageTreeOpen] = useState(false)
   const [messageTreeRefreshToken, setMessageTreeRefreshToken] = useState(0)
   const [branchPaneWidth, setBranchPaneWidth] = useState(() => {
@@ -920,6 +927,11 @@ export default function ChatPage() {
   const modelLoadSeqRef = useRef(0)
   const runStreamControllersRef = useRef(new Map())
   const runSequenceRef = useRef(new Map())
+  const branchPanesRef = useRef([])
+
+  useEffect(() => {
+    branchPanesRef.current = branchPanes
+  }, [branchPanes])
   const activeConv = conversations.find(c => c.id === activeId)
   const providerOptions = useMemo(
     () => apiKeys
@@ -1277,23 +1289,34 @@ export default function ChatPage() {
           : message
       )))
     }
-    setBranchPanes(current => current.map(pane => ({
-      ...pane,
-      currentLeafMessageId: event.type === 'message.completed' && pane.currentLeafMessageId !== assistantMessageId
-        ? assistantMessageId
-        : pane.currentLeafMessageId,
-      streamingAssistantId: (event.type === 'message.completed' || event.type === 'run.failed' || event.type === 'run.cancelled')
-        && pane.streamingAssistantId === assistantMessageId
-        ? null
-        : pane.streamingAssistantId,
-      messages: Array.isArray(pane.messages)
-        ? pane.messages.map(message => (
-          shouldPatchMessage && message.id === assistantMessageId
-            ? applyRunEventToMessage(message, event)
-            : message
-        ))
-        : pane.messages,
-    })))
+    setBranchPanes(current => {
+      let changed = false
+      const next = current.map(pane => {
+        const tracksAssistant = pane.streamingAssistantId === assistantMessageId
+          || (Array.isArray(pane.messages) && pane.messages.some(message => message.id === assistantMessageId))
+        if (!tracksAssistant) return pane
+
+        changed = true
+        return {
+          ...pane,
+          currentLeafMessageId: event.type === 'message.completed' && pane.currentLeafMessageId !== assistantMessageId
+            ? assistantMessageId
+            : pane.currentLeafMessageId,
+          streamingAssistantId: (event.type === 'message.completed' || event.type === 'run.failed' || event.type === 'run.cancelled')
+            && pane.streamingAssistantId === assistantMessageId
+            ? null
+            : pane.streamingAssistantId,
+          messages: Array.isArray(pane.messages)
+            ? pane.messages.map(message => (
+              shouldPatchMessage && message.id === assistantMessageId
+                ? applyRunEventToMessage(message, event)
+                : message
+            ))
+            : pane.messages,
+        }
+      })
+      return changed ? next : current
+    })
   }, [])
 
   const subscribeToRunStream = useCallback(async ({ conversationId, runId, assistantMessageId, afterSequence = 0 }) => {
@@ -1604,8 +1627,6 @@ export default function ChatPage() {
     let intervalId = null
     const runControllers = runStreamControllersRef.current
     const runSequences = runSequenceRef.current
-    const hasForegroundRun = sending || regeneratingMessageId !== null || branchPanes.some(pane => pane.sending)
-
     function stopSyncLoop() {
       if (intervalId === null) return
       window.clearInterval(intervalId)
@@ -1620,7 +1641,7 @@ export default function ChatPage() {
     }
 
     async function syncRunStreams() {
-      if (disposed || inFlight || hasForegroundRun) return
+      if (disposed || inFlight || sending || regeneratingMessageId !== null || branchPanesRef.current.some(pane => pane.sending)) return
       inFlight = true
       try {
         const runs = await listActiveRuns(activeId)
@@ -1677,7 +1698,7 @@ export default function ChatPage() {
         }
       }
     }
-  }, [activeId, branchPanes, patchActiveRuns, regeneratingMessageId, sending, subscribeToRunStream])
+  }, [activeId, patchActiveRuns, regeneratingMessageId, sending, subscribeToRunStream])
 
   const setApprovalActionPending = useCallback((assistantMessageId, toolCallRef, pending) => {
     const key = `${assistantMessageId}:${toolCallRef}`
@@ -1702,6 +1723,29 @@ export default function ChatPage() {
     patchActiveRuns(runs)
     return runs.find(run => run?.assistant_message_id === assistantMessageId) || null
   }, [activeRunsByAssistantId, patchActiveRuns])
+
+  const cancelRunForMessage = useCallback(async (message) => {
+    if (!activeId || !message?.id) return
+    const assistantMessageId = message.id
+    setCancellingRuns(current => ({ ...current, [assistantMessageId]: true }))
+    setError('')
+    try {
+      const run = await resolveActiveRunForAssistant(activeId, assistantMessageId)
+      if (!run?.id) throw new Error('未找到正在运行的任务，请刷新后重试')
+      await api.cancelRun(activeId, run.id)
+      await refreshMessages(activeId)
+      await loadBranches(activeId)
+    } catch (e) {
+      setError(e.message || '取消运行失败，请重试')
+    } finally {
+      setCancellingRuns(current => {
+        if (!(assistantMessageId in current)) return current
+        const next = { ...current }
+        delete next[assistantMessageId]
+        return next
+      })
+    }
+  }, [activeId, loadBranches, refreshMessages, resolveActiveRunForAssistant])
 
   const submitToolApproval = useCallback(async ({
     conversationId,
@@ -2979,9 +3023,12 @@ export default function ChatPage() {
                             isCreatingBranch={creatingBranchMessageId === msg.id}
                             onApproveToolCall={msg.role === 'assistant' ? toolCallRef => { void approveMainToolCall(msg, toolCallRef) } : undefined}
                             onDenyToolCall={msg.role === 'assistant' ? toolCallRef => { void denyMainToolCall(msg, toolCallRef) } : undefined}
+                            onCancelRun={msg.role === 'assistant' ? () => { void cancelRunForMessage(msg) } : undefined}
                             isApprovalSubmitting={toolCallRef => isApprovalActionPending(msg.id, toolCallRef)}
+                            isRunCancelling={Boolean(cancellingRuns[msg.id])}
                             canApproveToolCall={toolCallRef => (
-                              getRunViewForAssistant(msg.id)?.pending_approval?.tool_call_ref === toolCallRef
+                              getRunViewForAssistant(msg.id)?.status === 'waiting_approval'
+                              && getRunViewForAssistant(msg.id)?.pending_approval?.tool_call_ref === toolCallRef
                             )}
                             />
                           </div>
@@ -3097,9 +3144,12 @@ export default function ChatPage() {
                         onNextSibling={message => switchBranchPaneSibling(pane.id, message.next_sibling_id)}
                         onApproveToolCall={(message, toolCallRef) => approveBranchToolCall(pane.id, message, toolCallRef)}
                         onDenyToolCall={(message, toolCallRef) => denyBranchToolCall(pane.id, message, toolCallRef)}
+                        onCancelRun={cancelRunForMessage}
                         isApprovalSubmitting={(messageId, toolCallRef) => isApprovalActionPending(messageId, toolCallRef)}
+                        isRunCancelling={messageId => Boolean(cancellingRuns[messageId])}
                         canApproveToolCall={(messageId, toolCallRef) => (
-                          getRunViewForAssistant(messageId)?.pending_approval?.tool_call_ref === toolCallRef
+                          getRunViewForAssistant(messageId)?.status === 'waiting_approval'
+                          && getRunViewForAssistant(messageId)?.pending_approval?.tool_call_ref === toolCallRef
                         )}
                         providerValue={pendingProvider}
                         providerOptions={providerOptions}

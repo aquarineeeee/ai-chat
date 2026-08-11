@@ -4,6 +4,7 @@ import asyncio
 import unittest
 
 from app.services.approval_manager import ApprovalDecision, InProcessApprovalManager
+from app.services.agent_runner import InProcessAgentRunner
 
 
 class ApprovalManagerTests(unittest.IsolatedAsyncioTestCase):
@@ -36,6 +37,26 @@ class ApprovalManagerTests(unittest.IsolatedAsyncioTestCase):
             decision=ApprovalDecision(approved=False, reviewer_id=9, comment=None),
         )
         self.assertFalse(resolved)
+
+    async def test_runner_cancel_waits_for_task_shutdown(self) -> None:
+        runner = InProcessAgentRunner()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def job() -> None:
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        runner.start(7, job())
+        await started.wait()
+
+        self.assertTrue(await runner.cancel(7))
+        self.assertTrue(cancelled.is_set())
+        self.assertFalse(runner.is_running(7))
 
 
 if __name__ == "__main__":

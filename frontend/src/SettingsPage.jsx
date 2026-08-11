@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ArrowLeft, Check, LogOut, Moon, Sun, User } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { ArrowLeft, Check, ChevronDown, ChevronUp, FlaskConical, Loader2, LogOut, Moon, Power, ShieldCheck, Sun, Trash2, User, Wrench, X } from 'lucide-react'
 import ApiKeysModal from './components/ApiKeysModal'
 import { PALETTES } from './ThemeContext'
 import { api } from './api'
@@ -18,6 +18,28 @@ const TABS = [
   { id: 'model', label: '默认模型' },
   { id: 'mcp', label: 'MCP' },
 ]
+
+function McpSwitch({ checked, disabled = false, label, onChange }) {
+  return (
+    <label className="provider-switch" title={label} onClick={event => event.stopPropagation()}>
+      <input type="checkbox" role="switch" checked={checked} disabled={disabled} onChange={onChange} aria-label={label} />
+      <span className="provider-switch-track" aria-hidden="true" />
+    </label>
+  )
+}
+
+function mcpStatus(server) {
+  if (server.last_test_status === 'success') return { label: '连接正常', tone: 'success' }
+  if (server.last_test_status === 'error') return { label: '测试失败', tone: 'error' }
+  return { label: '待测试', tone: 'pending' }
+}
+
+function schemaType(schema) {
+  if (Array.isArray(schema?.type)) return schema.type.join(' / ')
+  if (schema?.type) return schema.type
+  if (Array.isArray(schema?.enum)) return '枚举'
+  return '任意类型'
+}
 
 export default function SettingsPage({
   user,
@@ -53,6 +75,18 @@ export default function SettingsPage({
   const [mcpLoading, setMcpLoading] = useState(false)
   const [mcpError, setMcpError] = useState('')
   const [mcpDraft, setMcpDraft] = useState({ display_name: '', url: '', transport: 'streamable_http', headers: [] })
+  const [expandedMcpId, setExpandedMcpId] = useState(null)
+  const [selectedMcpTool, setSelectedMcpTool] = useState(null)
+  const [mcpAction, setMcpAction] = useState(null)
+
+  useEffect(() => {
+    if (!selectedMcpTool) return undefined
+    const closeOnEscape = event => {
+      if (event.key === 'Escape') setSelectedMcpTool(null)
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [selectedMcpTool])
 
   const loadMcp = async () => {
     setMcpLoading(true)
@@ -69,6 +103,23 @@ export default function SettingsPage({
       await api.testMcpServer(created.id); await loadMcp()
     } catch (error) { setMcpError(error.message) }
   }
+
+  const runMcpAction = async (key, action) => {
+    setMcpError('')
+    setMcpAction(key)
+    try {
+      await action()
+      await loadMcp()
+    } catch (error) {
+      setMcpError(error.message || 'MCP 服务操作失败')
+    } finally {
+      setMcpAction(null)
+    }
+  }
+
+  const selectedToolSchema = selectedMcpTool?.input_schema && typeof selectedMcpTool.input_schema === 'object' ? selectedMcpTool.input_schema : {}
+  const selectedToolParameters = Object.entries(selectedToolSchema.properties && typeof selectedToolSchema.properties === 'object' ? selectedToolSchema.properties : {})
+  const selectedToolRequired = Array.isArray(selectedToolSchema.required) ? selectedToolSchema.required : []
 
   return (
     <main className="settings-page min-h-screen overflow-y-auto" style={{ background: 'var(--bg-base)', color: 'var(--text-primary)' }}>
@@ -208,20 +259,127 @@ export default function SettingsPage({
               {mcpError && <p className="settings-row-help" style={{ color: 'var(--error-text)' }}>{mcpError}</p>}
               {!mcpLoading && mcpServers.length === 0 && <p className="settings-row-help">暂无 MCP 服务</p>}
               {mcpServers.map(server => (
-                <div className="settings-row settings-row-column" key={server.id}>
-                  <label className="settings-field-label" htmlFor={`mcp-transport-${server.id}`}>传输方式</label>
-                  <select id={`mcp-transport-${server.id}`} className="settings-select" value={server.transport || 'streamable_http'} onChange={async event => { await api.updateMcpServer(server.id, { transport: event.target.value }); await loadMcp() }}>
-                    <option value="streamable_http">Streamable HTTP</option>
-                    <option value="sse">SSE（旧版）</option>
-                  </select>
-                  <div className="flex items-center justify-between gap-3"><div><p className="settings-row-title">{server.display_name}</p><p className="settings-row-help">{server.tools?.filter(tool => tool.remote_available).length || 0} 个可用工具 · {server.last_test_status === 'success' ? '可用' : server.last_test_status === 'pending' ? '待测试' : '测试失败'}</p></div><div className="flex gap-2"><button className="settings-outline-button" type="button" onClick={async () => { await api.testMcpServer(server.id); await loadMcp() }}>测试</button><button className="settings-outline-button" type="button" onClick={async () => { await api.updateMcpServer(server.id, { enabled: !server.enabled }); await loadMcp() }}>{server.enabled ? '停用' : '启用'}</button><button className="settings-outline-button" type="button" onClick={async () => { if (window.confirm('删除此 MCP 服务？')) { await api.deleteMcpServer(server.id); await loadMcp() } }}>删除</button></div></div>
-                  {(server.tools || []).map(tool => <div className="flex items-center justify-between gap-2 text-sm" key={tool.id}><span>{tool.remote_tool_name}</span><label><input type="checkbox" checked={tool.enabled} onChange={async event => { await api.updateMcpTool(server.id, tool.id, { enabled: event.target.checked }); await loadMcp() }} /> 启用</label><label><input type="checkbox" checked={tool.requires_approval} onChange={async event => { await api.updateMcpTool(server.id, tool.id, { requires_approval: event.target.checked }); await loadMcp() }} /> 调用前审批</label></div>)}
+                <div className="settings-row mcp-server" key={server.id}>
+                  <button
+                    type="button"
+                    className="mcp-server-summary"
+                    aria-expanded={expandedMcpId === server.id}
+                    aria-controls={`mcp-server-tools-${server.id}`}
+                    onClick={() => setExpandedMcpId(current => current === server.id ? null : server.id)}
+                  >
+                    <span className="mcp-server-chevron" aria-hidden="true">{expandedMcpId === server.id ? <ChevronUp /> : <ChevronDown />}</span>
+                    <span className="mcp-server-copy">
+                      <span className="settings-row-title">{server.display_name}</span>
+                      <span className="settings-row-help">{server.tools?.filter(tool => tool.remote_available).length || 0} 个可用工具 <span className={`mcp-status mcp-status-${mcpStatus(server).tone}`}>{mcpStatus(server).label}</span></span>
+                    </span>
+                  </button>
+                  <div className="mcp-server-actions" onClick={event => event.stopPropagation()}>
+                    <button
+                      className="mcp-icon-button"
+                      type="button"
+                      title="测试连接并同步工具"
+                      aria-label={`测试 ${server.display_name} 的连接`}
+                      disabled={mcpAction === `test-${server.id}`}
+                      onClick={() => runMcpAction(`test-${server.id}`, () => api.testMcpServer(server.id))}
+                    >
+                      {mcpAction === `test-${server.id}` ? <Loader2 className="animate-spin" /> : <FlaskConical />}
+                    </button>
+                    <McpSwitch
+                      checked={server.enabled}
+                      disabled={mcpAction === `server-${server.id}`}
+                      label={`${server.enabled ? '停用' : '启用'} ${server.display_name}`}
+                      onChange={() => runMcpAction(`server-${server.id}`, () => api.updateMcpServer(server.id, { enabled: !server.enabled }))}
+                    />
+                    <button
+                      className="mcp-icon-button mcp-delete-button"
+                      type="button"
+                      title="删除服务"
+                      aria-label={`删除 ${server.display_name}`}
+                      disabled={mcpAction === `delete-${server.id}`}
+                      onClick={() => { if (window.confirm(`删除“${server.display_name}”及其工具？`)) void runMcpAction(`delete-${server.id}`, () => api.deleteMcpServer(server.id)) }}
+                    >
+                      {mcpAction === `delete-${server.id}` ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                    </button>
+                  </div>
+                  {expandedMcpId === server.id && (
+                    <div className="mcp-server-details" id={`mcp-server-tools-${server.id}`}>
+                      <div className="mcp-server-config">
+                        <label className="settings-field-label" htmlFor={`mcp-transport-${server.id}`}>传输方式</label>
+                        <select
+                          id={`mcp-transport-${server.id}`}
+                          className="settings-select"
+                          value={server.transport || 'streamable_http'}
+                          onChange={event => runMcpAction(`transport-${server.id}`, () => api.updateMcpServer(server.id, { transport: event.target.value }))}
+                          disabled={mcpAction === `transport-${server.id}`}
+                        >
+                          <option value="streamable_http">Streamable HTTP</option>
+                          <option value="sse">SSE（旧版）</option>
+                        </select>
+                      </div>
+                      <div className="mcp-tools-heading"><span><Wrench /> 工具</span><span>{server.tools?.filter(tool => tool.remote_available).length || 0}</span></div>
+                      {(server.tools || []).filter(tool => tool.remote_available).map(tool => (
+                        <div
+                          className="mcp-tool-row"
+                          key={tool.id}
+                          role="button"
+                          tabIndex={0}
+                          aria-haspopup="dialog"
+                          onClick={() => setSelectedMcpTool(tool)}
+                          onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedMcpTool(tool) } }}
+                        >
+                          <div className="mcp-tool-copy">
+                            <p>{tool.remote_tool_name}</p>
+                            <span>{tool.description || '服务未提供工具简介'}</span>
+                          </div>
+                          <div className="mcp-tool-actions" onClick={event => event.stopPropagation()}>
+                            <span className="mcp-tool-switch" title="是否启用"><Power aria-hidden="true" /><McpSwitch checked={tool.enabled} disabled={mcpAction === `tool-${tool.id}`} label={`${tool.enabled ? '停用' : '启用'} ${tool.remote_tool_name}`} onChange={() => runMcpAction(`tool-${tool.id}`, () => api.updateMcpTool(server.id, tool.id, { enabled: !tool.enabled }))} /></span>
+                            <span className="mcp-tool-switch" title="调用前审批"><ShieldCheck aria-hidden="true" /><McpSwitch checked={tool.requires_approval} disabled={mcpAction === `approval-${tool.id}`} label={`${tool.requires_approval ? '取消调用前审批' : '启用调用前审批'} ${tool.remote_tool_name}`} onChange={() => runMcpAction(`approval-${tool.id}`, () => api.updateMcpTool(server.id, tool.id, { requires_approval: !tool.requires_approval }))} /></span>
+                          </div>
+                        </div>
+                      ))}
+                      {(server.tools || []).filter(tool => tool.remote_available).length === 0 && <p className="mcp-empty-tools">还没有同步到可用工具。请先测试连接。</p>}
+                    </div>
+                  )}
                 </div>
               ))}
             </section>
           )}
         </div>
       </div>
+      {selectedMcpTool && (
+        <div className="mcp-tool-dialog-backdrop" onMouseDown={() => setSelectedMcpTool(null)}>
+          <section className="mcp-tool-dialog" role="dialog" aria-modal="true" aria-labelledby="mcp-tool-dialog-title" onMouseDown={event => event.stopPropagation()}>
+            <header className="mcp-dialog-header">
+              <div>
+                <h2 id="mcp-tool-dialog-title">{selectedMcpTool.remote_tool_name}</h2>
+                <p>{selectedMcpTool.description || '服务未提供工具简介'}</p>
+              </div>
+              <button className="mcp-dialog-close" type="button" onClick={() => setSelectedMcpTool(null)} aria-label="关闭工具参数" title="关闭"><X /></button>
+            </header>
+            <div className="mcp-dialog-body">
+              <h3>可用参数</h3>
+              {selectedToolParameters.length === 0 ? <p className="settings-row-help">此工具没有定义输入参数。</p> : (
+                <ul className="mcp-parameter-list">
+                  {selectedToolParameters.map(([name, schema]) => (
+                    <li className="mcp-parameter" key={name}>
+                      <div className="mcp-parameter-topline">
+                        <code>{name}</code>
+                        <span className="mcp-parameter-type">{schemaType(schema)}</span>
+                        {selectedToolRequired.includes(name) && <span className="mcp-parameter-required">必填</span>}
+                      </div>
+                      {(schema.description || schema.default !== undefined || Array.isArray(schema.enum)) && <p>{schema.description || ''}{schema.default !== undefined ? ` 默认值：${JSON.stringify(schema.default)}` : ''}{Array.isArray(schema.enum) ? ` 可选值：${schema.enum.map(value => JSON.stringify(value)).join('、')}` : ''}</p>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <details className="mcp-schema-details">
+                <summary>查看原始 Schema</summary>
+                <pre>{JSON.stringify(selectedToolSchema, null, 2)}</pre>
+              </details>
+            </div>
+          </section>
+        </div>
+      )}
     </main>
   )
 }

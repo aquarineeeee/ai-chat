@@ -29,6 +29,7 @@ from app.schemas.message import (
 )
 from app.services.messages import (
     activate_message_branch,
+    cancel_agent_run,
     create_message_pair,
     create_message_stream,
     delete_message,
@@ -198,6 +199,22 @@ async def conversation_run_deny(
         run_id=run_id,
         payload=payload,
         approved=False,
+    )
+    return AgentRunResponse.model_validate(serialize_agent_run(run))
+
+
+@router.post("/conversations/{conversation_id}/runs/{run_id}/cancel", response_model=AgentRunResponse)
+async def conversation_run_cancel(
+    conversation_id: int,
+    run_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(db_session),
+) -> AgentRunResponse:
+    run = await cancel_agent_run(
+        session=session,
+        user_id=current_user.id,
+        conversation_id=conversation_id,
+        run_id=run_id,
     )
     return AgentRunResponse.model_validate(serialize_agent_run(run))
 

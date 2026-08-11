@@ -11,6 +11,7 @@ import httpx
 from app.canonical_transcript import CanonicalTranscriptItem, parse_tool_arguments
 from app.core.encryption import decrypt_text
 from app.core.exceptions import AppError
+from app.providers.openai import ToolCallLoopGuard
 from app.models.api_key import ApiKey
 
 
@@ -18,7 +19,7 @@ DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_ANTHROPIC_MAX_TOKENS = 2000
 DEFAULT_CACHE_CONTROL = {"type": "ephemeral"}
-DEFAULT_MAX_TOOL_ROUND_TRIPS = 99
+DEFAULT_MAX_TOOL_ROUND_TRIPS = 32
 ToolExecutor = Callable[[str, str], Awaitable[str]]
 ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
 UsageCallback = Callable[[dict[str, int] | None], Awaitable[None]]
@@ -446,6 +447,7 @@ async def _run_tool_round(
     tool_uses: list[dict[str, object]],
     tool_executor: ToolExecutor,
     event_callback: ToolEventCallback | None = None,
+    loop_guard: ToolCallLoopGuard | None = None,
 ) -> None:
     message_history.append({"role": "assistant", "content": _json_copy(assistant_content_blocks)})
 
@@ -454,6 +456,8 @@ async def _run_tool_round(
         tool_name = str(tool_use["name"])
         tool_input = tool_use.get("input")
         tool_arguments = _tool_arguments_json(tool_input) if isinstance(tool_input, dict) else "{}"
+        if loop_guard is not None:
+            loop_guard.observe(tool_name, tool_arguments)
         running_event: dict[str, object] = {
             "name": tool_name,
             "status": "running",
@@ -784,6 +788,7 @@ async def create_anthropic_reply(
         message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
+        loop_guard = ToolCallLoopGuard()
         for round_index in range(max_rounds):
             payload = _messages_payload(
                 model=model,
@@ -828,6 +833,7 @@ async def create_anthropic_reply(
                     assistant_content_blocks=content_blocks,
                     tool_uses=tool_uses,
                     tool_executor=tool_executor,
+                    loop_guard=loop_guard,
                 )
                 continue
 
@@ -866,6 +872,7 @@ async def stream_anthropic_reply(
         message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
+        loop_guard = ToolCallLoopGuard()
         for round_index in range(max_rounds):
             payload = _messages_payload(
                 model=model,
@@ -929,6 +936,7 @@ async def stream_anthropic_reply(
                     tool_uses=round_tool_uses,
                     tool_executor=tool_executor,
                     event_callback=tool_event_callback,
+                    loop_guard=loop_guard,
                 )
                 continue
 

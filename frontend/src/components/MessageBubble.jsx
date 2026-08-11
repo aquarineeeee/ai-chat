@@ -110,7 +110,9 @@ function ToolPartCard({
   part,
   onApproveToolCall,
   onDenyToolCall,
+  onCancelRun,
   isApprovalSubmitting = false,
+  isRunCancelling = false,
   canApproveToolCall,
 }) {
   const [expanded, setExpanded] = useState(false)
@@ -170,8 +172,21 @@ function ToolPartCard({
         >
           <button
             type="button"
+            onClick={() => onCancelRun?.()}
+            disabled={isRunCancelling || isApprovalSubmitting}
+            className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
+            style={{
+              background: 'var(--bg-surface)',
+              color: 'var(--text-secondary)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            {isRunCancelling ? 'Cancelling' : 'Cancel run'}
+          </button>
+          <button
+            type="button"
             onClick={() => onDenyToolCall?.(approvalTarget)}
-            disabled={isApprovalSubmitting}
+            disabled={isApprovalSubmitting || isRunCancelling}
             className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
               background: 'var(--bg-surface)',
@@ -184,7 +199,7 @@ function ToolPartCard({
           <button
             type="button"
             onClick={() => onApproveToolCall?.(approvalTarget)}
-            disabled={isApprovalSubmitting}
+            disabled={isApprovalSubmitting || isRunCancelling}
             className="px-3 py-1.5 rounded-xl text-xs transition disabled:opacity-50 disabled:cursor-not-allowed"
             style={{
               background: 'var(--accent)',
@@ -327,7 +342,9 @@ function LegacyAssistantBody({
   message,
   onApproveToolCall,
   onDenyToolCall,
+  onCancelRun,
   isApprovalSubmitting,
+  isRunCancelling,
   canApproveToolCall,
 }) {
   const parts = Array.isArray(message?.parts) ? message.parts : null
@@ -358,7 +375,9 @@ function LegacyAssistantBody({
               part={part}
               onApproveToolCall={onApproveToolCall}
               onDenyToolCall={onDenyToolCall}
+              onCancelRun={onCancelRun}
               isApprovalSubmitting={isApprovalSubmitting?.(part?.tool_call_id)}
+              isRunCancelling={isRunCancelling}
               canApproveToolCall={canApproveToolCall?.(part?.tool_call_id)}
             />
           )
@@ -375,7 +394,9 @@ function AssistantBody({
   runView,
   onApproveToolCall,
   onDenyToolCall,
+  onCancelRun,
   isApprovalSubmitting,
+  isRunCancelling,
   canApproveToolCall,
 }) {
   const runItems = Array.isArray(runView?.items) ? runView.items : []
@@ -386,7 +407,9 @@ function AssistantBody({
         message={message}
         onApproveToolCall={onApproveToolCall}
         onDenyToolCall={onDenyToolCall}
+        onCancelRun={onCancelRun}
         isApprovalSubmitting={isApprovalSubmitting}
+        isRunCancelling={isRunCancelling}
         canApproveToolCall={canApproveToolCall}
       />
     )
@@ -410,7 +433,9 @@ function AssistantBody({
               part={item}
               onApproveToolCall={onApproveToolCall}
               onDenyToolCall={onDenyToolCall}
+              onCancelRun={onCancelRun}
               isApprovalSubmitting={isApprovalSubmitting?.(item?.tool_call_ref)}
+              isRunCancelling={isRunCancelling}
               canApproveToolCall={canApproveToolCall?.(item?.tool_call_ref)}
             />
           )
@@ -633,7 +658,9 @@ export default function MessageBubble({
   hideActions = false,
   onApproveToolCall,
   onDenyToolCall,
+  onCancelRun,
   isApprovalSubmitting,
+  isRunCancelling,
   canApproveToolCall,
 }) {
   const isUser = message.role === 'user'
@@ -731,7 +758,9 @@ export default function MessageBubble({
             runView={runView}
             onApproveToolCall={onApproveToolCall}
             onDenyToolCall={onDenyToolCall}
+            onCancelRun={onCancelRun}
             isApprovalSubmitting={isApprovalSubmitting}
+            isRunCancelling={isRunCancelling}
             canApproveToolCall={canApproveToolCall}
           />
           {message.status === 'failed' && (

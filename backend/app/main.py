@@ -14,6 +14,7 @@ from app.core.exceptions import register_exception_handlers
 from app.db.session import bootstrap_admin_user
 from app.services.approval_manager import approval_manager
 from app.services.agent_runner import agent_runner
+from app.services.messages import reconcile_interrupted_runs
 
 
 settings = get_settings()
@@ -23,6 +24,7 @@ STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await bootstrap_admin_user()
+    await reconcile_interrupted_runs()
     try:
         yield
     finally:

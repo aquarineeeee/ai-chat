@@ -22,7 +22,9 @@ export default function BranchPane({
   onNextSibling,
   onApproveToolCall,
   onDenyToolCall,
+  onCancelRun,
   isApprovalSubmitting,
+  isRunCancelling,
   canApproveToolCall,
   providerValue = 'openai',
   providerOptions = [],
@@ -133,7 +135,9 @@ export default function BranchPane({
             isDeleting={pane.deletingMessageId === rootMessage.id}
             onApproveToolCall={rootMessage.role === 'assistant' ? toolCallRef => { void onApproveToolCall?.(rootMessage, toolCallRef) } : undefined}
             onDenyToolCall={rootMessage.role === 'assistant' ? toolCallRef => { void onDenyToolCall?.(rootMessage, toolCallRef) } : undefined}
+            onCancelRun={rootMessage.role === 'assistant' ? () => { void onCancelRun?.(rootMessage) } : undefined}
             isApprovalSubmitting={toolCallRef => isApprovalSubmitting?.(rootMessage.id, toolCallRef)}
+            isRunCancelling={isRunCancelling?.(rootMessage.id)}
             canApproveToolCall={toolCallRef => canApproveToolCall?.(rootMessage.id, toolCallRef)}
           />
         )}
@@ -173,7 +177,9 @@ export default function BranchPane({
               isDeleting={pane.deletingMessageId === message.id}
               onApproveToolCall={message.role === 'assistant' ? toolCallRef => { void onApproveToolCall?.(message, toolCallRef) } : undefined}
               onDenyToolCall={message.role === 'assistant' ? toolCallRef => { void onDenyToolCall?.(message, toolCallRef) } : undefined}
+              onCancelRun={message.role === 'assistant' ? () => { void onCancelRun?.(message) } : undefined}
               isApprovalSubmitting={toolCallRef => isApprovalSubmitting?.(message.id, toolCallRef)}
+              isRunCancelling={isRunCancelling?.(message.id)}
               canApproveToolCall={toolCallRef => canApproveToolCall?.(message.id, toolCallRef)}
             />
           ))}

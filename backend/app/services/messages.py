@@ -354,6 +354,75 @@ async def submit_tool_approval_decision(
     return agent_run
 
 
+async def cancel_agent_run(
+    *,
+    session: AsyncSession,
+    user_id: int,
+    conversation_id: int,
+    run_id: int,
+) -> AgentRun:
+    agent_run = await get_agent_run_for_conversation(
+        session=session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        run_id=run_id,
+    )
+    if agent_run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return agent_run
+
+    if await agent_runner.cancel(agent_run.id):
+        await session.rollback()
+        session.expire_all()
+        return await get_agent_run_for_conversation(
+            session=session,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        )
+
+    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    assistant_message = await session.get(Message, agent_run.assistant_message_id) if agent_run.assistant_message_id else None
+    if assistant_message is None:
+        agent_run.status = RUN_STATUS_CANCELLED
+        agent_run.completed_at = utcnow_naive()
+        agent_run.error_message = "Run cancelled."
+        await session.commit()
+        return agent_run
+
+    await _cancel_loaded_run(
+        session=session,
+        agent_run=agent_run,
+        conversation=conversation,
+        assistant_message=assistant_message,
+        message="Run cancelled by the user.",
+    )
+    return agent_run
+
+
+async def reconcile_interrupted_runs() -> None:
+    """Close active in-process runs left behind by a backend restart."""
+    async with AsyncSessionLocal() as session:
+        result = await session.scalars(
+            select(AgentRun).where(AgentRun.status.in_({RUN_STATUS_RUNNING, RUN_STATUS_WAITING_APPROVAL}))
+        )
+        for agent_run in result.all():
+            conversation = await session.get(Conversation, agent_run.conversation_id)
+            assistant_message = await session.get(Message, agent_run.assistant_message_id) if agent_run.assistant_message_id else None
+            if conversation is None or assistant_message is None:
+                agent_run.status = RUN_STATUS_CANCELLED
+                agent_run.completed_at = utcnow_naive()
+                agent_run.error_message = "Run cancelled because the backend restarted."
+                continue
+            await _cancel_loaded_run(
+                session=session,
+                agent_run=agent_run,
+                conversation=conversation,
+                assistant_message=assistant_message,
+                message="Run cancelled because the backend restarted.",
+            )
+        await session.commit()
+
+
 def _build_messages_response(
     *,
     conversation: Conversation,
@@ -1761,6 +1830,10 @@ async def _apply_projection_for_event(
         metadata = _run_metadata(agent_run)
         metadata.pop("pending_approval", None)
         _set_run_metadata(agent_run, metadata)
+    elif event_type in {"run.failed", "run.cancelled"}:
+        metadata = _run_metadata(agent_run)
+        metadata.pop("pending_approval", None)
+        _set_run_metadata(agent_run, metadata)
 
     if event_type.startswith("tool_call."):
         await _project_tool_call_event(
@@ -2556,6 +2629,48 @@ async def _mark_cancelled(
     await session.refresh(assistant_message)
     await session.refresh(conversation)
     await close_runtime_sessions(context or {})
+
+
+async def _cancel_loaded_run(
+    *,
+    session: AsyncSession,
+    agent_run: AgentRun,
+    conversation: Conversation,
+    assistant_message: Message,
+    message: str,
+) -> None:
+    metadata = _run_metadata(agent_run)
+    pending = metadata.get("pending_approval")
+    open_tool_calls: list[dict[str, object]] = []
+    if isinstance(pending, dict):
+        open_tool_calls.append(
+            {
+                "tool_call_ref": str(pending.get("tool_call_ref") or ""),
+                "step_id": str(pending.get("step_id") or ""),
+                "tool_name": str(pending.get("tool_name") or ""),
+                "completed": False,
+            }
+        )
+
+    context: dict[str, object] = {
+        "agent_run": agent_run,
+        "assistant_message": assistant_message,
+        "conversation": conversation,
+        "trace_state": {"open_tool_calls": open_tool_calls},
+    }
+    status = MessageStatus.PARTIAL if assistant_message.content else MessageStatus.FAILED
+    await _mark_cancelled(
+        session=session,
+        context=context,
+        conversation=conversation,
+        branch=None,
+        assistant_message=assistant_message,
+        message=message,
+        status=status,
+        leaf_message_id=agent_run.user_message_id or conversation.current_leaf_message_id or assistant_message.parent_id or assistant_message.id,
+        partial_content=assistant_message.content or "",
+        activate_branch=True,
+    )
 
 
 async def _build_send_response(

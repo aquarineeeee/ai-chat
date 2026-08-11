@@ -21,6 +21,15 @@ class InProcessAgentRunner:
         task = self._tasks.get(run_id)
         return task is not None and not task.done()
 
+    async def cancel(self, run_id: int) -> bool:
+        task = self._tasks.get(run_id)
+        if task is None or task.done():
+            return False
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return True
+
     async def shutdown(self) -> None:
         tasks = [task for task in self._tasks.values() if not task.done()]
         if not tasks:

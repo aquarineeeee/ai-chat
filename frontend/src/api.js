@@ -130,6 +130,7 @@ export const api = {
   getRunView: (convId, runId) => request('GET', `/api/conversations/${convId}/runs/${runId}/view`),
   approveRunTool: (convId, runId, data) => request('POST', `/api/conversations/${convId}/runs/${runId}/approve`, data),
   denyRunTool: (convId, runId, data) => request('POST', `/api/conversations/${convId}/runs/${runId}/deny`, data),
+  cancelRun: (convId, runId) => request('POST', `/api/conversations/${convId}/runs/${runId}/cancel`),
   getRunStreamPath: (convId, runId, params = {}) => {
     const search = new URLSearchParams()
     if (Number.isFinite(params.afterSequence)) search.set('after_sequence', String(params.afterSequence))

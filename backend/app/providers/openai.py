@@ -15,10 +15,32 @@ from app.models.api_key import ApiKey
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MAX_TOOL_ROUND_TRIPS = 99
+DEFAULT_MAX_TOOL_ROUND_TRIPS = 32
+MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3
 ToolExecutor = Callable[[str, str], Awaitable[str]]
 ToolEventCallback = Callable[[dict[str, object]], Awaitable[None]]
 UsageCallback = Callable[[dict[str, int] | None], Awaitable[None]]
+
+
+class ToolCallLoopGuard:
+    def __init__(self) -> None:
+        self._last_signature: tuple[str, str] | None = None
+        self._repeat_count = 0
+
+    def observe(self, tool_name: str, tool_arguments: str) -> None:
+        signature = (tool_name, tool_arguments.strip())
+        if signature == self._last_signature:
+            self._repeat_count += 1
+        else:
+            self._last_signature = signature
+            self._repeat_count = 1
+
+        if self._repeat_count > MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS:
+            raise AppError(
+                status_code=502,
+                code="MODEL_ERROR",
+                message=f"Model repeatedly requested the same tool call ({tool_name})",
+            )
 
 
 class ReplyText(str):
@@ -359,12 +381,15 @@ async def _run_tool_round(
     tool_executor: ToolExecutor,
     assistant_content: str = "",
     event_callback: ToolEventCallback | None = None,
+    loop_guard: ToolCallLoopGuard | None = None,
 ) -> None:
     message_history.append(_assistant_history_message({"tool_calls": tool_calls, "content": assistant_content}))
     for index, tool_call in enumerate(tool_calls):
         function = tool_call["function"]
         tool_name = str(function["name"])
         tool_arguments = str(function["arguments"])
+        if loop_guard is not None:
+            loop_guard.observe(tool_name, tool_arguments)
         running_event: dict[str, object] = {
             "name": tool_name,
             "status": "running",
@@ -508,6 +533,7 @@ async def create_openai_reply(
         message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
+        loop_guard = ToolCallLoopGuard()
         for _ in range(max_rounds):
             payload = _chat_payload(
                 model=model,
@@ -548,6 +574,7 @@ async def create_openai_reply(
                     tool_calls=tool_calls,
                     tool_executor=tool_executor,
                     assistant_content=_stringify_content(message.get("content")),
+                    loop_guard=loop_guard,
                 )
                 continue
 
@@ -586,6 +613,7 @@ async def stream_openai_reply(
         message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
+        loop_guard = ToolCallLoopGuard()
         for _ in range(max_rounds):
             payload = _chat_payload(
                 model=model,
@@ -637,6 +665,7 @@ async def stream_openai_reply(
                     tool_executor=tool_executor,
                     assistant_content=round_content,
                     event_callback=tool_event_callback,
+                    loop_guard=loop_guard,
                 )
                 continue
 
