@@ -123,6 +123,9 @@ function DeleteConfirmModal({ title, description, onConfirm, onCancel, deleting,
 export default function Sidebar({
   open,
   conversations,
+  projects = [],
+  selectedProjectId = null,
+  onProjectChange = () => {},
   branchesByConversation = {},
   loadingBranches = {},
   activeId,
@@ -356,6 +359,12 @@ export default function Sidebar({
     },
   }
 
+  const projectRows = projects.flatMap(project => [
+    { type: 'project', project },
+    ...conversations.filter(conversation => conversation.project_id === project.id).map(conversation => ({ type: 'conversation', conversation })),
+  ])
+  const ungroupedConversations = conversations.filter(conversation => !conversation.project_id)
+
   return (
     <aside
       className={`
@@ -396,7 +405,7 @@ export default function Sidebar({
         <div className="flex gap-2">
           <button
             type="button"
-            onClick={() => onNew()}
+            onClick={() => onNew('新对话', undefined, undefined, undefined, null)}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition"
             style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}
             onMouseEnter={e => {
@@ -464,13 +473,29 @@ export default function Sidebar({
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-5 w-5 animate-spin" style={{ color: 'var(--text-muted)' }} />
           </div>
-        ) : conversations.length === 0 ? (
+        ) : conversations.length === 0 && projects.length === 0 ? (
           <p className="px-4 py-8 text-center text-xs" style={{ color: 'var(--text-muted)' }}>
             还没有对话，点击上方按钮开始。
           </p>
         ) : (
           <ul className="space-y-0.5">
-            {conversations.map(conv => {
+            {projectRows.map(row => {
+              if (row.type === 'project') {
+                const project = row.project
+                const count = conversations.filter(conversation => conversation.project_id === project.id).length
+                return (
+                  <li key={`project-${project.id}`} className="mt-3 first:mt-0">
+                    <div className="group/project flex items-center gap-2 px-3 py-1.5" style={{ color: 'var(--text-muted)' }}>
+                      <span className="min-w-0 flex-1 truncate text-xs font-semibold">{project.name}</span>
+                      <span className="text-[11px]">{count}</span>
+                      <button type="button" onClick={() => onNew('新对话', undefined, undefined, undefined, project.id)} className="rounded-md p-1 opacity-0 transition group-hover/project:opacity-100" style={{ color: 'var(--text-secondary)' }} title={`在「${project.name}」中新建会话`} aria-label={`在「${project.name}」中新建会话`}>
+                        <Plus className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </li>
+                )
+              }
+              const conv = row.conversation
               const isActive = activeId === conv.id
               const isEditing = editingId === conv.id
               const isRenaming = renamingId === conv.id
@@ -764,6 +789,25 @@ export default function Sidebar({
                       })}
                     </div>
                   )}
+                </li>
+              )
+            })}
+            {ungroupedConversations.length > 0 && (
+              <li className="mt-5 px-3 pb-1 pt-2 text-xs font-semibold" style={{ color: 'var(--text-muted)', borderTop: '1px solid var(--border)' }}>
+                无项目会话
+              </li>
+            )}
+            {ungroupedConversations.map(conv => {
+              const isActive = activeId === conv.id
+              return (
+                <li key={`ungrouped-${conv.id}`} className="group relative">
+                  <button type="button" onClick={() => onSelect(conv.id)} className="w-full rounded-xl px-3 py-2.5 pr-16 text-left text-sm transition" style={{ background: isActive ? 'var(--bg-elevated)' : 'transparent', color: isActive ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                    <div className="flex items-start gap-2"><MessageSquare className="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-50" /><div className="min-w-0 flex-1"><p className="truncate font-medium leading-snug">{conv.title || '新对话'}</p><p className="mt-0.5 text-xs" style={{ color: 'var(--text-muted)' }}>{formatDate(conv.updated_at)}</p></div></div>
+                  </button>
+                  <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1 opacity-0 transition group-hover:opacity-100">
+                    <button type="button" onClick={e => startRename(e, conv)} className="rounded-lg p-1" style={{ color: 'var(--text-muted)' }} title="重命名对话"><Pencil className="h-3.5 w-3.5" /></button>
+                    <button type="button" onClick={e => handleDelete(e, conv.id)} className="rounded-lg p-1" style={{ color: 'var(--text-muted)' }} title="删除对话"><Trash2 className="h-3.5 w-3.5" /></button>
+                  </div>
                 </li>
               )
             })}

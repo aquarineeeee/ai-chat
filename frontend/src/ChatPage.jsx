@@ -864,6 +864,8 @@ export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [conversations, setConversations] = useState([])
+  const [projects, setProjects] = useState([])
+  const [selectedProjectId, setSelectedProjectId] = useState(null)
   const [activeId, setActiveId] = useState(null)
   const [messages, setMessages] = useState([])
   const [hasMoreMessages, setHasMoreMessages] = useState(false)
@@ -894,6 +896,12 @@ export default function ChatPage() {
   const [pendingTemperature, setPendingTemperature] = useState(DEFAULT_TEMPERATURE)
   const [defaultProvider, setDefaultProvider] = useState(() => window.localStorage.getItem('ai-chat.default-provider') || '')
   const [defaultModel, setDefaultModel] = useState(() => window.localStorage.getItem('ai-chat.default-model') || '')
+
+  useEffect(() => {
+    let cancelled = false
+    api.getProjects().then(items => { if (!cancelled) setProjects(items || []) }).catch(() => {})
+    return () => { cancelled = true }
+  }, [])
   const [importing, setImporting] = useState(false)
   const [importStatus, setImportStatus] = useState(null)
   const [branchesByConversation, setBranchesByConversation] = useState({})
@@ -1854,17 +1862,18 @@ export default function ChatPage() {
     }
   }, [activeId, patchBranchPane, submitToolApproval])
 
-  const createConversation = useCallback(async (title = '新对话', model = undefined, providerValue = undefined, temperature = pendingTemperature) => {
+  const createConversation = useCallback(async (title = '新对话', model = undefined, providerValue = undefined, temperature = pendingTemperature, projectId = selectedProjectId) => {
     const payload = { title }
     const providerId = parseProviderId(providerValue || defaultProvider)
     if (providerId) payload.provider_id = providerId
     if (model || defaultModel) payload.model = model || defaultModel
     payload.temperature = resolveTemperature(temperature)
+    if (projectId) payload.project_id = projectId
     const conv = await api.createConversation(payload)
     setConversations(prev => [conv, ...prev])
     await selectConversation(conv.id)
     return conv
-  }, [defaultModel, defaultProvider, pendingTemperature, selectConversation])
+  }, [defaultModel, defaultProvider, pendingTemperature, selectedProjectId, selectConversation])
 
   const reloadConversations = useCallback(async (nextActiveId = null) => {
     const items = await fetchConversations()
@@ -2850,6 +2859,9 @@ export default function ChatPage() {
         <Sidebar
           open={sidebarOpen}
           conversations={conversations}
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          onProjectChange={setSelectedProjectId}
           branchesByConversation={branchesByConversation}
           loadingBranches={loadingBranches}
           activeId={activeId}
@@ -3228,6 +3240,11 @@ export default function ChatPage() {
       modelError={modelError}
       onDefaultProviderChange={changeDefaultProvider}
       onDefaultModelChange={changeDefaultModel}
+      onProjectsChange={items => {
+        setProjects(items || [])
+        const activeStillExists = conversations.some(conversation => !conversation.project_id || (items || []).some(project => project.id === conversation.project_id))
+        if (!activeStillExists) void reloadConversations()
+      }}
     />
   ) : chatView
 }

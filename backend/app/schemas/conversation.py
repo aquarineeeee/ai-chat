@@ -16,6 +16,7 @@ class ConversationCreate(BaseModel):
     model: str | None = Field(default=None, max_length=100)
     temperature: Decimal | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = Field(default=None, ge=1)
+    project_id: int | None = Field(default=None, ge=1)
 
 
 class ConversationUpdate(BaseModel):
@@ -28,6 +29,7 @@ class ConversationUpdate(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1)
     current_leaf_message_id: int | None = Field(default=None, ge=1)
     current_branch_id: int | None = Field(default=None, ge=1)
+    project_id: int | None = Field(default=None, ge=1)
 
 
 class ConversationResponse(UTCResponseModel):
@@ -35,6 +37,8 @@ class ConversationResponse(UTCResponseModel):
 
     id: int
     user_id: int
+    project_id: int | None
+    project: "ProjectSummary | None" = None
     title: str
     system_prompt: str | None
     provider: str | None
@@ -46,6 +50,13 @@ class ConversationResponse(UTCResponseModel):
     current_branch_id: int | None
     created_at: datetime
     updated_at: datetime
+
+
+class ProjectSummary(UTCResponseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
 
 
 class ImportedConversationSummary(UTCResponseModel):

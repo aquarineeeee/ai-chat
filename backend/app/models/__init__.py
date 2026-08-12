@@ -8,6 +8,7 @@ from app.models.tool_call import ToolCall
 from app.models.user import User
 from app.models.provider import ProviderInstance, ProviderModel
 from app.models.mcp import McpServer, McpTool
+from app.models.project import Project, ProjectMcpTool, ConversationMcpTool
 
 __all__ = [
     "AgentRun",
@@ -24,4 +25,7 @@ __all__ = [
     "ProviderModel",
     "McpServer",
     "McpTool",
+    "Project",
+    "ProjectMcpTool",
+    "ConversationMcpTool",
 ]

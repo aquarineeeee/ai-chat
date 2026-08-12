@@ -180,7 +180,7 @@ async def test_server(session: AsyncSession, user_id: int, server_id: int) -> Mc
     return await get_server(session, user_id, server_id)
 
 
-async def runtime_snapshot(session: AsyncSession, user_id: int) -> list[dict[str, object]]:
+async def runtime_snapshot(session: AsyncSession, user_id: int, tool_ids: set[int] | None = None, approval_overrides: dict[int, bool] | None = None) -> list[dict[str, object]]:
     servers = await list_servers(session, user_id)
     snapshot: list[dict[str, object]] = []
     used: set[str] = set()
@@ -188,6 +188,8 @@ async def runtime_snapshot(session: AsyncSession, user_id: int) -> list[dict[str
         if not server.enabled or server.tested_config_version != server.config_version or server.last_successful_sync_at is None:
             continue
         for tool in server.tools:
+            if tool_ids is not None and tool.id not in tool_ids:
+                continue
             if not tool.enabled or not tool.remote_available:
                 continue
             try:
@@ -198,7 +200,7 @@ async def runtime_snapshot(session: AsyncSession, user_id: int) -> list[dict[str
             if name in used:
                 name = model_tool_name(server.server_name, tool.remote_tool_name, used)
             used.add(name)
-            snapshot.append({"model_tool_name": name, "server_id": server.id, "server_name": server.server_name, "url": server.url, "transport": server.transport, "headers": decrypt_headers(server.headers_encrypted_json), "remote_tool_name": tool.remote_tool_name, "requires_approval": tool.requires_approval, "definition": {"type": "function", "function": {"name": name, "description": tool.description or tool.remote_tool_name, "parameters": schema}}})
+            snapshot.append({"model_tool_name": name, "server_id": server.id, "server_name": server.server_name, "url": server.url, "transport": server.transport, "headers": decrypt_headers(server.headers_encrypted_json), "remote_tool_name": tool.remote_tool_name, "requires_approval": (approval_overrides or {}).get(tool.id, tool.requires_approval), "definition": {"type": "function", "function": {"name": name, "description": tool.description or tool.remote_tool_name, "parameters": schema}}})
     return snapshot
 
 

@@ -1051,7 +1051,9 @@ async def _prepare_generation(
         include_memory_context=_adapter_id_for_generation(provider=provider, instance=provider_instance) not in MEMORY_TOOL_ADAPTERS,
         include_memory_tool_guidance=_adapter_id_for_generation(provider=provider, instance=provider_instance) in MEMORY_TOOL_ADAPTERS,
     )
-    mcp_tools = await runtime_snapshot(session, user_id)
+    tool_ids = {item.mcp_tool_id for item in getattr(conversation, "mcp_tools", [])}
+    approval_overrides = {item.mcp_tool_id: item.requires_approval for item in getattr(conversation, "mcp_tools", [])}
+    mcp_tools = await runtime_snapshot(session, user_id, tool_ids=tool_ids, approval_overrides=approval_overrides)
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
@@ -1160,7 +1162,9 @@ async def _prepare_regeneration(
         include_memory_context=_adapter_id_for_generation(provider=provider, instance=provider_instance) not in MEMORY_TOOL_ADAPTERS,
         include_memory_tool_guidance=_adapter_id_for_generation(provider=provider, instance=provider_instance) in MEMORY_TOOL_ADAPTERS,
     )
-    mcp_tools = await runtime_snapshot(session, user_id)
+    tool_ids = {item.mcp_tool_id for item in getattr(conversation, "mcp_tools", [])}
+    approval_overrides = {item.mcp_tool_id: item.requires_approval for item in getattr(conversation, "mcp_tools", [])}
+    mcp_tools = await runtime_snapshot(session, user_id, tool_ids=tool_ids, approval_overrides=approval_overrides)
     return {
         "activate_branch": payload.activate_branch,
         "assistant_message": assistant_message,
@@ -2020,6 +2024,9 @@ async def _build_prompt_transcript(
     include_memory_tool_guidance: bool = False,
 ) -> list[CanonicalTranscriptItem]:
     transcript: list[CanonicalTranscriptItem] = []
+    project = getattr(conversation, "project", None)
+    if project is not None and project.system_prompt:
+        transcript.append(system_text_item(project.system_prompt))
     if conversation.system_prompt:
         transcript.append(system_text_item(conversation.system_prompt))
     if include_memory_tool_guidance:

@@ -14,6 +14,7 @@ class Conversation(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="新对话", server_default="新对话")
     system_prompt: Mapped[str | None] = mapped_column(Text)
     provider: Mapped[str | None] = mapped_column(String(100))
@@ -35,6 +36,8 @@ class Conversation(Base):
     )
 
     messages = relationship("Message", back_populates="conversation", cascade="all, delete-orphan")
+    project = relationship("Project", back_populates="conversations", lazy="selectin")
+    mcp_tools = relationship("ConversationMcpTool", back_populates="conversation", cascade="all, delete-orphan", lazy="selectin")
 
     @property
     def provider_id(self) -> int | None:
