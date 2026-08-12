@@ -59,6 +59,7 @@ export default function SettingsPage({
   onUpdateProvider,
   onLoadProviderModels,
   onSyncProviderModels,
+  onCreateProviderModel,
   onUpdateProviderModel,
   defaultProvider,
   defaultModel,
@@ -215,6 +216,7 @@ export default function SettingsPage({
                 onUpdateProvider={onUpdateProvider}
                 onLoadProviderModels={onLoadProviderModels}
                 onSyncProviderModels={onSyncProviderModels}
+                onCreateProviderModel={onCreateProviderModel}
                 onUpdateProviderModel={onUpdateProviderModel}
               />
             </section>

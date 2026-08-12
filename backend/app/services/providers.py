@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.encryption import decrypt_text, encrypt_text
 from app.core.exceptions import AppError
 from app.models.provider import ProviderInstance, ProviderModel
-from app.providers.anthropic import list_anthropic_models, normalize_anthropic_base_url, test_anthropic_key
+from app.providers.anthropic import list_anthropic_models, test_anthropic_key
 from app.providers.openai import list_openai_models, normalize_base_url, test_openai_key
 from app.providers.registry import get_adapter, list_adapters
 from app.schemas.provider import ProviderCreateRequest, ProviderModelCreateRequest, ProviderModelUpdateRequest, ProviderUpdateRequest
@@ -29,6 +30,14 @@ PRESETS = {
     "custom": ("自定义服务商", "openai_chat_completions"),
 }
 
+CUSTOM_ADAPTER_IDS = frozenset(
+    {
+        "openai_chat_completions",
+        "openai_responses",
+        "anthropic_messages",
+    }
+)
+
 
 def _credentials(instance: ProviderInstance) -> str | None:
     if not instance.credentials_encrypted_json:
@@ -45,6 +54,33 @@ def _validate_adapter(adapter_id: str) -> None:
         get_adapter(adapter_id)
     except ValueError as exc:
         raise AppError(status_code=422, code="VALIDATION_ERROR", message=str(exc)) from exc
+
+
+def _normalize_provider_base_url(base_url: str | None, *, required: bool = False) -> str | None:
+    normalized = normalize_base_url(base_url)
+    if normalized is None:
+        if required:
+            raise AppError(status_code=422, code="VALIDATION_ERROR", message="自定义服务商必须填写 API Base URL")
+        return None
+
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.query or parsed.fragment:
+        raise AppError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="API Base URL 必须是有效的 http(s) 地址，且不能包含查询参数或片段",
+        )
+    return normalized
+
+
+def _validate_provider_configuration(*, preset_id: str, adapter_id: str, base_url: str | None) -> str | None:
+    if preset_id == "custom" and adapter_id not in CUSTOM_ADAPTER_IDS:
+        raise AppError(
+            status_code=422,
+            code="VALIDATION_ERROR",
+            message="自定义服务商仅支持 OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages",
+        )
+    return _normalize_provider_base_url(base_url, required=preset_id == "custom")
 
 
 async def list_provider_presets() -> list[dict[str, object]]:
@@ -87,19 +123,25 @@ async def get_preferred_provider_instance(
 
 
 async def create_provider(session: AsyncSession, user_id: int, payload: ProviderCreateRequest) -> ProviderInstance:
-    preset = PRESETS.get(payload.preset_id.strip().lower())
+    preset_id = payload.preset_id.strip().lower()
+    preset = PRESETS.get(preset_id)
     if preset is None:
         raise AppError(status_code=422, code="VALIDATION_ERROR", message="不支持的服务商预设")
     adapter_id = payload.default_adapter_id or preset[1]
     _validate_adapter(adapter_id)
+    base_url = _validate_provider_configuration(
+        preset_id=preset_id,
+        adapter_id=adapter_id,
+        base_url=payload.base_url,
+    )
     key = (payload.api_key or "").strip()
     instance = ProviderInstance(
         user_id=user_id,
-        preset_id=payload.preset_id.strip().lower(),
+        preset_id=preset_id,
         display_name=payload.display_name.strip(),
         default_adapter_id=adapter_id,
         default_model_id=payload.default_model_id,
-        base_url=normalize_anthropic_base_url(payload.base_url) if adapter_id == "anthropic_messages" else normalize_base_url(payload.base_url),
+        base_url=base_url,
         credentials_encrypted_json=encrypt_text(json.dumps({"api_key": key})) if key else None,
         credential_hint=key[-4:] if key else None,
         settings_json=json.dumps(payload.settings or {}),
@@ -114,9 +156,16 @@ async def create_provider(session: AsyncSession, user_id: int, payload: Provider
 async def update_provider(session: AsyncSession, user_id: int, provider_id: int, payload: ProviderUpdateRequest) -> ProviderInstance:
     instance = await get_provider(session, user_id, provider_id)
     data = payload.model_dump(exclude_unset=True)
-    if "default_adapter_id" in data and data["default_adapter_id"]:
-        _validate_adapter(data["default_adapter_id"])
-        instance.default_adapter_id = data.pop("default_adapter_id")
+    adapter_id = str(data.get("default_adapter_id") or instance.default_adapter_id)
+    _validate_adapter(adapter_id)
+    base_url = _validate_provider_configuration(
+        preset_id=instance.preset_id,
+        adapter_id=adapter_id,
+        base_url=data.get("base_url", instance.base_url),
+    )
+    if "default_adapter_id" in data:
+        instance.default_adapter_id = adapter_id
+        data.pop("default_adapter_id")
     if "api_key" in data:
         key = (data.pop("api_key") or "").strip()
         if key:
@@ -125,7 +174,8 @@ async def update_provider(session: AsyncSession, user_id: int, provider_id: int,
     if "settings" in data:
         instance.settings_json = json.dumps(data.pop("settings") or {})
     if "base_url" in data:
-        instance.base_url = normalize_base_url(data.pop("base_url"))
+        instance.base_url = base_url
+        data.pop("base_url")
     for key, value in data.items():
         setattr(instance, key, value)
     if payload.is_default:

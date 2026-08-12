@@ -89,7 +89,7 @@ def get_settings() -> Settings:
         app_name=os.getenv("APP_NAME", "ai-chat"),
         app_env=os.getenv("APP_ENV", "development"),
         app_host=os.getenv("APP_HOST", "127.0.0.1"),
-        app_port=int(os.getenv("APP_PORT", "8000")),
+        app_port=int(os.getenv("APP_PORT", "10000")),
         db_host=_required("DB_HOST", "127.0.0.1"),
         db_port=int(os.getenv("DB_PORT", "3306")),
         db_name=_required("DB_NAME", "ai_chat"),

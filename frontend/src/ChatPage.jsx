@@ -1545,6 +1545,12 @@ export default function ChatPage() {
     return result
   }, [loadProviderModels, pendingProvider])
 
+  const createProviderModel = useCallback(async (id, data) => {
+    const result = await api.createProviderModel(id, data)
+    if (pendingProvider === String(id)) await loadProviderModels(id)
+    return result
+  }, [loadProviderModels, pendingProvider])
+
   const updateProviderModel = useCallback(async (id, modelId, data) => {
     const result = await api.updateProviderModel(id, modelId, data)
     if (pendingProvider === String(id)) await loadProviderModels(id)
@@ -3212,6 +3218,7 @@ export default function ChatPage() {
       onUpdateProvider={updateProvider}
       onLoadProviderModels={id => api.getProviderInstanceModels(id)}
       onSyncProviderModels={syncProviderModels}
+      onCreateProviderModel={createProviderModel}
       onUpdateProviderModel={updateProviderModel}
       defaultProvider={defaultProvider}
       defaultModel={defaultModel}

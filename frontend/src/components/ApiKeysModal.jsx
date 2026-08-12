@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronUp, FlaskConical, Key, Loader2, RefreshCw, Server, Trash2, X } from 'lucide-react'
+import { ChevronDown, ChevronUp, FlaskConical, Key, Loader2, Pencil, Plus, RefreshCw, Server, Trash2, X } from 'lucide-react'
 
 const PROVIDERS = {
   openai: { label: 'OpenAI', displayName: 'OpenAI', defaultBaseUrl: 'https://api.openai.com/v1', adapter: 'openai_responses' },
@@ -72,6 +72,7 @@ export default function ApiKeysModal({
   onUpdateProvider,
   onLoadProviderModels,
   onSyncProviderModels,
+  onCreateProviderModel,
   onUpdateProviderModel,
   embedded = false,
 }) {
@@ -83,6 +84,10 @@ export default function ApiKeysModal({
   const [updatingId, setUpdatingId] = useState(null)
   const [expandedId, setExpandedId] = useState(null)
   const [modelsByProvider, setModelsByProvider] = useState({})
+  const [editingProviderId, setEditingProviderId] = useState(null)
+  const [providerDraft, setProviderDraft] = useState(null)
+  const [manualModelByProvider, setManualModelByProvider] = useState({})
+  const [manualModelOpenByProvider, setManualModelOpenByProvider] = useState({})
   const [error, setError] = useState('')
 
   if (!open) return null
@@ -195,6 +200,8 @@ export default function ApiKeysModal({
     try {
       const models = await onSyncProviderModels(item.id)
       setModelsByProvider(previous => ({ ...previous, [item.id]: Array.isArray(models) ? models : [] }))
+      setManualModelOpenByProvider(previous => ({ ...previous, [item.id]: false }))
+      setManualModelByProvider(previous => ({ ...previous, [item.id]: '' }))
       setExpandedId(item.id)
     } catch (err) {
       setError(err.message || '获取模型列表失败')
@@ -220,6 +227,65 @@ export default function ApiKeysModal({
     }
   }
 
+  function startProviderEdit(item) {
+    setError('')
+    setEditingProviderId(item.id)
+    setExpandedId(item.id)
+    setProviderDraft({
+      display_name: item.display_name,
+      base_url: item.base_url || '',
+      api_key: '',
+      default_adapter_id: item.default_adapter_id,
+    })
+  }
+
+  async function saveProviderEdit(item, event) {
+    event.preventDefault()
+    if (!providerDraft?.display_name?.trim()) return
+    setError('')
+    setUpdatingId(`provider-${item.id}`)
+    try {
+      const payload = {
+        display_name: providerDraft.display_name.trim(),
+        base_url: providerDraft.base_url.trim(),
+        ...(item.preset_id === 'custom' ? { default_adapter_id: providerDraft.default_adapter_id } : {}),
+        ...(providerDraft.api_key.trim() ? { api_key: providerDraft.api_key.trim() } : {}),
+      }
+      await onUpdateProvider(item.id, payload)
+      setEditingProviderId(null)
+      setProviderDraft(null)
+      setManualModelOpenByProvider(previous => ({ ...previous, [item.id]: false }))
+      setManualModelByProvider(previous => ({ ...previous, [item.id]: '' }))
+      await onRefresh()
+    } catch (err) {
+      setError(err.message || '更新服务商失败')
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
+  async function addManualModel(item, event) {
+    event.preventDefault()
+    const modelId = (manualModelByProvider[item.id] || '').trim()
+    if (!modelId) return
+    setError('')
+    setUpdatingId(`model-create-${item.id}`)
+    try {
+      const model = await onCreateProviderModel(item.id, { model_id: modelId })
+      setModelsByProvider(previous => ({
+        ...previous,
+        [item.id]: [...(previous[item.id] || []), model].sort((left, right) => left.model_id.localeCompare(right.model_id)),
+      }))
+      setManualModelByProvider(previous => ({ ...previous, [item.id]: '' }))
+      setManualModelOpenByProvider(previous => ({ ...previous, [item.id]: false }))
+      setExpandedId(item.id)
+    } catch (err) {
+      setError(err.message || '添加模型失败')
+    } finally {
+      setUpdatingId(null)
+    }
+  }
+
   function CompactProviderCard({ item }) {
     return (
       <div className="flex items-center gap-3 rounded-2xl px-3 py-3" style={{ background: 'var(--bg-base)', border: '1px solid var(--border)' }}>
@@ -240,6 +306,7 @@ export default function ApiKeysModal({
     const enabledModels = models.filter(model => model.enabled)
     const disabledModels = models.filter(model => !model.enabled)
     const expanded = expandedId === item.id
+    const isEditing = editingProviderId === item.id
 
     function ModelRow({ model }) {
       const key = `${item.id}:${model.model_id}`
@@ -274,13 +341,33 @@ export default function ApiKeysModal({
               <span className="ml-1.5 hidden sm:inline">获取模型列表</span>
             </button>
             <button type="button" onClick={() => handleTest(item.id)} disabled={testingId === item.id} className="rounded-lg p-1.5 disabled:opacity-50" style={{ color: 'var(--text-secondary)' }} title="测试连接">{testingId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}</button>
+            <button type="button" onClick={() => startProviderEdit(item)} disabled={updatingId === `provider-${item.id}`} className="rounded-lg p-1.5 disabled:opacity-50" style={{ color: 'var(--text-secondary)' }} title="编辑服务商"><Pencil className="h-4 w-4" /></button>
             <button type="button" onClick={() => handleDelete(item.id)} disabled={deletingId === item.id} className="rounded-lg p-1.5 disabled:opacity-50" style={{ color: 'var(--error-text)' }} title="删除服务商">{deletingId === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}</button>
             <button type="button" onClick={() => toggleExpand(item)} className="rounded-lg p-1.5" style={{ color: 'var(--text-muted)' }} aria-label={expanded ? '收起模型列表' : '展开模型列表'}>{expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}</button>
           </div>
         </div>
         {expanded && (
           <div>
+            {isEditing && providerDraft && (
+              <form onSubmit={event => saveProviderEdit(item, event)} className="space-y-2 px-4 py-3" style={{ background: 'var(--bg-base)', borderTop: '1px solid var(--border)' }}>
+                <input value={providerDraft.display_name} onChange={event => setProviderDraft(previous => ({ ...previous, display_name: event.target.value }))} placeholder="显示名称" required className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                <input value={providerDraft.base_url} onChange={event => setProviderDraft(previous => ({ ...previous, base_url: event.target.value }))} placeholder="API Base URL" required={item.preset_id === 'custom'} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                <input type="password" value={providerDraft.api_key} onChange={event => setProviderDraft(previous => ({ ...previous, api_key: event.target.value }))} placeholder="新 API Key（留空不修改）" className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                {item.preset_id === 'custom' && <select value={providerDraft.default_adapter_id} onChange={event => setProviderDraft(previous => ({ ...previous, default_adapter_id: event.target.value }))} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>{ADAPTERS.map(adapter => <option key={adapter.value} value={adapter.value}>{adapter.label}</option>)}</select>}
+                <div className="flex justify-end gap-2"><button type="button" onClick={() => { setEditingProviderId(null); setProviderDraft(null) }} className="rounded-lg px-3 py-2 text-xs" style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }}>取消</button><button type="submit" disabled={updatingId === `provider-${item.id}`} className="rounded-lg px-3 py-2 text-xs disabled:opacity-50" style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}>保存</button></div>
+              </form>
+            )}
             <div className="flex items-center justify-between px-4 py-2 text-xs" style={{ background: 'var(--bg-base)', color: 'var(--text-muted)', borderTop: '1px solid var(--border)' }}><span>已缓存模型 · 启用的模型优先显示</span><span>{models.length} 个</span></div>
+            {manualModelOpenByProvider[item.id] ? (
+              <form onSubmit={event => addManualModel(item, event)} className="flex gap-2 px-4 py-3" style={{ background: 'var(--bg-base)', borderTop: '1px solid var(--border)' }}>
+                <input autoFocus value={manualModelByProvider[item.id] || ''} onChange={event => setManualModelByProvider(previous => ({ ...previous, [item.id]: event.target.value }))} placeholder="手动添加模型 ID" className="min-w-0 flex-1 rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                <button type="submit" disabled={updatingId === `model-create-${item.id}`} className="rounded-lg px-2.5 py-2 text-xs disabled:opacity-50" style={{ background: 'var(--bg-elevated)', color: 'var(--text-secondary)' }} title="添加模型" aria-label="添加模型">{updatingId === `model-create-${item.id}` ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}</button>
+              </form>
+            ) : (
+              <div className="px-4 py-2" style={{ background: 'var(--bg-base)', borderTop: '1px solid var(--border)' }}>
+                <button type="button" onClick={() => setManualModelOpenByProvider(previous => ({ ...previous, [item.id]: true }))} className="text-xs" style={{ color: 'var(--text-secondary)' }}>手动添加模型</button>
+              </div>
+            )}
             {models.length === 0 ? <p className="px-4 py-6 text-center text-sm" style={{ color: 'var(--text-muted)' }}>还没有缓存模型。点击“获取模型列表”后会保存在本地。</p> : <>
               {enabledModels.map(model => <ModelRow key={model.model_id} model={model} />)}
               {disabledModels.length > 0 && <p className="px-4 py-2 text-xs" style={{ color: 'var(--text-muted)', background: 'var(--bg-base)', borderTop: '1px solid var(--border)' }}>未启用的模型</p>}
@@ -315,7 +402,7 @@ export default function ApiKeysModal({
               {selectedProvider && <form onSubmit={handleSubmit} className="space-y-2 rounded-2xl p-3" style={{ background: 'var(--bg-base)', border: '1px solid var(--border)' }}>
                 <p className="text-sm font-medium">{form.preset_id === 'custom' ? '自定义服务商' : `添加 ${selectedProvider.label}`}</p>
                 <input value={form.display_name} onChange={event => updateForm({ display_name: event.target.value })} placeholder="显示名称" required className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
-                <input value={form.base_url} onChange={event => updateForm({ base_url: event.target.value })} placeholder={selectedProvider.defaultBaseUrl || 'Base URL'} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
+                <input value={form.base_url} onChange={event => updateForm({ base_url: event.target.value })} placeholder={selectedProvider.defaultBaseUrl || 'API Base URL'} required={form.preset_id === 'custom'} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
                 <input type="password" value={form.api_key} onChange={event => updateForm({ api_key: event.target.value })} placeholder="API Key" className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }} />
                 {form.preset_id === 'custom' && <><label className="block pt-1 text-xs" style={{ color: 'var(--text-secondary)' }}>接口格式</label><select value={form.default_adapter_id} onChange={event => updateForm({ default_adapter_id: event.target.value })} className="w-full rounded-lg px-2.5 py-2 text-xs outline-none" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}>{ADAPTERS.map(adapter => <option key={adapter.value} value={adapter.value}>{adapter.label}</option>)}</select></>}
                 <button type="submit" disabled={saving} className="flex w-full items-center justify-center gap-2 rounded-lg py-2 text-xs font-medium disabled:opacity-60" style={{ background: 'var(--accent)', color: 'var(--text-primary)' }}>{saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}{saving ? '保存中…' : '添加服务商'}</button>

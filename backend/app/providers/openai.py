@@ -744,17 +744,16 @@ async def list_openai_models(*, api_key: ApiKey) -> list[dict[str, object]]:
         model_id = item.get("id")
         if not model_id:
             continue
-        models.append(
-            {
-                "id": str(model_id),
-                "display_name": str(item.get("display_name") or item.get("name")) if item.get("display_name") or item.get("name") else None,
-                "owned_by": str(item.get("owned_by")) if item.get("owned_by") is not None else None,
-                # OpenRouter-compatible catalogues commonly include per-token
-                # pricing here. Preserve it so the cached settings view can
-                # render price and cache-hit price without another network call.
-                "pricing": item.get("pricing") if isinstance(item.get("pricing"), dict) else None,
-            }
-        )
+        model: dict[str, object] = {
+            "id": str(model_id),
+            "display_name": str(item.get("display_name") or item.get("name")) if item.get("display_name") or item.get("name") else None,
+            "owned_by": str(item.get("owned_by")) if item.get("owned_by") is not None else None,
+        }
+        # OpenRouter-compatible catalogues commonly include per-token pricing.
+        # Preserve it without changing the legacy shape when pricing is absent.
+        if isinstance(item.get("pricing"), dict):
+            model["pricing"] = item["pricing"]
+        models.append(model)
 
     models.sort(key=lambda item: item["id"])
     return models

@@ -5,7 +5,7 @@
 ## 功能概览
 
 - `admin` 单账户登录、会话的新建与删除，以及消息持久化。
-- OpenAI 和 Anthropic 原生服务商配置、连通性测试、模型切换与默认模型保存。
+- OpenAI、Anthropic 以及自定义服务商配置、连通性测试、模型切换与默认模型保存。自定义服务商支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 协议，可填写 API Base URL 并手动录入模型 ID。
 - 流式回复；消息可复制、编辑，或从编辑处创建新的对话分支。
 - 回答可重新生成并在 sibling 版本间切换；可从 AI 消息创建、打开、重命名、归档或删除分支。
 - 分支树形展示和可视化消息树；分支面板支持即时发送、流式状态与宽度拖动。
@@ -46,7 +46,7 @@
 ```env
 APP_ENV=development
 APP_HOST=127.0.0.1
-APP_PORT=8000
+APP_PORT=10000
 
 DB_HOST=127.0.0.1
 DB_PORT=3306
@@ -109,7 +109,7 @@ D:\websites\ai-chat\.venv\Scripts\alembic.exe upgrade head
 
 ```powershell
 cd D:\websites\ai-chat\backend
-D:\websites\ai-chat\.venv\Scripts\uvicorn.exe app.main:app --reload --host 127.0.0.1 --port 8000
+D:\websites\ai-chat\.venv\Scripts\uvicorn.exe app.main:app --reload --host 127.0.0.1 --port 10000
 ```
 
 ### 2. 安装并启动前端
@@ -132,6 +132,8 @@ npm run dev
 | Anthropic 原生 API | `anthropic` | 官方 Anthropic 可留空；自定义网关填写 Anthropic API 根地址 |
 
 保存成功后，可在“默认模型”中指定新建对话默认使用的服务商和模型。
+
+自定义服务商请选择“自定义服务商”，填写完整的 `http(s)` API Base URL（通常以 `/v1` 结尾）、API Key 和协议。展开服务商卡片后可刷新远端模型，也可以直接输入模型 ID；手动模型适用于不提供 `/models` 列表接口的兼容网关。
 
 ## 构建与验证
 
