@@ -149,8 +149,88 @@ class OpenAIResponsesTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(usage, [{"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}])
         payload = client.requests[0]["json"]
-        self.assertEqual(payload["reasoning"], {"summary": "auto"})
+        self.assertEqual(payload["reasoning"], {"effort": "medium", "summary": "auto"})
         self.assertNotIn("temperature", payload)
+
+    async def test_streaming_response_uses_completed_reasoning_summary_when_no_delta_arrives(self) -> None:
+        api_key = ApiKey(provider="openai", key_encrypted="encrypted")
+        client = _FakeClient(
+            streams=[
+                _FakeStreamResponse(
+                    [
+                        'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}',
+                        'data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","summary_index":0,"text":"completed rationale"}',
+                        'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}',
+                        'data: {"type":"response.output_text.delta","delta":"Hello"}',
+                    ]
+                )
+            ]
+        )
+
+        with (
+            patch("app.providers.openai_responses.decrypt_text", return_value="secret"),
+            patch("app.providers.openai_responses.httpx.AsyncClient", return_value=client),
+        ):
+            chunks = [
+                chunk
+                async for chunk in stream_openai_responses_reply(
+                    api_key=api_key,
+                    model="gpt-5-mini",
+                    transcript=[user_text_item("hello")],
+                    temperature=0.7,
+                    max_tokens=500,
+                )
+            ]
+
+        self.assertEqual(
+            chunks,
+            [
+                {"type": "thinking_started", "thinking_id": "thinking-0-rs_1", "text": ""},
+                {"type": "thinking_delta", "thinking_id": "thinking-0-rs_1", "text": "completed rationale"},
+                {"type": "thinking_completed", "thinking_id": "thinking-0-rs_1"},
+                {"type": "content", "content": "Hello"},
+            ],
+        )
+
+    async def test_streaming_response_uses_reasoning_summary_part_when_no_delta_arrives(self) -> None:
+        api_key = ApiKey(provider="openai", key_encrypted="encrypted")
+        client = _FakeClient(
+            streams=[
+                _FakeStreamResponse(
+                    [
+                        'data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}',
+                        'data: {"type":"response.reasoning_summary_part.done","item_id":"rs_1","summary_index":0,"part":{"type":"summary_text","text":"part rationale"}}',
+                        'data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_1","type":"reasoning"}}',
+                        'data: {"type":"response.output_text.delta","delta":"Hello"}',
+                    ]
+                )
+            ]
+        )
+
+        with (
+            patch("app.providers.openai_responses.decrypt_text", return_value="secret"),
+            patch("app.providers.openai_responses.httpx.AsyncClient", return_value=client),
+        ):
+            chunks = [
+                chunk
+                async for chunk in stream_openai_responses_reply(
+                    api_key=api_key,
+                    model="gpt-5-mini",
+                    transcript=[user_text_item("hello")],
+                    temperature=0.7,
+                    max_tokens=500,
+                )
+            ]
+
+        self.assertEqual(
+            chunks,
+            [
+                {"type": "thinking_started", "thinking_id": "thinking-0-rs_1", "text": ""},
+                {"type": "thinking_delta", "thinking_id": "thinking-0-rs_1", "text": "part rationale"},
+                {"type": "thinking_completed", "thinking_id": "thinking-0-rs_1"},
+                {"type": "content", "content": "Hello"},
+            ],
+        )
 
 
 if __name__ == "__main__":

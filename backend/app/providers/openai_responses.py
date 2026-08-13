@@ -156,7 +156,9 @@ def _responses_payload(
         payload["tools"] = response_tools
         payload["tool_choice"] = "auto"
     if _supports_reasoning_summary(model):
-        payload["reasoning"] = {"summary": "auto"}
+        # Recent GPT-5 reasoning models may default to no reasoning. Request a
+        # moderate effort explicitly so a reasoning summary can be returned.
+        payload["reasoning"] = {"effort": "medium", "summary": "auto"}
     return payload
 
 
@@ -287,12 +289,42 @@ async def _stream_response_round(
     output_by_id: dict[str, dict[str, Any]] = {}
     thinking_ids: dict[str, str] = {}
     active_thinking: set[str] = set()
+    summary_text_keys: set[str] = set()
     usage: dict[str, int] | None = None
     content = ""
 
     def thinking_id(data: dict[str, Any], item: dict[str, Any] | None = None) -> str:
         ref = str(data.get("item_id") or (item or {}).get("id") or data.get("output_index") or len(thinking_ids))
         return thinking_ids.setdefault(ref, f"thinking-{round_index}-{ref}")
+
+    def summary_key(data: dict[str, Any]) -> str:
+        return f"{data.get('item_id') or data.get('output_index') or ''}:{data.get('summary_index') or 0}"
+
+    def summary_events(data: dict[str, Any], text: object) -> list[dict[str, object]]:
+        if not isinstance(text, str) or not text:
+            return []
+        key = summary_key(data)
+        if key in summary_text_keys:
+            return []
+        summary_text_keys.add(key)
+        identifier = thinking_id(data)
+        events: list[dict[str, object]] = []
+        if identifier not in active_thinking:
+            active_thinking.add(identifier)
+            events.append({"type": "thinking_started", "thinking_id": identifier, "text": ""})
+        events.append({"type": "thinking_delta", "thinking_id": identifier, "text": text})
+        return events
+
+    def item_summary_events(item: dict[str, Any]) -> list[dict[str, object]]:
+        item_id = item.get("id")
+        summaries = item.get("summary")
+        if not isinstance(item_id, str) or not isinstance(summaries, list):
+            return []
+        events: list[dict[str, object]] = []
+        for index, part in enumerate(summaries):
+            if isinstance(part, dict):
+                events.extend(summary_events({"item_id": item_id, "summary_index": index}, part.get("text")))
+        return events
 
     try:
         async with client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
@@ -326,13 +358,25 @@ async def _stream_response_round(
                     delta = data.get("delta")
                     if isinstance(delta, str) and delta:
                         identifier = thinking_id(data)
+                        summary_text_keys.add(summary_key(data))
                         if identifier not in active_thinking:
                             active_thinking.add(identifier)
                             yield {"type": "thinking_started", "thinking_id": identifier, "text": ""}
                         yield {"type": "thinking_delta", "thinking_id": identifier, "text": delta}
+                elif event_type == "response.reasoning_summary_text.done":
+                    for event in summary_events(data, data.get("text")):
+                        yield event
+                elif event_type == "response.reasoning_summary_part.done":
+                    part = data.get("part")
+                    text = part.get("text") if isinstance(part, dict) else None
+                    for event in summary_events(data, text):
+                        yield event
                 elif event_type == "response.output_item.done":
                     item = data.get("item")
                     if isinstance(item, dict):
+                        if item.get("type") == "reasoning":
+                            for event in item_summary_events(item):
+                                yield event
                         item_id = item.get("id")
                         if isinstance(item_id, str) and item_id:
                             output_by_id[item_id] = item
@@ -348,6 +392,10 @@ async def _stream_response_round(
                     if isinstance(completed, dict):
                         usage = _extract_usage(completed)
                         completed_output = _response_output(completed)
+                        for item in completed_output:
+                            if item.get("type") == "reasoning":
+                                for event in item_summary_events(item):
+                                    yield event
                         if completed_output:
                             output_items = completed_output
                 elif event_type in {"response.failed", "response.incomplete", "error"}:
