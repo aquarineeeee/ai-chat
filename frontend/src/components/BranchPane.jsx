@@ -15,6 +15,7 @@ export default function BranchPane({
   onEditDraftChange,
   onEditModeChange,
   onSend,
+  onCancelGeneration,
   onRegenerate,
   onDelete,
   onCreateBranch,
@@ -215,7 +216,9 @@ export default function BranchPane({
 
       <ChatInput
         onSend={onSend}
-        disabled={pane.busy}
+        onCancel={pane.streamingAssistantId ? onCancelGeneration : undefined}
+        isCancelling={pane.streamingAssistantId ? isRunCancelling?.(pane.streamingAssistantId) : false}
+        disabled={pane.busy || Boolean(pane.streamingAssistantId)}
         providerValue={providerValue}
         providerOptions={providerOptions}
         modelValue={modelValue}

@@ -3,6 +3,8 @@ import { Loader2, Send, Square } from 'lucide-react'
 
 export default function ChatInput({
   onSend,
+  onCancel,
+  isCancelling = false,
   disabled,
   providerValue = 'openai',
   providerOptions = [],
@@ -45,6 +47,9 @@ export default function ChatInput({
     onSend(trimmed, temperatureDraft)
     setValue('')
   }
+
+  const canCancel = disabled && typeof onCancel === 'function'
+  const actionDisabled = canCancel ? isCancelling : (!value.trim() || disabled)
 
   return (
     <div
@@ -163,16 +168,19 @@ export default function ChatInput({
             style={{ color: 'var(--text-primary)', caretColor: 'var(--accent)' }}
           />
           <button
-            onClick={submit}
-            disabled={!value.trim() || disabled}
+            onClick={canCancel ? onCancel : submit}
+            disabled={actionDisabled}
             className="shrink-0 w-8 h-8 rounded-xl flex items-center justify-center transition disabled:opacity-40 disabled:cursor-not-allowed"
             style={{ background: 'var(--accent)' }}
             onMouseEnter={e => { if (!e.currentTarget.disabled) e.currentTarget.style.background = 'var(--accent-hover)' }}
             onMouseLeave={e => { e.currentTarget.style.background = 'var(--accent)' }}
-            aria-label="发送消息"
+            aria-label={canCancel ? '暂停生成' : '发送消息'}
+            title={canCancel ? '暂停生成' : '发送消息'}
           >
-            {disabled
-              ? <Square className="w-3.5 h-3.5 fill-current" style={{ color: 'var(--text-primary)' }} />
+            {canCancel
+              ? (isCancelling
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: 'var(--text-primary)' }} />
+                : <Square className="w-3.5 h-3.5 fill-current" style={{ color: 'var(--text-primary)' }} />)
               : <Send className="w-3.5 h-3.5" style={{ color: 'var(--text-primary)' }} />
             }
           </button>

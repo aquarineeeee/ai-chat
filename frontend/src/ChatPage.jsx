@@ -1761,6 +1761,11 @@ export default function ChatPage() {
     }
   }, [activeId, loadBranches, refreshMessages, resolveActiveRunForAssistant])
 
+  const cancelMainGeneration = useCallback(() => {
+    if (!mainStreamingAssistantId) return
+    return cancelRunForMessage({ id: mainStreamingAssistantId })
+  }, [cancelRunForMessage, mainStreamingAssistantId])
+
   const submitToolApproval = useCallback(async ({
     conversationId,
     assistantMessageId,
@@ -3088,7 +3093,9 @@ export default function ChatPage() {
 
               <ChatInput
                 onSend={sendMessage}
-                disabled={mainBusy}
+                onCancel={mainStreamingAssistantId ? cancelMainGeneration : undefined}
+                isCancelling={mainStreamingAssistantId ? Boolean(cancellingRuns[mainStreamingAssistantId]) : false}
+                disabled={mainBusy || mainStreamingAssistantId !== null}
                 providerValue={pendingProvider}
                 providerOptions={providerOptions}
                 modelValue={pendingModel}
@@ -3155,6 +3162,7 @@ export default function ChatPage() {
                         onEditDraftChange={content => patchBranchPane(pane.id, { editingContent: content })}
                         onEditModeChange={mode => patchBranchPane(pane.id, { editingMode: mode })}
                         onSend={(content, temperature) => sendBranchMessage(pane.id, content, temperature)}
+                        onCancelGeneration={() => cancelRunForMessage({ id: pane.streamingAssistantId })}
                         onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
                         onDelete={messageId => deleteBranchMessage(pane.id, messageId)}
                         onCreateBranch={message => openBranchPane(message, pane.id)}
