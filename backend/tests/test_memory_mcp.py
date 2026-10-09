@@ -332,7 +332,8 @@ class MemoryMcpTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_build_prompt_messages_inserts_memory_context_after_system(self) -> None:
+    @patch("app.services.attachments.load_message_attachments", new_callable=AsyncMock, return_value={})
+    async def test_build_prompt_messages_inserts_memory_context_after_system(self, _attachments) -> None:
         conversation = Conversation(user_id=1, system_prompt="系统提示")
         now = datetime.now(UTC)
         history = [
@@ -376,7 +377,8 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_build_prompt_messages_skips_memory_context_when_disabled(self) -> None:
+    @patch("app.services.attachments.load_message_attachments", new_callable=AsyncMock, return_value={})
+    async def test_build_prompt_messages_skips_memory_context_when_disabled(self, _attachments) -> None:
         conversation = Conversation(user_id=1, system_prompt="系统提示")
         now = datetime.now(UTC)
         history = [
@@ -421,7 +423,8 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_build_prompt_messages_can_limit_context_to_last_n_messages(self) -> None:
+    @patch("app.services.attachments.load_message_attachments", new_callable=AsyncMock, return_value={})
+    async def test_build_prompt_messages_can_limit_context_to_last_n_messages(self, _attachments) -> None:
         conversation = Conversation(user_id=1, system_prompt="system")
         now = datetime.now(UTC)
         history = [
@@ -571,7 +574,8 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["transcript"], [user_text_item("hello")])
         self.assertTrue(callable(kwargs["tool_executor"]))
 
-    async def test_build_prompt_messages_includes_memory_tool_guidance_for_openai(self) -> None:
+    @patch("app.services.attachments.load_message_attachments", new_callable=AsyncMock, return_value={})
+    async def test_build_prompt_messages_includes_memory_tool_guidance_for_openai(self, _attachments) -> None:
         session = AsyncMock()
         conversation = Conversation(user_id=1, system_prompt="系统提示")
         now = datetime.now(UTC)
@@ -652,7 +656,9 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             updated_at=now,
         )
 
-        with patch("app.services.messages._record_run_event", AsyncMock()):
+        with (patch("app.services.messages._record_run_event", AsyncMock()),
+              patch("app.services.messages.lock_owned_conversation", AsyncMock(return_value=conversation)),
+              patch("app.services.messages._lock_run", AsyncMock(return_value=run))):
             await messages._finalize_success(
                 session=session,
                 context={
@@ -696,7 +702,9 @@ class MessageMemoryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         record_run_event = AsyncMock()
 
-        with patch("app.services.messages._record_run_event", record_run_event):
+        with (patch("app.services.messages._record_run_event", record_run_event),
+              patch("app.services.messages.lock_owned_conversation", AsyncMock(return_value=conversation)),
+              patch("app.services.messages._lock_run", AsyncMock(return_value=run))):
             await messages._finalize_success(
                 session=session,
                 context={

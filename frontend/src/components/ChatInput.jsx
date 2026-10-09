@@ -1,5 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Loader2, Send, Square } from 'lucide-react'
+import AttachmentPicker from './AttachmentPicker'
+import useAttachmentDraft from './useAttachmentDraft'
 
 export default function ChatInput({
   onSend,
@@ -22,10 +24,16 @@ export default function ChatInput({
   const [value, setValue] = useState('')
   const [temperatureDraft, setTemperatureDraft] = useState(String(temperatureValue))
   const textareaRef = useRef(null)
+  const draft = useAttachmentDraft()
+  const [submitting, setSubmitting] = useState(false)
+  const [pendingCheck, setPendingCheck] = useState(null)
+  const [sendError, setSendError] = useState('')
 
-  useEffect(() => {
+  const [previousTemperature, setPreviousTemperature] = useState(temperatureValue)
+  if (previousTemperature !== temperatureValue) {
+    setPreviousTemperature(temperatureValue)
     setTemperatureDraft(String(temperatureValue))
-  }, [temperatureValue])
+  }
 
   useEffect(() => {
     const ta = textareaRef.current
@@ -35,30 +43,40 @@ export default function ChatInput({
   }, [value])
 
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       submit()
     }
   }
 
-  function submit() {
+  async function submit() {
     const trimmed = value.trim()
-    if (!trimmed || disabled) return
-    onSend(trimmed, temperatureDraft)
-    setValue('')
+    if ((!trimmed && !draft.items.length) || !draft.ready || disabled || submitting || pendingCheck) return
+    setSubmitting(true)
+    setSendError('')
+    try {
+      const result = await onSend(trimmed, temperatureDraft, draft.attachments, () => { setValue(''); draft.clear() })
+      if (result?.committed) { setValue(''); draft.clear() }
+      else if (result?.pending) setPendingCheck(() => result.check)
+    } catch (e) { setSendError(e.message || '发送失败，草稿已保留') }
+    finally { setSubmitting(false) }
   }
 
   const canCancel = disabled && typeof onCancel === 'function'
-  const actionDisabled = canCancel ? isCancelling : (!value.trim() || disabled)
+  const actionDisabled = canCancel ? isCancelling : ((!value.trim() && !draft.items.length) || !draft.ready || disabled || submitting || Boolean(pendingCheck))
+  const draftDisabled = disabled || submitting || Boolean(pendingCheck)
 
   return (
     <div
       className="shrink-0 px-4 py-4"
+      onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault() }}
+      onDrop={event => { if (event.dataTransfer.files.length) { event.preventDefault(); if (!draftDisabled) draft.addFiles(event.dataTransfer.files) } }}
+      onPaste={event => { const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')); if (files.length && !draftDisabled) { event.preventDefault(); draft.addFiles(files) } }}
       style={{ borderTop: '1px solid var(--border)', background: 'var(--bg-base)' }}
     >
       <div className="max-w-3xl mx-auto space-y-2">
-        <div className="flex items-center justify-between gap-3 px-1">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-1">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
             {providerOptions.length > 0 && (
               <>
                 <span className="text-xs font-medium shrink-0" style={{ color: 'var(--text-muted)' }}>
@@ -68,7 +86,7 @@ export default function ChatInput({
                   value={providerValue || 'openai'}
                   onChange={e => onProviderChange?.(e.target.value)}
                   disabled={disabled || modelSaving}
-                  className="text-xs rounded-lg px-2.5 py-1.5 min-w-[44px]"
+                  className="text-xs rounded-lg px-2.5 py-1.5 min-w-[44px] max-w-[160px]"
                   style={{
                     background: 'var(--bg-surface)',
                     border: '1px solid var(--border)',
@@ -91,7 +109,7 @@ export default function ChatInput({
               value={modelValue || ''}
               onChange={e => onModelChange?.(e.target.value)}
               disabled={disabled || modelSaving || modelLoading || modelOptions.length === 0}
-              className="text-xs rounded-lg px-2.5 py-1.5 min-w-[44px] max-w-sm"
+              className="text-xs rounded-lg px-2.5 py-1.5 min-w-[44px] max-w-[160px] sm:max-w-sm"
               style={{
                 background: 'var(--bg-surface)',
                 border: '1px solid var(--border)',
@@ -150,6 +168,20 @@ export default function ChatInput({
           </div>
         </div>
 
+        <AttachmentPicker draft={draft} disabled={draftDisabled} />
+        {pendingCheck && <div role="status" className="text-xs" style={{ color: 'var(--text-secondary)' }}>
+          发送结果待确认。请刷新结果，已保存的消息可以重新生成回复。
+          <button type="button" className="ml-2 underline" disabled={submitting} onClick={async () => {
+            setSubmitting(true)
+            try {
+              const result = await pendingCheck()
+              if (result.committed) { setValue(''); draft.clear(); setPendingCheck(null) }
+              else if (!result.pending) setPendingCheck(null)
+            } catch (e) { setSendError(e.message || '确认失败，请再试一次') }
+            finally { setSubmitting(false) }
+          }}>确认发送结果</button>
+        </div>}
+        {sendError && <p role="alert" className="text-xs" style={{ color: 'var(--error-text)' }}>{sendError}</p>}
         <div
           className="flex items-end gap-3 rounded-2xl px-4 py-3 transition"
           style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
@@ -161,10 +193,10 @@ export default function ChatInput({
             value={value}
             onChange={e => setValue(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={disabled}
+            disabled={draftDisabled}
             placeholder="发送消息…（Shift+Enter 换行）"
             rows={1}
-            className="flex-1 bg-transparent text-sm resize-none focus:outline-none leading-relaxed min-h-[24px] max-h-[200px] scrollbar-thin"
+            className="flex-1 min-w-0 bg-transparent text-sm resize-none focus:outline-none leading-relaxed min-h-[24px] max-h-[200px] scrollbar-thin"
             style={{ color: 'var(--text-primary)', caretColor: 'var(--accent)' }}
           />
           <button

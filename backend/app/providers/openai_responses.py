@@ -11,6 +11,8 @@ from app.canonical_transcript import CanonicalTranscriptItem
 from app.core.encryption import decrypt_text
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
+from app.core.config import get_settings
+from app.services.vision_budget import AttachmentReader, VisionRequestContext, provider_user_content, vision_request, provider_timeout
 from app.providers.openai import (
     DEFAULT_MAX_TOOL_ROUND_TRIPS,
     ReplyText,
@@ -95,7 +97,7 @@ def _responses_tools(tools: list[dict[str, object]] | None) -> list[dict[str, ob
     return converted or None
 
 
-def _transcript_to_responses_input(transcript: list[CanonicalTranscriptItem]) -> list[dict[str, object]]:
+def _transcript_to_responses_input(transcript: list[CanonicalTranscriptItem], images: dict[int, str] | None = None) -> list[dict[str, object]]:
     input_items: list[dict[str, object]] = []
     assistant_text = ""
 
@@ -111,7 +113,7 @@ def _transcript_to_responses_input(transcript: list[CanonicalTranscriptItem]) ->
             input_items.append({"role": "developer", "content": item.text})
         elif item.kind == "user_text":
             flush_assistant()
-            input_items.append({"role": "user", "content": item.text})
+            input_items.append({"role": "user", "content": provider_user_content(item, "openai_responses", images or {})})
         elif item.kind == "assistant_text":
             assistant_text += item.text
         elif item.kind == "assistant_tool_call":
@@ -216,6 +218,7 @@ async def _execute_tool_calls(
     return outputs
 
 
+@vision_request("openai_responses")
 async def create_openai_responses_reply(
     *,
     api_key: ApiKey,
@@ -226,19 +229,23 @@ async def create_openai_responses_reply(
     tools: list[dict[str, object]] | None = None,
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
+    attachment_reader: AttachmentReader | None = None,
+    vision_context: VisionRequestContext | None = None,
 ) -> ReplyText:
     if tools and tool_executor is None:
         raise AppError(status_code=500, code="CONFIG_ERROR", message="Tool execution requires a tool_executor")
 
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/responses"
-    input_items = _transcript_to_responses_input(transcript)
+    input_items = _transcript_to_responses_input(transcript, vision_context.images if vision_context else None)
     total_usage: dict[str, int] | None = None
     loop_guard = ToolCallLoopGuard()
     max_rounds = max_tool_round_trips if tools else 1
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=True, trust_env=False, http2=False) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(getattr(get_settings(), "vision_request_timeout_seconds", 90.0), connect=15.0), follow_redirects=True, trust_env=False, http2=False) as client:
         for _ in range(max_rounds):
+            if vision_context is not None:
+                vision_context.check_request_data((input_items, tools))
             payload = _responses_payload(
                 model=model,
                 input_items=input_items,
@@ -247,8 +254,11 @@ async def create_openai_responses_reply(
                 stream=False,
                 tools=tools,
             )
+            if vision_context is not None:
+                vision_context.check_payload(payload)
             try:
-                response = await client.post(url, headers=_build_headers(raw_key), json=payload)
+                async with provider_timeout():
+                    response = await client.post(url, headers=_build_headers(raw_key), json=payload)
             except httpx.HTTPError as exc:
                 raise AppError(status_code=502, code="MODEL_ERROR", message=_http_error_message("OpenAI request failed", exc)) from exc
             if response.status_code >= 400:
@@ -266,7 +276,7 @@ async def create_openai_responses_reply(
             calls = _function_calls(output)
             if calls:
                 assert tool_executor is not None
-                input_items = output + await _execute_tool_calls(calls=calls, tool_executor=tool_executor, loop_guard=loop_guard)
+                input_items = input_items + output + await _execute_tool_calls(calls=calls, tool_executor=tool_executor, loop_guard=loop_guard)
                 continue
 
             content = _output_text(output)
@@ -327,7 +337,7 @@ async def _stream_response_round(
         return events
 
     try:
-        async with client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
+        async with provider_timeout(), client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
             if response.status_code >= 400:
                 body = await response.aread()
                 fallback = httpx.Response(status_code=response.status_code, headers=response.headers, content=body, request=response.request)
@@ -414,6 +424,7 @@ async def _stream_response_round(
     yield {"type": "done", "content": content, "output": output_items, "usage": usage}
 
 
+@vision_request("openai_responses")
 async def stream_openai_responses_reply(
     *,
     api_key: ApiKey,
@@ -426,19 +437,23 @@ async def stream_openai_responses_reply(
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
     tool_event_callback: ToolEventCallback | None = None,
     usage_callback: UsageCallback | None = None,
+    attachment_reader: AttachmentReader | None = None,
+    vision_context: VisionRequestContext | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     if tools and tool_executor is None:
         raise AppError(status_code=500, code="CONFIG_ERROR", message="Tool execution requires a tool_executor")
 
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/responses"
-    input_items = _transcript_to_responses_input(transcript)
+    input_items = _transcript_to_responses_input(transcript, vision_context.images if vision_context else None)
     total_usage: dict[str, int] | None = None
     loop_guard = ToolCallLoopGuard()
     max_rounds = max_tool_round_trips if tools else 1
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(90.0, connect=15.0), follow_redirects=True, trust_env=False, http2=False) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(getattr(get_settings(), "vision_request_timeout_seconds", 90.0), connect=15.0), follow_redirects=True, trust_env=False, http2=False) as client:
         for round_index in range(max_rounds):
+            if vision_context is not None:
+                vision_context.check_request_data((input_items, tools))
             payload = _responses_payload(
                 model=model,
                 input_items=input_items,
@@ -447,6 +462,8 @@ async def stream_openai_responses_reply(
                 stream=True,
                 tools=tools,
             )
+            if vision_context is not None:
+                vision_context.check_payload(payload)
             response_output: list[dict[str, Any]] = []
             async for event in _stream_response_round(client, url=url, api_key=raw_key, payload=payload, round_index=round_index):
                 event_type = str(event.get("type") or "")
@@ -460,7 +477,7 @@ async def stream_openai_responses_reply(
             calls = _function_calls(response_output)
             if calls:
                 assert tool_executor is not None
-                input_items = response_output + await _execute_tool_calls(
+                input_items = input_items + response_output + await _execute_tool_calls(
                     calls=calls,
                     tool_executor=tool_executor,
                     event_callback=tool_event_callback,

@@ -75,7 +75,8 @@ class CollectReplyFromStreamTests(unittest.IsolatedAsyncioTestCase):
             yield {"type": "tool", "tool": {"name": "memory_search", "status": "completed", "content": "ok"}}
             yield {"type": "content", "content": "最终答案"}
 
-        with patch("app.services.messages._stream_reply", fake_stream_reply):
+        with (patch("app.services.messages._stream_reply", fake_stream_reply),
+              patch("app.services.messages._lock_run", AsyncMock(return_value=context["agent_run"]))):
             accumulated, usage = await messages._collect_reply_from_stream(
                 session=session,
                 context=context,
@@ -124,7 +125,8 @@ class CollectReplyFromStreamTests(unittest.IsolatedAsyncioTestCase):
         async def fake_stream_reply(**_kwargs):
             yield {"type": "content", "content": "直接回答"}
 
-        with patch("app.services.messages._stream_reply", fake_stream_reply):
+        with (patch("app.services.messages._stream_reply", fake_stream_reply),
+              patch("app.services.messages._lock_run", AsyncMock(return_value=context["agent_run"]))):
             accumulated, usage = await messages._collect_reply_from_stream(
                 session=session,
                 context=context,
@@ -155,7 +157,8 @@ class CollectReplyFromStreamTests(unittest.IsolatedAsyncioTestCase):
             yield {"type": "tool", "tool": {"name": "memory_search", "status": "running", "arguments": "{}"}}
             yield {"type": "tool", "tool": {"name": "memory_search", "status": "completed", "content": "ok"}}
 
-        with patch("app.services.messages._stream_reply", fake_stream_reply):
+        with (patch("app.services.messages._stream_reply", fake_stream_reply),
+              patch("app.services.messages._lock_run", AsyncMock(return_value=context["agent_run"]))):
             accumulated, usage = await messages._collect_reply_from_stream(
                 session=session,
                 context=context,

@@ -143,6 +143,14 @@ function parseProviderId(value) {
   return Number.isInteger(providerId) && providerId > 0 ? providerId : null
 }
 
+function findSubmittedMessage(items, attachments, content, previousIds) {
+  return items.find(message => message.role === 'user' && (
+    attachments.length
+      ? attachments.every(attachment => message.attachments?.some(item => item.id === attachment.id))
+      : !previousIds.has(message.id) && message.content === content
+  ))
+}
+
 function createStreamingAssistantMessage(id, overrides = {}) {
   return {
     id,
@@ -787,65 +795,6 @@ async function consumeRunStream(response, {
     throw error
   } finally {
     clearInactivityTimer()
-  }
-}
-
-function rebuildMessageFromEvents(message, run, events) {
-  if (!Array.isArray(events) || events.length === 0) return message
-
-  let parts = []
-  for (const event of events) {
-    parts = applyRunEventToParts(parts, event)
-  }
-
-  const lastFailureEvent = [...events].reverse().find(event => event?.type === 'run.failed' || event?.type === 'run.cancelled')
-  const completed = events.some(event => event?.type === 'message.completed')
-
-  return {
-    ...message,
-    parts,
-    content: aggregateTextFromParts(parts),
-    status: lastFailureEvent
-      ? 'failed'
-      : completed
-        ? 'completed'
-        : ACTIVE_RUN_STATUSES.includes(run?.status)
-          ? 'streaming'
-          : message.status,
-    error_message: lastFailureEvent?.payload?.error_message || message.error_message,
-  }
-}
-
-async function recoverMessagesFromRuns(conversationId, messages) {
-  if (!conversationId || !Array.isArray(messages) || messages.length === 0) return messages
-  try {
-    const runs = await listActiveRuns(conversationId)
-    if (runs.length === 0) return messages
-
-    const recoveries = await Promise.all(
-      runs
-        .filter(run => run?.assistant_message_id)
-        .map(async run => {
-          const eventsData = await api.getRunEvents(conversationId, run.id, { afterSequence: 0 })
-          return {
-            assistantMessageId: run.assistant_message_id,
-            run,
-            events: eventsData?.items || [],
-          }
-        }),
-    )
-
-    const recoveryByMessageId = new Map(
-      recoveries.map(item => [item.assistantMessageId, item]),
-    )
-
-    return messages.map(message => {
-      const recovery = recoveryByMessageId.get(message.id)
-      if (!recovery) return message
-      return rebuildMessageFromEvents(message, recovery.run, recovery.events)
-    })
-  } catch {
-    return messages
   }
 }
 
@@ -2145,8 +2094,8 @@ export default function ChatPage() {
     setEditingMode('update')
   }, [])
 
-  const submitMainEdit = useCallback(async (messageId) => {
-    if (!activeId || !editingContent.trim() || editingSubmittingMessageId !== null) return
+  const submitMainEdit = useCallback(async (messageId, attachmentIds = []) => {
+    if (!activeId || (!editingContent.trim() && !attachmentIds.length) || editingSubmittingMessageId !== null) return
 
     setError('')
     setEditingSubmittingMessageId(messageId)
@@ -2155,6 +2104,7 @@ export default function ChatPage() {
     try {
       await api.editMessage(activeId, messageId, {
         content: editingContent.trim(),
+        attachment_ids: attachmentIds,
         mode: editingMode,
         ...(activeConv?.current_branch_id ? { branch_id: activeConv.current_branch_id } : {}),
       })
@@ -2180,8 +2130,8 @@ export default function ChatPage() {
     resetMainEdit,
   ])
 
-  const sendMessage = useCallback(async (content, temperatureOverride = pendingTemperature) => {
-    if (!content.trim() || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
+  const sendMessage = useCallback(async (content, temperatureOverride = pendingTemperature, attachments = [], onCommitted = () => {}) => {
+    if ((!content.trim() && !attachments.length) || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
     setError('')
     const requestTemperature = resolveTemperature(temperatureOverride)
 
@@ -2189,7 +2139,7 @@ export default function ChatPage() {
     let branchId = activeConv?.current_branch_id ?? null
     if (!convId) {
       try {
-        const conv = await createConversation(content.slice(0, 40), pendingModel || undefined, pendingProvider || undefined, requestTemperature)
+        const conv = await createConversation(content.slice(0, 40) || '图片消息', pendingModel || undefined, pendingProvider || undefined, requestTemperature)
         convId = conv.id
         branchId = conv.current_branch_id ?? null
       } catch {
@@ -2202,6 +2152,7 @@ export default function ChatPage() {
       id: Date.now(),
       role: 'user',
       content,
+      attachments,
       status: 'completed',
       created_at: new Date().toISOString(),
     }
@@ -2209,9 +2160,21 @@ export default function ChatPage() {
     setSending(true)
     let streamRunId = null
     let lastSequence = 0
-    let sawDone = false
-    let streamAssistantId = null
-    let sawEvent = false
+    let committed = false
+    const previousIds = new Set(messages.map(message => message.id))
+    const check = async (boundDetails) => {
+      const recovered = await refreshMessages(convId)
+      const original = boundDetails?.message_id
+        ? await api.getMessage(convId, boundDetails.message_id)
+        : findSubmittedMessage(recovered.items, attachments, content, previousIds)
+      if (original) {
+        await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
+        await loadBranches(convId)
+        setError('消息已保存。若回复失败，请对该消息重新生成；进行中的回复会自动恢复。')
+        return { committed: true }
+      }
+      return { pending: true, check }
+    }
 
     try {
       const controller = new AbortController()
@@ -2219,29 +2182,34 @@ export default function ChatPage() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content, temperature: requestTemperature, ...(branchId ? { branch_id: branchId } : {}) }),
+        body: JSON.stringify({ content, attachment_ids: attachments.map(item => item.id), temperature: requestTemperature, ...(branchId ? { branch_id: branchId } : {}) }),
         signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
-        await api.sendMessage(convId, { content, temperature: requestTemperature, ...(branchId ? { branch_id: branchId } : {}) })
+        await api.sendMessage(convId, { content, attachment_ids: attachments.map(item => item.id), temperature: requestTemperature, ...(branchId ? { branch_id: branchId } : {}) })
+        committed = true
+        onCommitted()
         await refreshMessages(convId)
         await loadBranches(convId)
-        return
+        return { committed: true }
       }
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        throw new Error(err?.error?.message || err?.detail || '发送失败')
+        throw Object.assign(new Error(err?.error?.message || err?.detail || '发送失败'), { status: res.status, data: err })
       }
+      // The stream endpoint commits the user message before returning 200.
+      committed = true
+      onCommitted()
 
       let streamError = ''
       const streamState = await consumeRunStream(res, {
         abortController: controller,
         onChunk: (chunk, state) => {
+          if (state.streamRunId || state.streamAssistantId) committed = true
           streamRunId = state.streamRunId
           lastSequence = state.lastSequence
-          streamAssistantId = state.streamAssistantId
           if (state.streamAssistantId) {
             setMainStreamingAssistantId(state.streamAssistantId)
             ensureMainAssistantPlaceholder(state.streamAssistantId, userMsg.id)
@@ -2257,8 +2225,7 @@ export default function ChatPage() {
         },
       })
 
-      sawDone = streamState.sawDone
-      sawEvent = streamState.sawEvent
+      const { sawDone, sawEvent } = streamState
 
       if (!sawDone && streamRunId) {
         await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
@@ -2266,23 +2233,27 @@ export default function ChatPage() {
         await refreshMessages(convId)
         await loadBranches(convId)
       }
-      if (!streamError && !sawEvent) setError('妯″瀷娌℃湁杩斿洖鍐呭')
+      if (!streamError && !sawEvent) setError('模型没有返回内容')
+      return committed ? { committed: true } : await check()
     } catch (e) {
       setError(e.message || '发送失败，请重试')
-      if (convId) {
-        try {
-          await recoverMainInterruptedStream(convId, streamRunId, lastSequence)
-        } catch {
-          setMessages(prev => prev.filter(m => m.id !== userMsg.id))
-        }
-      } else {
-        setMessages(prev => prev.filter(m => m.id !== userMsg.id))
+      if (e.data?.error?.code === 'ATTACHMENT_ALREADY_BOUND') {
+        const retryCheck = () => check(e.data.error.details)
+        try { return await retryCheck() } catch { return { pending: true, check: retryCheck } }
       }
+      if (!committed && e.status >= 400 && e.status < 500) {
+        setMessages(prev => prev.filter(message => message.id !== userMsg.id))
+        return { committed: false }
+      }
+      try {
+        const result = await check()
+        return committed ? { committed: true } : result
+      } catch { return committed ? { committed: true } : { pending: true, check } }
     } finally {
       setSending(false)
       setMainStreamingAssistantId(null)
     }
-  }, [activeConv, activeId, applyRunEventToUi, createConversation, ensureMainAssistantPlaceholder, loadBranches, pendingModel, pendingProvider, pendingTemperature, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, applyRunEventToUi, createConversation, ensureMainAssistantPlaceholder, loadBranches, messages, pendingModel, pendingProvider, pendingTemperature, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const regenerateMainMessage = useCallback(async (messageId) => {
     if (!activeId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -2291,9 +2262,6 @@ export default function ChatPage() {
     const branchId = activeConv?.current_branch_id ?? null
     let streamRunId = null
     let lastSequence = 0
-    let sawDone = false
-    let streamAssistantId = null
-    let sawEvent = false
 
     try {
       const controller = new AbortController()
@@ -2301,12 +2269,12 @@ export default function ChatPage() {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ temperature: pendingTemperature, ...(branchId ? { branch_id: branchId } : {}) }),
+        body: JSON.stringify({ temperature: pendingTemperature, provider_id: parseProviderId(pendingProvider), model: pendingModel || null, ...(branchId ? { branch_id: branchId } : {}) }),
         signal: controller.signal,
       })
 
       if (res.status === 404 || res.status === 405) {
-        await api.regenerateMessage(activeId, messageId, { temperature: pendingTemperature, ...(branchId ? { branch_id: branchId } : {}) })
+        await api.regenerateMessage(activeId, messageId, { temperature: pendingTemperature, provider_id: parseProviderId(pendingProvider), model: pendingModel || null, ...(branchId ? { branch_id: branchId } : {}) })
         await refreshMessages(activeId)
         await loadBranches(activeId)
         return
@@ -2323,7 +2291,6 @@ export default function ChatPage() {
         onChunk: (chunk, state) => {
           streamRunId = state.streamRunId
           lastSequence = state.lastSequence
-          streamAssistantId = state.streamAssistantId
           if (state.streamAssistantId) {
             setMainStreamingAssistantId(state.streamAssistantId)
             ensureMainAssistantPlaceholder(state.streamAssistantId, messageId)
@@ -2339,8 +2306,7 @@ export default function ChatPage() {
         },
       })
 
-      sawDone = streamState.sawDone
-      sawEvent = streamState.sawEvent
+      const { sawDone, sawEvent } = streamState
 
       if (!sawDone && streamRunId) {
         await recoverMainInterruptedStream(activeId, streamRunId, lastSequence)
@@ -2356,7 +2322,7 @@ export default function ChatPage() {
       setRegeneratingMessageId(null)
       setMainStreamingAssistantId(null)
     }
-  }, [activeConv, activeId, applyRunEventToUi, ensureMainAssistantPlaceholder, loadBranches, pendingTemperature, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
+  }, [activeConv, activeId, applyRunEventToUi, ensureMainAssistantPlaceholder, loadBranches, pendingModel, pendingProvider, pendingTemperature, recoverMainInterruptedStream, refreshMessages, regeneratingMessageId, sending, switchingSiblingMessageId])
 
   const switchMainSibling = useCallback(async (targetMessageId) => {
     if (!activeId || !targetMessageId || sending || regeneratingMessageId !== null || switchingSiblingMessageId !== null) return
@@ -2465,20 +2431,22 @@ export default function ChatPage() {
     })
   }, [patchBranchPane])
 
-  const sendBranchMessage = useCallback(async (paneId, content, temperatureOverride = pendingTemperature) => {
+  const sendBranchMessage = useCallback(async (paneId, content, temperatureOverride = pendingTemperature, attachments = [], onCommitted = () => {}) => {
     const pane = branchPanes.find(item => item.id === paneId)
-    if (!content.trim() || !activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
+    if ((!content.trim() && !attachments.length) || !activeId || !pane || pane.sending || pane.regeneratingMessageId || pane.switchingSiblingMessageId) return
 
     const requestTemperature = resolveTemperature(temperatureOverride)
     const userMsg = {
       id: Date.now(),
       role: 'user',
       content,
+      attachments,
       status: 'completed',
       created_at: new Date().toISOString(),
     }
     const payload = {
       content,
+      attachment_ids: attachments.map(item => item.id),
       parent_id: pane.currentLeafMessageId,
       temperature: requestTemperature,
       ...(pane.branchId ? { branch_id: pane.branchId } : {}),
@@ -2495,9 +2463,22 @@ export default function ChatPage() {
     }))
     let streamRunId = null
     let lastSequence = 0
-    let sawDone = false
-    let streamAssistantId = null
-    let sawEvent = false
+    let committed = false
+    const previousIds = new Set(pane.messages.map(message => message.id))
+    const check = async (boundDetails) => {
+      const snapshot = await api.getMessages(activeId, { rootMessageId: pane.rootMessageId })
+      const original = boundDetails?.message_id
+        ? await api.getMessage(activeId, boundDetails.message_id)
+        : findSubmittedMessage(snapshot.items || [], attachments, content, previousIds)
+      if (original) {
+        await refreshBranchPane(activeId, paneId, { leafMessageId: original.id, expandLeaf: true })
+        await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
+        await loadBranches(activeId)
+        patchBranchPane(paneId, { error: '消息已保存。若回复失败，请对该消息重新生成；进行中的回复会自动恢复。' })
+        return { committed: true }
+      }
+      return { pending: true, check }
+    }
     try {
       const controller = new AbortController()
       const res = await fetch(`/api/conversations/${activeId}/messages/stream`, {
@@ -2510,23 +2491,27 @@ export default function ChatPage() {
 
       if (res.status === 404 || res.status === 405) {
         const fallback = await api.sendMessage(activeId, payload)
+        committed = true
+        onCommitted()
         await refreshBranchPane(activeId, paneId, { leafMessageId: fallback?.current_leaf_message_id })
         await loadBranches(activeId)
-        return
+        return { committed: true }
       }
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        throw new Error(err?.error?.message || err?.detail || '发送失败')
+        throw Object.assign(new Error(err?.error?.message || err?.detail || '发送失败'), { status: res.status, data: err })
       }
+      committed = true
+      onCommitted()
 
       let streamError = ''
       const streamState = await consumeRunStream(res, {
         abortController: controller,
         onChunk: (chunk, state) => {
+          if (state.streamRunId || state.streamAssistantId) committed = true
           streamRunId = state.streamRunId
           lastSequence = state.lastSequence
-          streamAssistantId = state.streamAssistantId
           if (state.streamAssistantId) {
             ensureBranchAssistantPlaceholder(paneId, state.streamAssistantId, userMsg.id)
           }
@@ -2541,8 +2526,7 @@ export default function ChatPage() {
         },
       })
 
-      sawDone = streamState.sawDone
-      sawEvent = streamState.sawEvent
+      const { sawDone, sawEvent } = streamState
 
       if (!sawDone && streamRunId) {
         await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
@@ -2551,12 +2535,21 @@ export default function ChatPage() {
         await loadBranches(activeId)
       }
       if (!streamError && !sawEvent) patchBranchPane(paneId, { error: '模型没有返回内容' })
+      return committed ? { committed: true } : await check()
     } catch (e) {
-      patchBranchPane(paneId, current => ({
-        ...current,
-        messages: current.messages.filter(message => message.id !== userMsg.id),
-        error: e.message || '发送失败，请重试',
-      }))
+      patchBranchPane(paneId, { error: e.message || '发送失败，请重试' })
+      if (e.data?.error?.code === 'ATTACHMENT_ALREADY_BOUND') {
+        const retryCheck = () => check(e.data.error.details)
+        try { return await retryCheck() } catch { return { pending: true, check: retryCheck } }
+      }
+      if (!committed && e.status >= 400 && e.status < 500) {
+        patchBranchPane(paneId, current => ({ ...current, messages: current.messages.filter(message => message.id !== userMsg.id) }))
+        return { committed: false }
+      }
+      try {
+        const result = await check()
+        return committed ? { committed: true } : result
+      } catch { return committed ? { committed: true } : { pending: true, check } }
     } finally {
       patchBranchPane(paneId, { sending: false, streamingAssistantId: null })
     }
@@ -2573,12 +2566,11 @@ export default function ChatPage() {
     })
     let streamRunId = null
     let lastSequence = 0
-    let sawDone = false
-    let streamAssistantId = null
-    let sawEvent = false
     try {
       const payload = {
         temperature: pendingTemperature,
+        provider_id: parseProviderId(pendingProvider),
+        model: pendingModel || null,
         ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         activate_branch: false,
         ...buildBranchContextPayload(pane),
@@ -2609,7 +2601,6 @@ export default function ChatPage() {
         onChunk: (chunk, state) => {
           streamRunId = state.streamRunId
           lastSequence = state.lastSequence
-          streamAssistantId = state.streamAssistantId
           if (state.streamAssistantId) {
             ensureBranchAssistantPlaceholder(paneId, state.streamAssistantId, messageId)
           }
@@ -2623,8 +2614,7 @@ export default function ChatPage() {
         },
       })
 
-      sawDone = streamState.sawDone
-      sawEvent = streamState.sawEvent
+      const { sawDone, sawEvent } = streamState
 
       if (!sawDone && streamRunId) {
         await recoverBranchInterruptedStream(activeId, paneId, streamRunId, lastSequence)
@@ -2643,7 +2633,7 @@ export default function ChatPage() {
         streamingAssistantId: null,
       })
     }
-  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, pendingTemperature, recoverBranchInterruptedStream, refreshBranchPane])
+  }, [activeId, applyRunEventToUi, branchPanes, ensureBranchAssistantPlaceholder, loadBranches, patchBranchPane, pendingModel, pendingProvider, pendingTemperature, recoverBranchInterruptedStream, refreshBranchPane])
 
   const switchBranchPaneSibling = useCallback(async (paneId, targetMessageId) => {
     const pane = branchPanes.find(item => item.id === paneId)
@@ -2689,12 +2679,12 @@ export default function ChatPage() {
     }
   }, [activeId, branchPanes, loadBranches, patchBranchPane, refreshBranchPanesSnapshot, refreshMessages])
 
-  const submitBranchEdit = useCallback(async (paneId, messageId) => {
+  const submitBranchEdit = useCallback(async (paneId, messageId, attachmentIds = []) => {
     const pane = branchPanes.find(item => item.id === paneId)
     if (
       !activeId
       || !pane
-      || !pane.editingContent.trim()
+      || (!pane.editingContent.trim() && !attachmentIds.length)
       || pane.editingSubmittingMessageId !== null
     ) return
 
@@ -2704,6 +2694,7 @@ export default function ChatPage() {
     try {
       const result = await api.editMessage(activeId, messageId, {
         content: pane.editingContent.trim(),
+        attachment_ids: attachmentIds,
         mode: pane.editingMode,
         ...(pane.branchId ? { branch_id: pane.branchId } : {}),
         ...buildBranchContextPayload(pane),
@@ -3026,6 +3017,7 @@ export default function ChatPage() {
                             message={msg}
                             runView={getRunViewForAssistant(msg.id)}
                             onCopy={msg.role === 'system' ? undefined : () => { void copyMainMessage(msg) }}
+                            onAttachmentChanged={() => { void refreshMessages(activeId) }}
                             onEdit={msg.role === 'user' ? () => { void startMainEdit(msg) } : undefined}
                             onRegenerate={msg.role === 'system' ? undefined : () => { void regenerateMainMessage(msg.id) }}
                             onDelete={msg.role === 'system' ? undefined : () => { void deleteMainMessage(msg.id) }}
@@ -3038,7 +3030,7 @@ export default function ChatPage() {
                             onEditDraftChange={setEditingContent}
                             onEditModeChange={setEditingMode}
                             onEditCancel={resetMainEdit}
-                            onEditSubmit={() => { void submitMainEdit(msg.id) }}
+                            onEditSubmit={attachmentIds => { void submitMainEdit(msg.id, attachmentIds) }}
                             isEditSubmitting={editingSubmittingMessageId === msg.id}
                             disableActions={mainBusy}
                             isRegenerating={regeneratingMessageId === msg.id}
@@ -3152,16 +3144,17 @@ export default function ChatPage() {
                             || pane.editingSubmittingMessageId !== null,
                         }}
                         getRunView={getRunViewForAssistant}
+                        onAttachmentChanged={() => { void refreshMessages(activeId); void refreshBranchPane(activeId, pane.id) }}
                         onClose={() => closeBranchPane(pane.id)}
                         onContextModeChange={contextMode => setPaneContextMode(pane.id, contextMode)}
                         onContextMessageCountChange={count => setPaneContextMessageCount(pane.id, count)}
                         onCopy={message => copyBranchMessage(pane.id, message)}
                         onEdit={message => startBranchEdit(pane.id, message)}
                         onEditCancel={() => cancelBranchEdit(pane.id)}
-                        onEditSubmit={messageId => submitBranchEdit(pane.id, messageId)}
+                        onEditSubmit={(messageId, attachmentIds) => submitBranchEdit(pane.id, messageId, attachmentIds)}
                         onEditDraftChange={content => patchBranchPane(pane.id, { editingContent: content })}
                         onEditModeChange={mode => patchBranchPane(pane.id, { editingMode: mode })}
-                        onSend={(content, temperature) => sendBranchMessage(pane.id, content, temperature)}
+                        onSend={(content, temperature, attachments, onCommitted) => sendBranchMessage(pane.id, content, temperature, attachments, onCommitted)}
                         onCancelGeneration={() => cancelRunForMessage({ id: pane.streamingAssistantId })}
                         onRegenerate={messageId => regenerateBranchMessage(pane.id, messageId)}
                         onDelete={messageId => deleteBranchMessage(pane.id, messageId)}

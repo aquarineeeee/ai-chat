@@ -20,6 +20,7 @@ from app.models.tool_call import ToolCall
 from app.services.agent_artifacts import read_artifact_text
 from app.services.agent_trace import json_loads
 from app.services.conversations import get_conversation
+from app.services.attachments import load_message_attachments, attachment_response
 
 
 class ExportFormat(str, Enum):
@@ -58,6 +59,9 @@ async def export_conversation(
     conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     messages = await _load_all_messages(session=session, conversation_id=conversation.id)
     exported_at = datetime.now().astimezone()
+    attachment_map = await load_message_attachments(session=session, message_ids=[item.id for item in messages])
+    for item in messages:
+        item._attachment_metadata = [{key: value for key, value in attachment_response(row).items() if key != "preview_url"} for row in attachment_map.get(item.id, [])]
     selected_messages, warnings = _select_messages_for_scope(
         messages=messages,
         scope=scope,
@@ -220,7 +224,8 @@ def _markdown_message_block(message: Message) -> list[str] | None:
     content = message.content.strip()
     if message.status == MessageStatus.FAILED and not content:
         return None
-    if not content:
+    attachments = getattr(message, "_attachment_metadata", [])
+    if not content and not attachments:
         return None
 
     role_heading = {
@@ -239,7 +244,12 @@ def _markdown_message_block(message: Message) -> list[str] | None:
             lines.extend(_quote_markdown_lines("Error", message.error_message.strip()))
         lines.append("")
 
-    lines.extend([content, ""])
+    if content:
+        lines.extend([content, ""])
+    statuses = {"ready": "可用", "deleting": "正在删除", "failed": "删除失败", "deleted": "已删除"}
+    for item in attachments:
+        filename = re.sub(r"([\\`*_{}\[\]()<>#!|])", r"\\\1", str(item["filename"]).replace("\r", " ").replace("\n", " "))
+        lines.extend([f"[图片附件 {item['id']}: {filename}; {item['media_type']}; {statuses.get(item['status'], item['status'])}; 图片仍保存在本地应用数据目录]", ""])
     return lines
 
 
@@ -260,7 +270,7 @@ def _render_json_export(
     warnings: list[str],
 ) -> str:
     payload: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "type": "ai-chat.conversation_export",
         "format": "json",
         "scope": scope.value,
@@ -284,6 +294,7 @@ def _render_json_export(
                 "parent_id": message.parent_id,
                 "role": message.role.value,
                 "content": message.content,
+                "attachments": getattr(message, "_attachment_metadata", []),
                 "provider": message.provider,
                 "model": message.model,
                 "temperature": _decimal_to_string(message.temperature),

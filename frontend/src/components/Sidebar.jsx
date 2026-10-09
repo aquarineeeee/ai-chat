@@ -124,8 +124,6 @@ export default function Sidebar({
   open,
   conversations,
   projects = [],
-  selectedProjectId = null,
-  onProjectChange = () => {},
   branchesByConversation = {},
   loadingBranches = {},
   activeId,

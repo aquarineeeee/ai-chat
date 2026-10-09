@@ -6,6 +6,9 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import AppError
 from app.models.conversation import Conversation
+from app.models.message import Message
+from app.services.attachment_transactions import lock_owned_project, lock_project_conversations
+from app.services.attachments import mark_message_attachments_deleting, process_deletions
 from app.models.mcp import McpServer, McpTool
 from app.models.project import Project, ProjectMcpTool
 from app.schemas.project import ProjectCreate, ProjectToolInput, ProjectToolUpdate, ProjectUpdate
@@ -103,8 +106,12 @@ async def remove_project_tool(session: AsyncSession, user_id: int, project_id: i
 
 
 async def delete_project(session: AsyncSession, user_id: int, project_id: int) -> int:
-    project = await get_project(session, user_id, project_id)
-    count = int((await session.scalar(select(func.count(Conversation.id)).where(Conversation.project_id == project_id))) or 0)
+    project = await lock_owned_project(session=session, user_id=user_id, project_id=project_id)
+    conversations = await lock_project_conversations(session=session, user_id=user_id, project_id=project_id)
+    conversation_ids = [item.id for item in conversations]
+    message_ids = list((await session.scalars(select(Message.id).where(Message.conversation_id.in_(conversation_ids)).with_for_update())).all()) if conversation_ids else []
+    deleting_ids = await mark_message_attachments_deleting(session=session, message_ids=message_ids)
     await session.delete(project)
     await session.commit()
-    return count
+    await process_deletions(session=session, ids=deleting_ids)
+    return len(conversation_ids)

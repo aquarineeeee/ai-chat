@@ -38,23 +38,24 @@ class ApprovalManagerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(resolved)
 
-    async def test_runner_cancel_waits_for_task_shutdown(self) -> None:
+    async def test_runner_cancel_notifies_and_wait_confirms_shutdown(self) -> None:
         runner = InProcessAgentRunner()
         started = asyncio.Event()
         cancelled = asyncio.Event()
 
         async def job() -> None:
+            runner.execution_ready(7)
             started.set()
             try:
                 await asyncio.Future()
             except asyncio.CancelledError:
                 cancelled.set()
-                raise
 
         runner.start(7, job())
         await started.wait()
 
         self.assertTrue(await runner.cancel(7))
+        await runner.wait(7)
         self.assertTrue(cancelled.is_set())
         self.assertFalse(runner.is_running(7))
 

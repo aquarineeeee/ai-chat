@@ -148,6 +148,7 @@ npm run build
 
 ```powershell
 cd D:\websites\ai-chat\backend
+D:\websites\ai-chat\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 D:\websites\ai-chat\.venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
@@ -156,6 +157,20 @@ cd D:\websites\ai-chat\frontend
 npm run lint
 npm run build
 ```
+
+## 图片上传与视觉聊天部署
+
+上传支持 JPG/PNG，单图 1 MiB 和 2500 万像素，每条消息合计 8 MiB 和 5000 万像素。图片存入 `backend/data/uploads`（`LOCAL_UPLOAD_DIR` 相对 `backend` 解析），该目录必须持久化，并放在静态文件根目录之外。图片通过登录鉴权的预览接口访问，不应在 Nginx 或其他 Web 服务器配置公开目录映射。备份数据库时同步备份图片目录；永久保存不会代替运维备份。
+
+首次启用前执行 `alembic upgrade head` 创建附件表。此版本运行保护、取消及中断恢复按**单 backend worker**部署：生产启动使用 `uvicorn app.main:app --workers 1`；多 worker 不在本次验证范围内。迁移回滚使用 `alembic downgrade 0012_projects`，会删除附件关系及元数据表，但不会自动删除磁盘文件；应先备份数据库和上传目录，并停用图片功能，再回滚。
+
+默认保留 256 MiB 磁盘安全余量；低于余量时拒绝上传。每分钟最多上传 30 次，解码并发 1、超时 10 秒、解码峰值预算 256 MiB。模型图片缓冲另有 256 MiB 进程驻留预算，编码并发 1，三个 adapter 的请求体默认上限均为 16 MiB，图片请求超时 90 秒。全部参数见 `backend/.env.example`。这些预算按单 worker 计算，选择视觉模型后仍需在实际 provider 上验证其图片及上下文限制。
+
+完整历史上下文也受适配器的保守图片预算约束：OpenAI Chat Completions 和 Responses 默认最多 500 张；Anthropic Messages 默认最多 100 张且图片任一边不超过 8000 像素。各适配器可分别通过 `*_MAX_IMAGES` 和 `*_MAX_IMAGE_DIMENSION` 调整；尺寸配置为 0 表示仅使用上传阶段的像素保护。超限时在读取图片文件前返回 `413 VISION_CONTEXT_LIMIT`，不会删减图片。具体模型的视觉支持、图片数量、尺寸和 token 上下文限制由使用者手动验证；未能本地判断的限制会返回上游模型错误，原消息和图片引用仍保留以供调整后重试。
+
+应用在 multipart 解析前执行完整请求体 1.5 MiB 上限，读取体的总超时为 30 秒；反向代理也应设置 `client_max_body_size 1536k;`（上传路由），避免超大请求到达应用。代理的 413 页面可以不同于应用 JSON 错误，但应保持 HTTP 413 状态；应用独立检查单文件 1 MiB 上限。部署方应监控上传目录所在磁盘的余量和 `STORAGE_FULL`/`STORAGE_ERROR` 错误。
+
+清理由应用 lifespan 每 5 分钟调度，先恢复中断运行再开始扫描。未发送附件 24 小时后清理；已关联图片不按年龄删除。显式删除失败保留墓碑，需用户手动重试；消息删除、替换和孤儿清理失败会自动退避重试。清理者使用同一连接持有 MySQL advisory lock，临时文件与落盘未入库的孤儿文件只有超过 TTL 才删除。上传目录及其临时目录必须处于同一文件系统，以支持原子落盘。
 
 ## 当前范围
 

@@ -3,6 +3,7 @@ import asyncio
 import logging
 from collections import defaultdict
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.canonical_transcript import (
     CanonicalTranscriptItem,
+    ImagePart,
+    TextPart,
     build_message_history_transcript,
     latest_user_text,
     system_text_item,
@@ -51,6 +54,7 @@ from app.schemas.message import (
     MessageSendResponse,
 )
 from app.schemas.agent_run import RunApprovalDecisionRequest
+from app.schemas.attachment import AttachmentResponse
 from app.services.approval_manager import ApprovalDecision, approval_manager
 from app.services.agent_runner import agent_runner
 from app.services.agent_artifacts import tool_output_should_externalize, write_tool_output_artifact
@@ -77,6 +81,8 @@ from app.services.branches import (
     resolve_branch_for_write,
 )
 from app.services.conversations import get_conversation
+from app.services.attachments import (bind_attachments, replace_attachments, load_message_attachments, attachment_response, mark_message_attachments_deleting, protect_run_attachments, process_deletions, AttachmentReader)
+from app.services.attachment_transactions import lock_owned_conversation
 from app.services.memory_mcp import search_memory
 from app.services.memory_tools import execute_memory_tool_call, memory_tool_definitions
 from app.services.mcp_registry import close_runtime_sessions, execute_runtime_tool, runtime_snapshot
@@ -355,48 +361,20 @@ async def submit_tool_approval_decision(
 
 
 async def cancel_agent_run(
-    *,
-    session: AsyncSession,
-    user_id: int,
-    conversation_id: int,
-    run_id: int,
+    *, session: AsyncSession, user_id: int, conversation_id: int, run_id: int,
 ) -> AgentRun:
-    agent_run = await get_agent_run_for_conversation(
-        session=session,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        run_id=run_id,
-    )
-    if agent_run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
-        return agent_run
-
-    if await agent_runner.cancel(agent_run.id):
-        await session.rollback()
-        session.expire_all()
-        return await get_agent_run_for_conversation(
-            session=session,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            run_id=run_id,
-        )
-
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
-    assistant_message = await session.get(Message, agent_run.assistant_message_id) if agent_run.assistant_message_id else None
-    if assistant_message is None:
-        agent_run.status = RUN_STATUS_CANCELLED
-        agent_run.completed_at = utcnow_naive()
-        agent_run.error_message = "Run cancelled."
-        await session.commit()
-        return agent_run
-
-    await _cancel_loaded_run(
-        session=session,
-        agent_run=agent_run,
-        conversation=conversation,
-        assistant_message=assistant_message,
-        message="Run cancelled by the user.",
-    )
-    return agent_run
+    await get_agent_run_for_conversation(session=session, user_id=user_id, conversation_id=conversation_id, run_id=run_id)
+    run = await _lock_run(session, run_id)
+    if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+        return run
+    metadata = _run_metadata(run)
+    metadata["cancel_requested"] = True
+    _set_run_metadata(run, metadata)
+    await session.commit()
+    # No transaction/row locks are held while notifying the task. A run not yet
+    # registered is cancelled cooperatively when its execution starts.
+    await agent_runner.cancel(run_id)
+    return run
 
 
 async def reconcile_interrupted_runs() -> None:
@@ -484,6 +462,7 @@ async def _build_paginated_messages_response(
     has_more = len(newest_first) > limit
     page = newest_first[:limit]
     page.reverse()
+    await _hydrate_message_attachments(session, page)
 
     sibling_map = await _load_sibling_meta_map(
         session=session,
@@ -536,6 +515,7 @@ async def get_conversation_message(
         message_id=message_id,
     )
     history = await _load_conversation_history(session=session, conversation_id=conversation_id)
+    await _hydrate_message_attachments(session, [message])
     sibling_map = _build_sibling_meta_map(history)
     return _serialize_message_node(message, sibling_map=sibling_map)
 
@@ -628,7 +608,7 @@ async def activate_message_branch(
     message_id: int,
     exact: bool = False,
 ) -> ConversationMessagesResponse:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     history = await _load_conversation_history(session=session, conversation_id=conversation.id)
     by_id = {item.id: item for item in history}
     target_message = by_id.get(message_id)
@@ -675,8 +655,9 @@ async def delete_message(
     conversation_id: int,
     message_id: int,
 ) -> None:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    session.info["attachment_current_read"] = True
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id, current_read=True)
     target_message = next((item for item in history if item.id == message_id), None)
     if target_message is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="消息不存在")
@@ -688,6 +669,7 @@ async def delete_message(
         raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能删除")
 
     deleted_message_ids = {item.id for item in subtree_messages}
+    deleting_ids = await mark_message_attachments_deleting(session=session, message_ids=list(deleted_message_ids))
     remaining_messages = [item for item in history if item.id not in deleted_message_ids]
     await repair_branches_after_message_delete(
         session=session,
@@ -701,6 +683,7 @@ async def delete_message(
         await session.delete(message)
     await session.commit()
     await session.refresh(conversation)
+    await process_deletions(session=session, ids=deleting_ids)
 
 
 async def edit_message(
@@ -710,27 +693,29 @@ async def edit_message(
     message_id: int,
     payload: MessageEditRequest,
 ) -> MessageEditResponse:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    session.info["attachment_current_read"] = True
     target_message = await _ensure_message_belongs_to_conversation(
         session=session,
         conversation_id=conversation.id,
         message_id=message_id,
+        current_read=True,
     )
 
     content = payload.content.strip()
-    if not content:
-        raise AppError(status_code=422, code="VALIDATION_ERROR", message="消息内容不能为空")
     if target_message.role != MessageRole.USER:
         raise AppError(status_code=400, code="VALIDATION_ERROR", message="仅支持编辑用户消息")
     if target_message.status == MessageStatus.STREAMING:
         raise AppError(status_code=409, code="CONFLICT", message="消息仍在生成中，暂时不能编辑")
 
     if payload.mode == "update":
+        deleting_ids = await replace_attachments(session=session, user_id=user_id, message=target_message, ids=payload.attachment_ids, content=content)
         target_message.content = content
         target_message.updated_at = datetime.utcnow()
         await session.commit()
         await session.refresh(target_message)
         await session.refresh(conversation)
+        await process_deletions(session=session, ids=deleting_ids)
         return MessageEditResponse(
             conversation_id=conversation.id,
             message_id=target_message.id,
@@ -744,6 +729,7 @@ async def edit_message(
         conversation_id=conversation_id,
         payload=MessageCreateRequest(
             content=content,
+            attachment_ids=payload.attachment_ids or [],
             parent_id=target_message.parent_id,
             branch_id=payload.branch_id,
             activate_branch=True,
@@ -761,53 +747,21 @@ async def edit_message(
 
 
 async def create_message_pair(
-    session: AsyncSession,
-    user_id: int,
-    conversation_id: int,
-    payload: MessageCreateRequest,
+    session: AsyncSession, user_id: int, conversation_id: int, payload: MessageCreateRequest,
 ) -> MessageSendResponse:
     context = await _prepare_generation(session=session, user_id=user_id, conversation_id=conversation_id, payload=payload)
     await _initialize_trace_for_context(session=session, context=context, user_message=context["user_message"])
-
-    try:
-        reply_content, usage = await _collect_reply_from_stream(
-            session=session,
-            context=context,
-            user_id=user_id,
-        )
-    except Exception as exc:
-        app_error = _to_app_error(exc)
-        await _mark_failed(
-            session=session,
-            context=context,
-            conversation=context["conversation"],
-            branch=context["branch"],
-            assistant_message=context["assistant_message"],
-            message=app_error.message,
-            status=MessageStatus.FAILED,
-            leaf_message_id=context["user_message"].id,
-            activate_branch=context["activate_branch"],
-        )
-        raise app_error
-
-    await _finalize_success(
-        session=session,
-        context=context,
-        conversation=context["conversation"],
-        branch=context["branch"],
-        assistant_message=context["assistant_message"],
-        reply_content=reply_content,
-        usage=usage,
-        activate_branch=context["activate_branch"],
-    )
-    return await _build_send_response(
-        session=session,
-        conversation=context["conversation"],
-        user_message=context["user_message"],
-        assistant_message=context["assistant_message"],
-        selected_leaf_message_id=context["assistant_message"].id,
-        history=context["history"],
-    )
+    _start_generation_run(context, user_id=user_id, failure_leaf_message_id=context["user_message"].id)
+    run_id = context["agent_run"].id
+    await agent_runner.wait(run_id)
+    await session.rollback()
+    run = await session.get(AgentRun, run_id, populate_existing=True)
+    for key in ("conversation", "assistant_message", "user_message", "target_message"):
+        if context.get(key) is not None:
+            await session.refresh(context[key])
+    _raise_run_error(run)
+    history = await _load_conversation_history(session=session, conversation_id=conversation_id)
+    return await _build_send_response(session=session, conversation=context["conversation"], user_message=context["user_message"], assistant_message=context["assistant_message"], selected_leaf_message_id=context["assistant_message"].id, history=history)
 
 
 async def create_message_stream(
@@ -820,27 +774,8 @@ async def create_message_stream(
     await _initialize_trace_for_context(session=session, context=context, user_message=context["user_message"])
     agent_run = context["agent_run"]
     assert isinstance(agent_run, AgentRun)
-    agent_runner.start(
-        agent_run.id,
-        _execute_background_run(
-            payload={
-                "run_id": agent_run.id,
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "assistant_message_id": context["assistant_message"].id,
-                "branch_id": context["branch"].id if isinstance(context.get("branch"), ConversationBranch) else None,
-                "provider": context["provider"],
-                "adapter_id": context["adapter_id"],
-                "model": context["model"],
-                "temperature": context["temperature"],
-                "max_tokens": context["max_tokens"],
-                "prompt_transcript": context["prompt_transcript"],
-                "mcp_tools": context["mcp_tools"],
-                "activate_branch": context["activate_branch"],
-                "failure_leaf_message_id": context["user_message"].id,
-            }
-        ),
-    )
+    _start_generation_run(context, user_id=user_id, failure_leaf_message_id=context["user_message"].id)
+    session.info.pop("attachment_current_read", None)
     return stream_run_events(
         session=session,
         user_id=user_id,
@@ -851,60 +786,21 @@ async def create_message_stream(
 
 
 async def regenerate_message(
-    session: AsyncSession,
-    user_id: int,
-    conversation_id: int,
-    message_id: int,
-    payload: MessageRegenerateRequest,
+    session: AsyncSession, user_id: int, conversation_id: int, message_id: int, payload: MessageRegenerateRequest,
 ) -> MessageRegenerateResponse:
-    context = await _prepare_regeneration(
-        session=session,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        message_id=message_id,
-        payload=payload,
-    )
+    context = await _prepare_regeneration(session=session, user_id=user_id, conversation_id=conversation_id, message_id=message_id, payload=payload)
     await _initialize_trace_for_context(session=session, context=context, user_message=None)
-
-    try:
-        reply_content, usage = await _collect_reply_from_stream(
-            session=session,
-            context=context,
-            user_id=user_id,
-        )
-    except Exception as exc:
-        app_error = _to_app_error(exc)
-        await _mark_failed(
-            session=session,
-            context=context,
-            conversation=context["conversation"],
-            branch=context["branch"],
-            assistant_message=context["assistant_message"],
-            message=app_error.message,
-            status=MessageStatus.FAILED,
-            leaf_message_id=context["target_message"].id,
-            activate_branch=context["activate_branch"],
-        )
-        raise app_error
-
-    await _finalize_success(
-        session=session,
-        context=context,
-        conversation=context["conversation"],
-        branch=context["branch"],
-        assistant_message=context["assistant_message"],
-        reply_content=reply_content,
-        usage=usage,
-        activate_branch=context["activate_branch"],
-    )
-    return await _build_regenerate_response(
-        session=session,
-        conversation=context["conversation"],
-        replaced_message=context["target_message"],
-        assistant_message=context["assistant_message"],
-        selected_leaf_message_id=context["assistant_message"].id,
-        history=context["history"],
-    )
+    _start_generation_run(context, user_id=user_id, failure_leaf_message_id=context["target_message"].id)
+    run_id = context["agent_run"].id
+    await agent_runner.wait(run_id)
+    await session.rollback()
+    run = await session.get(AgentRun, run_id, populate_existing=True)
+    for key in ("conversation", "assistant_message", "user_message", "target_message"):
+        if context.get(key) is not None:
+            await session.refresh(context[key])
+    _raise_run_error(run)
+    history = await _load_conversation_history(session=session, conversation_id=conversation_id)
+    return await _build_regenerate_response(session=session, conversation=context["conversation"], replaced_message=context["target_message"], assistant_message=context["assistant_message"], selected_leaf_message_id=context["assistant_message"].id, history=history)
 
 
 async def regenerate_message_stream(
@@ -924,27 +820,8 @@ async def regenerate_message_stream(
     await _initialize_trace_for_context(session=session, context=context, user_message=None)
     agent_run = context["agent_run"]
     assert isinstance(agent_run, AgentRun)
-    agent_runner.start(
-        agent_run.id,
-        _execute_background_run(
-            payload={
-                "run_id": agent_run.id,
-                "user_id": user_id,
-                "conversation_id": conversation_id,
-                "assistant_message_id": context["assistant_message"].id,
-                "branch_id": context["branch"].id if isinstance(context.get("branch"), ConversationBranch) else None,
-                "provider": context["provider"],
-                "adapter_id": context["adapter_id"],
-                "model": context["model"],
-                "temperature": context["temperature"],
-                "max_tokens": context["max_tokens"],
-                "prompt_transcript": context["prompt_transcript"],
-                "mcp_tools": context["mcp_tools"],
-                "activate_branch": context["activate_branch"],
-                "failure_leaf_message_id": context["target_message"].id,
-            }
-        ),
-    )
+    _start_generation_run(context, user_id=user_id, failure_leaf_message_id=context["target_message"].id)
+    session.info.pop("attachment_current_read", None)
     return stream_run_events(
         session=session,
         user_id=user_id,
@@ -961,7 +838,8 @@ async def _prepare_generation(
     conversation_id: int,
     payload: MessageCreateRequest,
 ) -> dict[str, object]:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    session.info["attachment_current_read"] = True
     branch = await resolve_branch_for_write(
         session=session,
         conversation=conversation,
@@ -982,6 +860,7 @@ async def _prepare_generation(
             session=session,
             conversation_id=conversation.id,
             message_id=parent_id,
+            current_read=True,
         )
 
     context_root_message_id = payload.context_root_message_id
@@ -1023,6 +902,7 @@ async def _prepare_generation(
     )
     session.add(user_message)
     await session.flush()
+    await bind_attachments(session=session, user_id=user_id, message=user_message, ids=payload.attachment_ids)
 
     assistant_message = await _create_assistant_message(
         session=session,
@@ -1038,12 +918,13 @@ async def _prepare_generation(
     )
     # Both new messages are flushed above, so this snapshot includes them and can
     # be reused for the response (expire_on_commit=False keeps the objects live).
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id, current_read=True)
     prompt_transcript = await _build_prompt_transcript(
         session=session,
         conversation=conversation,
         parent_id=parent_id,
         user_content=payload.content,
+        user_message=user_message,
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
         context_message_count=payload.context_message_count,
@@ -1082,7 +963,8 @@ async def _prepare_regeneration(
     message_id: int,
     payload: MessageRegenerateRequest,
 ) -> dict[str, object]:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    session.info["attachment_current_read"] = True
     branch = await resolve_branch_for_write(
         session=session,
         conversation=conversation,
@@ -1093,6 +975,7 @@ async def _prepare_regeneration(
         session=session,
         conversation_id=conversation.id,
         message_id=message_id,
+        current_read=True,
     )
     provider_instance_id = payload.provider_id or target_message.provider_instance_id or conversation.provider_instance_id
     provider_instance = await get_provider(session, user_id, provider_instance_id) if provider_instance_id else None
@@ -1126,15 +1009,19 @@ async def _prepare_regeneration(
     if payload.temperature is not None:
         conversation.temperature = temperature
 
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id, current_read=True)
+    by_id = {item.id: item for item in history}
+    target_user = by_id.get(parent_id)
+    if target_user is None or target_user.role != MessageRole.USER:
+        raise AppError(422, "VALIDATION_ERROR", "重新生成的目标必须对应用户消息")
+    ancestors = set(_lineage_ids(by_id, target_user.id))
     context_root_message_id = payload.context_root_message_id
-    if payload.context_mode in {"root_only", "last_n"}:
-        context_root_message_id = context_root_message_id or target_message.id
-        if context_root_message_id is not None:
-            await _ensure_message_belongs_to_conversation(
-                session=session,
-                conversation_id=conversation.id,
-                message_id=context_root_message_id,
-            )
+    if context_root_message_id is not None and context_root_message_id not in ancestors:
+        raise AppError(422, "VALIDATION_ERROR", "上下文根必须是目标用户消息或其祖先")
+    if context_root_message_id == target_user.id:
+        context_root_message_id = target_user.parent_id
+    if payload.context_mode in {"root_only", "last_n"} and context_root_message_id is None:
+        context_root_message_id = target_user.parent_id
 
     assistant_message = await _create_assistant_message(
         session=session,
@@ -1150,11 +1037,12 @@ async def _prepare_regeneration(
     )
     # Assistant placeholder is flushed above, so this snapshot includes it and can
     # be reused for the response (expire_on_commit=False keeps the objects live).
-    history = await _load_conversation_history(session=session, conversation_id=conversation.id)
+    history = await _load_conversation_history(session=session, conversation_id=conversation.id, current_read=True)
     prompt_transcript = await _build_prompt_transcript(
         session=session,
         conversation=conversation,
-        parent_id=parent_id,
+        parent_id=target_user.parent_id,
+        user_message=target_user,
         context_mode=payload.context_mode,
         context_root_message_id=context_root_message_id,
         context_message_count=payload.context_message_count,
@@ -1179,6 +1067,7 @@ async def _prepare_regeneration(
         "adapter_id": provider_instance.default_adapter_id if provider_instance else None,
         "provider_name_snapshot": provider_instance.display_name if provider_instance else None,
         "target_message": target_message,
+        "user_message": target_user,
         "temperature": temperature,
         "mcp_tools": mcp_tools,
         "mcp_tool_map": {str(item["model_tool_name"]): item for item in mcp_tools},
@@ -1201,7 +1090,7 @@ async def _initialize_trace_for_context(
 
     agent_run = AgentRun(
         conversation_id=conversation.id,
-        user_message_id=user_message.id if user_message is not None else None,
+        user_message_id=(user_message or context.get("user_message")).id if (user_message or context.get("user_message")) is not None else None,
         assistant_message_id=assistant_message.id,
         provider=str(context["provider"]),
         provider_instance_id=context.get("provider_instance_id"),
@@ -1216,6 +1105,18 @@ async def _initialize_trace_for_context(
     session.add(agent_run)
     await session.flush()
     context["agent_run"] = agent_run
+    image_ids = sorted({part.attachment_id for item in context["prompt_transcript"] for part in item.parts if isinstance(part, ImagePart)})
+    if image_ids:
+        if _adapter_id_for_generation(provider=str(context["provider"]), context=context) not in OPENAI_ADAPTERS | ANTHROPIC_ADAPTERS:
+            raise AppError(422, "VISION_UNSUPPORTED", "当前服务商协议不支持图片")
+        rows = await protect_run_attachments(session=session, user_id=conversation.user_id, run=agent_run, ids=image_ids)
+        ready_ids = {row.id for row in rows}
+        from dataclasses import replace
+        context["prompt_transcript"] = [replace(item, parts=tuple(
+            part if not isinstance(part, ImagePart) or part.attachment_id in ready_ids
+            else TextPart(f"[图片附件 {part.attachment_id} 已移除，图片内容不可用]")
+            for part in item.parts)) for item in context["prompt_transcript"]]
+    await session.flush()
     _trace_state(context)
 
     await _record_run_event(
@@ -1248,78 +1149,63 @@ async def _execute_background_run(payload: dict[str, Any]) -> None:
         run = await session.get(AgentRun, int(payload["run_id"]))
         if run is None or run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
             return
-
         conversation = await session.get(Conversation, int(payload["conversation_id"]))
         assistant_message = await session.get(Message, int(payload["assistant_message_id"]))
         if conversation is None or assistant_message is None:
             return
-
         branch_id = payload.get("branch_id")
         branch = await session.get(ConversationBranch, int(branch_id)) if branch_id is not None else None
         context = {
-            "agent_run": run,
-            "assistant_message": assistant_message,
-            "branch": branch,
-            "conversation": conversation,
-            "provider": payload["provider"],
-            "adapter_id": payload.get("adapter_id") or run.adapter_id,
-            "model": payload["model"],
-            "temperature": payload.get("temperature"),
-            "max_tokens": payload.get("max_tokens"),
-            "prompt_transcript": payload.get("prompt_transcript") or [],
-            "activate_branch": bool(payload.get("activate_branch", True)),
+            "agent_run": run, "assistant_message": assistant_message, "branch": branch, "conversation": conversation,
+            "provider": payload["provider"], "provider_instance_id": run.provider_instance_id, "adapter_id": payload.get("adapter_id") or run.adapter_id,
+            "model": payload["model"], "temperature": payload.get("temperature"), "max_tokens": payload.get("max_tokens"),
+            "prompt_transcript": payload.get("prompt_transcript") or [], "activate_branch": bool(payload.get("activate_branch", True)),
             "mcp_tools": payload.get("mcp_tools") or [],
             "mcp_tool_map": {str(item["model_tool_name"]): item for item in (payload.get("mcp_tools") or []) if isinstance(item, dict)},
+            "attachment_reader": AttachmentReader(session=session, user_id=int(payload["user_id"])),
+            "execution_active": True, "failure_leaf_message_id": int(payload["failure_leaf_message_id"]),
         }
-
+        # Finish the initial read transaction before any lengthy provider work.
+        await session.commit()
+        result_status = RUN_STATUS_COMPLETED
+        reply_content, usage, error = "", None, None
         try:
-            reply_content, usage = await _collect_reply_from_stream(
-                session=session,
-                context=context,
-                user_id=int(payload["user_id"]),
-            )
+            if not agent_runner.execution_ready(run.id) or _run_metadata(run).get("cancel_requested"):
+                raise asyncio.CancelledError()
+            reply_content, usage = await _collect_reply_from_stream(session=session, context=context, user_id=int(payload["user_id"]))
         except asyncio.CancelledError:
-            status = MessageStatus.PARTIAL if assistant_message.content else MessageStatus.FAILED
-            await _mark_cancelled(
-                session=session,
-                context=context,
-                conversation=conversation,
-                branch=branch,
-                assistant_message=assistant_message,
-                message="Run cancelled while execution was still in progress.",
-                status=status,
-                leaf_message_id=int(payload["failure_leaf_message_id"]),
-                partial_content=assistant_message.content or "",
-                activate_branch=bool(payload.get("activate_branch", True)),
-            )
-            return
+            result_status = RUN_STATUS_CANCELLED
         except Exception as exc:
-            app_error = _to_app_error(exc)
-            status = MessageStatus.PARTIAL if assistant_message.content else MessageStatus.FAILED
-            await _mark_failed(
-                session=session,
-                context=context,
-                conversation=conversation,
-                branch=branch,
-                assistant_message=assistant_message,
-                message=app_error.message,
-                status=status,
-                leaf_message_id=int(payload["failure_leaf_message_id"]),
-                partial_content=assistant_message.content or "",
-                activate_branch=bool(payload.get("activate_branch", True)),
-            )
+            result_status = RUN_STATUS_FAILED
+            error = _to_app_error(exc)
+        finally:
+            agent_runner.execution_stopping(int(payload["run_id"]))
+            context["execution_active"] = False
+            # Provider generators have already been closed by _collect_reply.
+            # Runtime tools must finish cleanup before a terminal commit unprotects images.
+            await close_runtime_sessions(context)
+    # Use a new transaction/session for termination: a cancelled SQL operation
+    # or failed flush can poison the execution transaction. Only committed
+    # message events are reloaded; no stale ORM snapshot can undo cancellation.
+    async with AsyncSessionLocal() as session:
+        run = await session.get(AgentRun, int(payload["run_id"]))
+        conversation = await session.get(Conversation, int(payload["conversation_id"]))
+        assistant_message = await session.get(Message, int(payload["assistant_message_id"]))
+        if run is None or conversation is None or assistant_message is None:
             return
-
-        await _finalize_success(
-            session=session,
-            context=context,
-            conversation=conversation,
-            branch=branch,
-            assistant_message=assistant_message,
-            reply_content=reply_content,
-            usage=usage,
-            activate_branch=bool(payload.get("activate_branch", True)),
-        )
+        branch = await session.get(ConversationBranch, int(branch_id)) if branch_id is not None else None
+        context.update(agent_run=run, conversation=conversation, assistant_message=assistant_message, branch=branch)
+        context.pop("attachment_reader", None)
+        if result_status == RUN_STATUS_COMPLETED:
+            await _finalize_success(session=session, context=context, conversation=conversation, branch=branch,
+                assistant_message=assistant_message, reply_content=reply_content, usage=usage, activate_branch=context["activate_branch"])
+        else:
+            if error is not None:
+                context["run_error"] = error
+            terminal = _mark_cancelled if result_status == RUN_STATUS_CANCELLED else _mark_failed
+            await terminal(session=session, context=context, conversation=conversation, branch=branch, assistant_message=assistant_message,
+                message=error.message if error else "生成已取消", status=MessageStatus.PARTIAL if assistant_message.content else MessageStatus.FAILED,
+                leaf_message_id=int(payload["failure_leaf_message_id"]), partial_content=assistant_message.content or "", activate_branch=context["activate_branch"])
 
 
 async def stream_run_events(
@@ -1746,11 +1632,17 @@ async def _record_run_event(
     payload: dict[str, Any],
     step_id: str | None = None,
     tool_call_ref: str | None = None,
+    commit: bool = True,
 ) -> RunEvent:
     agent_run = context.get("agent_run")
     assistant_message = context["assistant_message"]
     assert isinstance(agent_run, AgentRun)
     assert isinstance(assistant_message, Message)
+    agent_run = await _lock_run(session, agent_run.id)
+    context["agent_run"] = agent_run
+    if context.get("execution_active") and event_type not in {"run.cancelled", "run.failed", "tool_call.failed"}:
+        if agent_run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED} or _run_metadata(agent_run).get("cancel_requested"):
+            raise asyncio.CancelledError()
 
     agent_run.last_sequence += 1
     event = RunEvent(
@@ -1775,7 +1667,8 @@ async def _record_run_event(
         tool_call_ref=tool_call_ref,
         sequence=event.sequence,
     )
-    await session.commit()
+    if commit:
+        await session.commit()
     return event
 
 
@@ -2016,6 +1909,7 @@ async def _build_prompt_transcript(
     conversation: Conversation,
     parent_id: int | None,
     user_content: str | None = None,
+    user_message: Message | None = None,
     context_mode: str = "full",
     context_root_message_id: int | None = None,
     context_message_count: int | None = None,
@@ -2072,7 +1966,9 @@ async def _build_prompt_transcript(
         context_messages.extend(lineage_messages)
 
     transcript.extend(await build_message_history_transcript(session=session, messages=context_messages))
-    if user_content is not None:
+    if user_message is not None:
+        transcript.extend(await build_message_history_transcript(session=session, messages=[user_message]))
+    elif user_content is not None:
         transcript.append(user_text_item(user_content))
     return transcript
 
@@ -2202,7 +2098,7 @@ async def _collect_reply_from_stream(
         nonlocal usage
         usage = value
 
-    async for chunk in _stream_reply(
+    async with aclosing(_stream_reply(
         session=session,
         context=context,
         user_id=user_id,
@@ -2213,83 +2109,84 @@ async def _collect_reply_from_stream(
         max_tokens=context["max_tokens"],
         prompt_transcript=context["prompt_transcript"],
         usage_callback=capture_usage,
-    ):
-        chunk_type = str(chunk.get("type") or "")
-        if chunk_type == "content":
-            content = str(chunk.get("content") or "")
-            if content:
-                round_buffer += content
-                await _record_text_delta(session=session, context=context, text=content)
-        elif chunk_type == "content_retracted":
-            # This round ended in a tool_use: the streamed text was only a
-            # tool-round preamble, not part of the final answer. Drop it from
-            # parts_json (the retained commentary/model_text paths keep it
-            # visible in the RunView and in the model transcript).
-            retracted_text = str(chunk.get("content") or "")
-            if retracted_text:
-                await _record_text_retraction(session=session, context=context, text=retracted_text)
-            round_buffer = ""
-        elif chunk_type == "round_commentary":
-            text = str(chunk.get("text") or "")
-            if text:
-                pending_commentary = context.setdefault("pending_commentary", [])
-                assert isinstance(pending_commentary, list)
-                pending_commentary.append(text)
-        elif chunk_type == "thinking_started":
-            thinking_id = str(chunk.get("thinking_id") or "")
-            if thinking_id:
-                await _record_thinking_event(
-                    session=session,
-                    context=context,
-                    event_type="thinking.created",
-                    thinking_id=thinking_id,
-                    text=str(chunk.get("text") or ""),
-                )
-        elif chunk_type == "thinking_delta":
-            thinking_id = str(chunk.get("thinking_id") or "")
-            text = str(chunk.get("text") or "")
-            if thinking_id and text:
-                await _record_thinking_event(
-                    session=session,
-                    context=context,
-                    event_type="thinking.delta",
-                    thinking_id=thinking_id,
-                    text=text,
-                )
-        elif chunk_type == "thinking_completed":
-            thinking_id = str(chunk.get("thinking_id") or "")
-            if thinking_id:
-                await _record_thinking_event(
-                    session=session,
-                    context=context,
-                    event_type="thinking.completed",
-                    thinking_id=thinking_id,
-                )
-        elif chunk_type == "thinking_redacted":
-            thinking_id = str(chunk.get("thinking_id") or "")
-            if thinking_id:
-                await _record_thinking_event(
-                    session=session,
-                    context=context,
-                    event_type="thinking.redacted",
-                    thinking_id=thinking_id,
-                    redacted=True,
-                )
-        elif chunk_type == "commentary":
-            step_id = str(chunk.get("step_id") or "") or None
-            if step_id:
-                await _record_commentary(
-                    session=session,
-                    context=context,
-                    step_id=step_id,
-                    text=str(chunk.get("content") or ""),
-                    source=str(chunk.get("source") or "model"),
-                    style=str(chunk.get("style") or "progress"),
-                )
-        elif chunk_type == "tool":
-            tool = chunk.get("tool")
-            if isinstance(tool, dict):
-                await _record_tool_event(session=session, context=context, tool=tool)
+    )) as reply_stream:
+        async for chunk in reply_stream:
+            chunk_type = str(chunk.get("type") or "")
+            if chunk_type == "content":
+                content = str(chunk.get("content") or "")
+                if content:
+                    round_buffer += content
+                    await _record_text_delta(session=session, context=context, text=content)
+            elif chunk_type == "content_retracted":
+                # This round ended in a tool_use: the streamed text was only a
+                # tool-round preamble, not part of the final answer. Drop it from
+                # parts_json (the retained commentary/model_text paths keep it
+                # visible in the RunView and in the model transcript).
+                retracted_text = str(chunk.get("content") or "")
+                if retracted_text:
+                    await _record_text_retraction(session=session, context=context, text=retracted_text)
+                round_buffer = ""
+            elif chunk_type == "round_commentary":
+                text = str(chunk.get("text") or "")
+                if text:
+                    pending_commentary = context.setdefault("pending_commentary", [])
+                    assert isinstance(pending_commentary, list)
+                    pending_commentary.append(text)
+            elif chunk_type == "thinking_started":
+                thinking_id = str(chunk.get("thinking_id") or "")
+                if thinking_id:
+                    await _record_thinking_event(
+                        session=session,
+                        context=context,
+                        event_type="thinking.created",
+                        thinking_id=thinking_id,
+                        text=str(chunk.get("text") or ""),
+                    )
+            elif chunk_type == "thinking_delta":
+                thinking_id = str(chunk.get("thinking_id") or "")
+                text = str(chunk.get("text") or "")
+                if thinking_id and text:
+                    await _record_thinking_event(
+                        session=session,
+                        context=context,
+                        event_type="thinking.delta",
+                        thinking_id=thinking_id,
+                        text=text,
+                    )
+            elif chunk_type == "thinking_completed":
+                thinking_id = str(chunk.get("thinking_id") or "")
+                if thinking_id:
+                    await _record_thinking_event(
+                        session=session,
+                        context=context,
+                        event_type="thinking.completed",
+                        thinking_id=thinking_id,
+                    )
+            elif chunk_type == "thinking_redacted":
+                thinking_id = str(chunk.get("thinking_id") or "")
+                if thinking_id:
+                    await _record_thinking_event(
+                        session=session,
+                        context=context,
+                        event_type="thinking.redacted",
+                        thinking_id=thinking_id,
+                        redacted=True,
+                    )
+            elif chunk_type == "commentary":
+                step_id = str(chunk.get("step_id") or "") or None
+                if step_id:
+                    await _record_commentary(
+                        session=session,
+                        context=context,
+                        step_id=step_id,
+                        text=str(chunk.get("content") or ""),
+                        source=str(chunk.get("source") or "model"),
+                        style=str(chunk.get("style") or "progress"),
+                    )
+            elif chunk_type == "tool":
+                tool = chunk.get("tool")
+                if isinstance(tool, dict):
+                    await _record_tool_event(session=session, context=context, tool=tool)
 
     accumulated += round_buffer
     return accumulated, usage
@@ -2316,6 +2213,7 @@ async def _generate_reply(
     prompt_transcript: list[CanonicalTranscriptItem],
 ) -> dict[str, object]:
     tool_executor = _build_context_tool_executor(session=session, context=context)
+    provider_instance_id = (context or {}).get("provider_instance_id", conversation.provider_instance_id)
     if provider == "mock":
         return {
             "content": generate_mock_reply(
@@ -2328,8 +2226,8 @@ async def _generate_reply(
     adapter_id = _adapter_id_for_generation(provider=provider, context=context)
     if adapter_id in OPENAI_ADAPTERS:
         api_key = (
-            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
-            if conversation.provider_instance_id is not None
+            (await get_generation_connection(session, user_id, provider_instance_id))[1]
+            if provider_instance_id is not None
             else await get_preferred_api_key(session=session, user_id=user_id, provider="openai")
         )
         create_reply = create_openai_responses_reply if adapter_id == "openai_responses" else create_openai_reply
@@ -2337,6 +2235,7 @@ async def _generate_reply(
             api_key=api_key,
             model=model,
             transcript=prompt_transcript,
+            attachment_reader=(context or {}).get("attachment_reader"),
             temperature=temperature,
             max_tokens=max_tokens,
             tools=_runtime_tools_for_context(context),
@@ -2348,8 +2247,8 @@ async def _generate_reply(
         }
     if adapter_id in ANTHROPIC_ADAPTERS:
         api_key = (
-            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
-            if conversation.provider_instance_id is not None
+            (await get_generation_connection(session, user_id, provider_instance_id))[1]
+            if provider_instance_id is not None
             else await get_preferred_api_key(session=session, user_id=user_id, provider="anthropic")
         )
         return {
@@ -2357,6 +2256,7 @@ async def _generate_reply(
                 api_key=api_key,
                 model=model,
                 transcript=prompt_transcript,
+                attachment_reader=(context or {}).get("attachment_reader"),
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=_runtime_tools_for_context(context),
@@ -2381,6 +2281,7 @@ async def _stream_reply(
     usage_callback=None,
 ) -> AsyncIterator[dict[str, object]]:
     tool_executor = _build_context_tool_executor(session=session, context=context)
+    provider_instance_id = (context or {}).get("provider_instance_id", conversation.provider_instance_id)
     if provider == "mock":
         yield {
             "type": "content",
@@ -2394,8 +2295,8 @@ async def _stream_reply(
     adapter_id = _adapter_id_for_generation(provider=provider, context=context)
     if adapter_id in OPENAI_ADAPTERS:
         api_key = (
-            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
-            if conversation.provider_instance_id is not None
+            (await get_generation_connection(session, user_id, provider_instance_id))[1]
+            if provider_instance_id is not None
             else await get_preferred_api_key(session=session, user_id=user_id, provider="openai")
         )
         async def emit_tool_event(tool: dict[str, object]) -> None:
@@ -2403,95 +2304,58 @@ async def _stream_reply(
                 await _record_tool_event(session=session, context=context, tool=tool)
 
         stream_reply = stream_openai_responses_reply if adapter_id == "openai_responses" else stream_openai_reply
-        async for chunk in stream_reply(
+        async with aclosing(stream_reply(
             api_key=api_key,
             model=model,
             transcript=prompt_transcript,
+            attachment_reader=(context or {}).get("attachment_reader"),
             temperature=temperature,
             max_tokens=max_tokens,
             tools=_runtime_tools_for_context(context),
             tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
             usage_callback=usage_callback,
-        ):
-            yield chunk
+        )) as provider_stream:
+            async for chunk in provider_stream:
+                yield chunk
         return
     if adapter_id in ANTHROPIC_ADAPTERS:
         api_key = (
-            (await get_generation_connection(session, user_id, conversation.provider_instance_id))[1]
-            if conversation.provider_instance_id is not None
+            (await get_generation_connection(session, user_id, provider_instance_id))[1]
+            if provider_instance_id is not None
             else await get_preferred_api_key(session=session, user_id=user_id, provider="anthropic")
         )
         async def emit_tool_event(tool: dict[str, object]) -> None:
             if context is not None:
                 await _record_tool_event(session=session, context=context, tool=tool)
 
-        async for chunk in stream_anthropic_reply(
+        async with aclosing(stream_anthropic_reply(
             api_key=api_key,
             model=model,
             transcript=prompt_transcript,
+            attachment_reader=(context or {}).get("attachment_reader"),
             temperature=temperature,
             max_tokens=max_tokens,
             tools=_runtime_tools_for_context(context),
             tool_executor=tool_executor,
             tool_event_callback=emit_tool_event,
             usage_callback=usage_callback,
-        ):
-            yield chunk
+        )) as provider_stream:
+            async for chunk in provider_stream:
+                yield chunk
         return
     raise AppError(status_code=422, code="VALIDATION_ERROR", message=f"暂不支持 adapter '{adapter_id}'")
 
 
 async def _finalize_success(
-    *,
-    session: AsyncSession,
-    context: dict[str, object],
-    conversation: Conversation,
-    branch: ConversationBranch | None,
-    assistant_message: Message,
-    reply_content: str,
-    usage: dict[str, int] | None,
-    activate_branch: bool,
+    *, session: AsyncSession, context: dict[str, object], conversation: Conversation,
+    branch: ConversationBranch | None, assistant_message: Message, reply_content: str,
+    usage: dict[str, int] | None, activate_branch: bool,
 ) -> None:
-    current_parts = parts_from_message(assistant_message.parts_json)
-    completed_parts = _merge_reply_content_into_parts(parts=current_parts, reply_content=reply_content)
-    if completed_parts != current_parts or assistant_message.parts_json is None:
-        assistant_message.parts_json = json_dumps(completed_parts)
-        assistant_message.parts_schema_version = PARTS_SCHEMA_VERSION
-        assistant_message.parts_updated_at = utcnow_naive()
-    await _record_phase_change(session=session, context=context, phase="finalizing")
-    await _record_run_event(
-        session=session,
-        context=context,
-        event_type="message.completed",
-        payload={
-            "status": MessageStatus.COMPLETED.value,
-            "content": reply_content,
-            "parts": completed_parts,
-            "parts_schema_version": assistant_message.parts_schema_version,
-        },
-    )
-    assistant_message.content = reply_content
-    assistant_message.status = MessageStatus.COMPLETED
-    assistant_message.error_message = None
-    assistant_message.prompt_tokens = usage.get("prompt_tokens") if usage is not None else None
-    assistant_message.completion_tokens = usage.get("completion_tokens") if usage is not None else None
-    assistant_message.total_tokens = usage.get("total_tokens") if usage is not None else None
-    agent_run = context.get("agent_run")
-    if isinstance(agent_run, AgentRun):
-        agent_run.status = RUN_STATUS_COMPLETED
-        agent_run.completed_at = utcnow_naive()
-        agent_run.error_message = None
-    if branch is not None:
-        branch.current_leaf_message_id = assistant_message.id
-    if activate_branch:
-        if branch is not None:
-            conversation.current_branch_id = branch.id
-        conversation.current_leaf_message_id = assistant_message.id
-    await session.commit()
-    await session.refresh(assistant_message)
-    await session.refresh(conversation)
     await close_runtime_sessions(context)
+    await _commit_terminal(session=session, context=context, conversation=conversation, branch=branch, assistant_message=assistant_message,
+        run_status=RUN_STATUS_COMPLETED, content=reply_content, usage=usage, error_message=None,
+        leaf_message_id=assistant_message.id, activate_branch=activate_branch)
 
 
 def _merge_reply_content_into_parts(
@@ -2531,101 +2395,83 @@ def _merge_reply_content_into_parts(
 
 
 async def _mark_failed(
-    *,
-    session: AsyncSession,
-    context: dict[str, object] | None,
-    conversation: Conversation,
-    branch: ConversationBranch | None,
-    assistant_message: Message,
-    message: str,
-    status: MessageStatus,
-    leaf_message_id: int,
-    activate_branch: bool,
-    partial_content: str = "",
+    *, session: AsyncSession, context: dict[str, object] | None, conversation: Conversation,
+    branch: ConversationBranch | None, assistant_message: Message, message: str, status: MessageStatus,
+    leaf_message_id: int, activate_branch: bool, partial_content: str = "",
 ) -> None:
-    if context is not None:
-        pending_tool = _find_pending_tool_call(context)
-        if pending_tool is not None:
-            await _record_run_event(
-                session=session,
-                context=context,
-                event_type="tool_call.failed",
-                step_id=str(pending_tool.get("step_id") or "") or None,
-                tool_call_ref=str(pending_tool.get("tool_call_ref") or ""),
-                payload={
-                    "step_id": str(pending_tool.get("step_id") or "") or None,
-                    "tool_name": str(pending_tool.get("tool_name") or ""),
-                    "error_message": message,
-                },
-            )
-        await _record_run_event(
-            session=session,
-            context=context,
-            event_type="run.failed",
-            payload={"error_message": message, "status": status.value},
-        )
-    assistant_message.content = partial_content
-    assistant_message.status = status
-    assistant_message.error_message = message
-    agent_run = context.get("agent_run") if context is not None else None
-    if isinstance(agent_run, AgentRun):
-        agent_run.status = RUN_STATUS_FAILED
-        agent_run.completed_at = utcnow_naive()
-        agent_run.error_message = message
-    if branch is not None:
-        branch.current_leaf_message_id = leaf_message_id
-    if activate_branch:
-        if branch is not None:
-            conversation.current_branch_id = branch.id
-        conversation.current_leaf_message_id = leaf_message_id
-    await session.commit()
-    await session.refresh(assistant_message)
-    await session.refresh(conversation)
     await close_runtime_sessions(context or {})
+    await _commit_terminal(session=session, context=context, conversation=conversation, branch=branch, assistant_message=assistant_message,
+        run_status=RUN_STATUS_FAILED, content=partial_content, usage=None, error_message=message,
+        leaf_message_id=leaf_message_id, activate_branch=activate_branch)
 
 
 async def _mark_cancelled(
-    *,
-    session: AsyncSession,
-    context: dict[str, object] | None,
-    conversation: Conversation,
-    branch: ConversationBranch | None,
-    assistant_message: Message,
-    message: str,
-    status: MessageStatus,
-    leaf_message_id: int,
-    activate_branch: bool,
-    partial_content: str = "",
+    *, session: AsyncSession, context: dict[str, object] | None, conversation: Conversation,
+    branch: ConversationBranch | None, assistant_message: Message, message: str, status: MessageStatus,
+    leaf_message_id: int, activate_branch: bool, partial_content: str = "",
 ) -> None:
-    if context is not None:
-        pending_tool = _find_pending_tool_call(context)
-        if pending_tool is not None:
-            await _record_run_event(
-                session=session,
-                context=context,
-                event_type="tool_call.failed",
-                step_id=str(pending_tool.get("step_id") or "") or None,
-                tool_call_ref=str(pending_tool.get("tool_call_ref") or ""),
-                payload={
-                    "step_id": str(pending_tool.get("step_id") or "") or None,
-                    "tool_name": str(pending_tool.get("tool_name") or ""),
-                    "error_message": message,
-                },
-            )
-        await _record_run_event(
-            session=session,
-            context=context,
-            event_type="run.cancelled",
-            payload={"error_message": message, "status": status.value},
-        )
-    assistant_message.content = partial_content
-    assistant_message.status = status
-    assistant_message.error_message = message
-    agent_run = context.get("agent_run") if context is not None else None
-    if isinstance(agent_run, AgentRun):
-        agent_run.status = RUN_STATUS_CANCELLED
-        agent_run.completed_at = utcnow_naive()
-        agent_run.error_message = message
+    await close_runtime_sessions(context or {})
+    await _commit_terminal(session=session, context=context, conversation=conversation, branch=branch, assistant_message=assistant_message,
+        run_status=RUN_STATUS_CANCELLED, content=partial_content, usage=None, error_message=message,
+        leaf_message_id=leaf_message_id, activate_branch=activate_branch)
+
+
+async def _commit_terminal(
+    *, session: AsyncSession, context: dict[str, object] | None, conversation: Conversation,
+    branch: ConversationBranch | None, assistant_message: Message, run_status: str,
+    content: str, usage: dict[str, int] | None, error_message: str | None,
+    leaf_message_id: int, activate_branch: bool,
+) -> None:
+    context = context or {}
+    run = context.get("agent_run")
+    if isinstance(run, AgentRun):
+        # Conversation first matches the deletion lock order. No provider
+        # buffers/tools remain alive while terminal records are committed.
+        await lock_owned_conversation(session=session, user_id=conversation.user_id, conversation_id=conversation.id)
+        run = await _lock_run(session, run.id)
+        context["agent_run"] = run
+        context["execution_active"] = False
+        if run.status in {RUN_STATUS_COMPLETED, RUN_STATUS_FAILED, RUN_STATUS_CANCELLED}:
+            await session.rollback()
+            return
+        if _run_metadata(run).get("cancel_requested"):
+            run_status = RUN_STATUS_CANCELLED
+            error_message = "生成已取消"
+            content = assistant_message.content or ""
+            leaf_message_id = int(context.get("failure_leaf_message_id") or run.user_message_id or assistant_message.parent_id or assistant_message.id)
+    if run_status == RUN_STATUS_COMPLETED:
+        status = MessageStatus.COMPLETED
+        parts = _merge_reply_content_into_parts(parts=parts_from_message(assistant_message.parts_json), reply_content=content)
+        assistant_message.parts_json = json_dumps(parts)
+        assistant_message.parts_schema_version = PARTS_SCHEMA_VERSION
+        assistant_message.parts_updated_at = utcnow_naive()
+        if isinstance(run, AgentRun):
+            await _record_run_event(session=session, context=context, event_type="message.completed",
+                payload={"status": status.value, "content": content, "parts": parts, "parts_schema_version": PARTS_SCHEMA_VERSION}, commit=False)
+    else:
+        status = MessageStatus.PARTIAL if content else MessageStatus.FAILED
+        if isinstance(run, AgentRun):
+            pending_tool = _find_pending_tool_call(context)
+            if pending_tool:
+                await _record_run_event(session=session, context=context, event_type="tool_call.failed",
+                    step_id=str(pending_tool.get("step_id") or "") or None, tool_call_ref=str(pending_tool.get("tool_call_ref") or ""),
+                    payload={"tool_name": str(pending_tool.get("tool_name") or ""), "error_message": error_message}, commit=False)
+            await _record_run_event(session=session, context=context, event_type="run.cancelled" if run_status == RUN_STATUS_CANCELLED else "run.failed",
+                payload={"error_message": error_message, "status": status.value}, commit=False)
+    assistant_message.content, assistant_message.status, assistant_message.error_message = content, status, error_message
+    if usage is not None:
+        assistant_message.prompt_tokens = usage.get("prompt_tokens")
+        assistant_message.completion_tokens = usage.get("completion_tokens")
+        assistant_message.total_tokens = usage.get("total_tokens")
+    if isinstance(run, AgentRun):
+        metadata = _run_metadata(run)
+        metadata["phase"] = run_status
+        metadata.pop("pending_approval", None)
+        error = context.get("run_error")
+        if isinstance(error, AppError):
+            metadata.update(error_code=error.code, error_status=error.status_code, error_details=error.details)
+        _set_run_metadata(run, metadata)
+        run.status, run.completed_at, run.error_message = run_status, utcnow_naive(), error_message
     if branch is not None:
         branch.current_leaf_message_id = leaf_message_id
     if activate_branch:
@@ -2635,7 +2481,6 @@ async def _mark_cancelled(
     await session.commit()
     await session.refresh(assistant_message)
     await session.refresh(conversation)
-    await close_runtime_sessions(context or {})
 
 
 async def _cancel_loaded_run(
@@ -2693,6 +2538,7 @@ async def _build_send_response(
     await session.refresh(assistant_message)
     await session.refresh(conversation)
     sibling_map = _build_sibling_meta_map(history)
+    await _hydrate_message_attachments(session, [user_message, assistant_message])
     return MessageSendResponse(
         conversation_id=conversation.id,
         current_branch_id=conversation.current_branch_id,
@@ -2728,13 +2574,17 @@ async def _ensure_message_belongs_to_conversation(
     session: AsyncSession,
     conversation_id: int,
     message_id: int,
+    current_read: bool = False,
 ) -> Message:
-    message = await session.scalar(
+    stmt = (
         select(Message).where(
             Message.id == message_id,
             Message.conversation_id == conversation_id,
         )
     )
+    if current_read:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    message = await session.scalar(stmt)
     if message is None:
         raise AppError(status_code=400, code="VALIDATION_ERROR", message="message_id 不属于当前会话")
     return message
@@ -2744,13 +2594,19 @@ async def _load_conversation_history(
     *,
     session: AsyncSession,
     conversation_id: int,
+    current_read: bool = False,
 ) -> list[Message]:
-    result = await session.scalars(
+    stmt = (
         select(Message)
         .where(Message.conversation_id == conversation_id)
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
-    return list(result.all())
+    if current_read:
+        stmt = stmt.with_for_update().execution_options(populate_existing=True)
+    result = await session.scalars(stmt)
+    messages = list(result.all())
+    await _hydrate_message_attachments(session, messages)
+    return messages
 
 
 async def _load_current_branch(
@@ -2944,6 +2800,7 @@ def _serialize_message_node(
     parsed_parts = parts_from_message(message.parts_json) if message.parts_json is not None else None
     return MessageNodeResponse.model_validate(message).model_copy(
         update={
+            "attachments": [AttachmentResponse.model_validate(row) for row in getattr(message, "_attachment_metadata", [])],
             "parts": parsed_parts,
             "parts_schema_version": message.parts_schema_version,
             "sibling_index": sibling_index,
@@ -2969,7 +2826,8 @@ def _serialize_message_tree_node(
         conversation_id=message.conversation_id,
         parent_id=message.parent_id,
         role=message.role,
-        preview=_message_tree_preview(message.content),
+        preview=("图片消息" if not message.content.strip() and getattr(message, "_attachment_metadata", []) else _message_tree_preview(message.content)),
+        attachment_count=len(getattr(message, "_attachment_metadata", [])),
         status=message.status,
         error_message=message.error_message,
         provider=message.provider,
@@ -3189,4 +3047,40 @@ def _latest_user_content(*, history: list[Message], parent_id: int | None) -> st
 def _to_app_error(exc: Exception) -> AppError:
     if isinstance(exc, AppError):
         return exc
-    return AppError(status_code=500, code="INTERNAL_ERROR", message=str(exc) or "未预期的服务端错误")
+    logger.error("Generation failed (%s)", type(exc).__name__)
+    return AppError(status_code=500, code="INTERNAL_ERROR", message="模型执行失败，请稍后重试")
+
+
+async def _hydrate_message_attachments(session: AsyncSession, messages: list[Message]) -> None:
+    attachment_map = await load_message_attachments(session=session, message_ids=[item.id for item in messages])
+    for item in messages:
+        item._attachment_metadata = [attachment_response(row) for row in attachment_map.get(item.id, [])]
+
+
+async def _lock_run(session: AsyncSession, run_id: int) -> AgentRun:
+    with session.no_autoflush:
+        run = await session.scalar(select(AgentRun).where(AgentRun.id == run_id).with_for_update().execution_options(populate_existing=True))
+    if run is None:
+        raise AppError(404, "NOT_FOUND", "运行不存在")
+    return run
+
+
+def _start_generation_run(context: dict[str, Any], *, user_id: int, failure_leaf_message_id: int) -> None:
+    run = context["agent_run"]
+    agent_runner.start(run.id, _execute_background_run({
+        "run_id": run.id, "user_id": user_id, "conversation_id": context["conversation"].id,
+        "assistant_message_id": context["assistant_message"].id,
+        "branch_id": context["branch"].id if context.get("branch") else None,
+        "provider": context["provider"], "adapter_id": context.get("adapter_id"),
+        "model": context["model"], "temperature": context["temperature"], "max_tokens": context["max_tokens"],
+        "prompt_transcript": context["prompt_transcript"], "mcp_tools": context["mcp_tools"],
+        "activate_branch": context["activate_branch"], "failure_leaf_message_id": failure_leaf_message_id,
+    }))
+
+
+def _raise_run_error(run: AgentRun) -> None:
+    if run.status == RUN_STATUS_FAILED:
+        metadata = _run_metadata(run)
+        raise AppError(int(metadata.get("error_status", 502)), str(metadata.get("error_code", "MODEL_ERROR")), run.error_message or "模型请求失败", metadata.get("error_details"))
+    if run.status == RUN_STATUS_CANCELLED:
+        raise AppError(409, "RUN_CANCELLED", "生成已取消，可对已保存的用户消息重新生成")

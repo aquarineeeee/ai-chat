@@ -1,4 +1,5 @@
 from app.models.agent_run import AgentRun
+from app.models.attachment import Attachment, AttachmentStatus, MessageAttachment
 from app.models.api_key import ApiKey
 from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
@@ -11,6 +12,9 @@ from app.models.mcp import McpServer, McpTool
 from app.models.project import Project, ProjectMcpTool, ConversationMcpTool
 
 __all__ = [
+    "Attachment",
+    "AttachmentStatus",
+    "MessageAttachment",
     "AgentRun",
     "ApiKey",
     "Conversation",

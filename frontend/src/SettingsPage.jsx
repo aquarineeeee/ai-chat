@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ArrowLeft, Check, ChevronDown, ChevronUp, FolderKanban, FlaskConical, Loader2, LogOut, Moon, Plus, Power, ShieldCheck, Sun, Trash2, User, Wrench, X } from 'lucide-react'
+import { ArrowLeft, Check, ChevronDown, ChevronUp, FlaskConical, Loader2, LogOut, Moon, Plus, Power, ShieldCheck, Sun, Trash2, User, Wrench, X } from 'lucide-react'
 import ApiKeysModal from './components/ApiKeysModal'
 import { PALETTES } from './ThemeContext'
 import { api } from './api'

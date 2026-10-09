@@ -143,7 +143,7 @@ class ConversationExportTests(unittest.TestCase):
         )
         payload = json.loads(content)
 
-        self.assertEqual(payload["schema_version"], 2)
+        self.assertEqual(payload["schema_version"], 3)
         self.assertEqual(payload["type"], "ai-chat.conversation_export")
         self.assertEqual(payload["scope"], "all_branches")
         self.assertEqual(payload["conversation"]["temperature"], "0.70")

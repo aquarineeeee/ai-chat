@@ -12,7 +12,7 @@ class ConversationTemperatureTests(IsolatedAsyncioTestCase):
         conversation = SimpleNamespace(id=1, temperature=Decimal("0.70"), current_branch_id=None)
         session = AsyncMock()
 
-        with patch("app.services.conversations.get_conversation", AsyncMock(return_value=conversation)):
+        with patch("app.services.conversations.lock_owned_conversation", AsyncMock(return_value=conversation)):
             updated = await update_conversation(
                 session=session,
                 user_id=1,

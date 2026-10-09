@@ -208,7 +208,9 @@ class BranchRepairTests(unittest.IsolatedAsyncioTestCase):
         session = FakeDeleteSession(branches=[main_branch, target_branch, next_branch], messages=[])
 
         with (
-            patch("app.services.branches._get_user_conversation", AsyncMock(return_value=conversation)),
+            patch("app.services.branches.lock_owned_conversation", AsyncMock(return_value=conversation)),
+            patch("app.services.branches.mark_message_attachments_deleting", AsyncMock(return_value=[])),
+            patch("app.services.branches.process_deletions", AsyncMock()),
             patch("app.services.branches.get_conversation_branch", AsyncMock(return_value=target_branch)),
             patch("app.services.branches._load_conversation_branches", AsyncMock(return_value=[main_branch, target_branch, next_branch])),
             patch("app.services.branches._load_conversation_messages", AsyncMock(return_value=[])),

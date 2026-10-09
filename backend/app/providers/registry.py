@@ -9,6 +9,7 @@ class AdapterDescriptor:
     id: str
     display_name: str
     capabilities: frozenset[str] = frozenset({"text", "stream", "tools", "usage"})
+    request_max_bytes: int = 16 * 1024 * 1024
 
 
 class ProviderAdapter(Protocol):
@@ -40,9 +41,9 @@ class _DescriptorOnlyAdapter:
 
 
 for _descriptor in (
-    AdapterDescriptor("openai_chat_completions", "OpenAI Chat Completions"),
-    AdapterDescriptor("openai_responses", "OpenAI Responses"),
-    AdapterDescriptor("anthropic_messages", "Anthropic Messages"),
+    AdapterDescriptor("openai_chat_completions", "OpenAI Chat Completions", frozenset({"text", "stream", "tools", "usage", "vision"})),
+    AdapterDescriptor("openai_responses", "OpenAI Responses", frozenset({"text", "stream", "tools", "usage", "vision"})),
+    AdapterDescriptor("anthropic_messages", "Anthropic Messages", frozenset({"text", "stream", "tools", "usage", "vision"})),
     AdapterDescriptor("google_gemini_generate_content", "Google Gemini GenerateContent"),
 ):
     register_adapter(_DescriptorOnlyAdapter(_descriptor))

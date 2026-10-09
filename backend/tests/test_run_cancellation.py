@@ -40,7 +40,7 @@ class _RestartSession:
 
 
 class RunCancellationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_cancel_marks_a_persisted_run_when_no_worker_owns_it(self) -> None:
+    async def test_cancel_marks_request_without_premature_terminal_when_registration_pending(self) -> None:
         run = AgentRun(id=7, conversation_id=3, assistant_message_id=11, provider="openai", model="test", status="waiting_approval")
         conversation = Conversation(id=3, user_id=1, title="test")
         message = Message(id=11, conversation_id=3, role=MessageRole.ASSISTANT, content="", status=MessageStatus.STREAMING)
@@ -49,15 +49,17 @@ class RunCancellationTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("app.services.messages.get_agent_run_for_conversation", AsyncMock(return_value=run)),
-            patch("app.services.messages.get_conversation", AsyncMock(return_value=conversation)),
+            patch("app.services.messages._lock_run", AsyncMock(return_value=run)),
             patch("app.services.messages.agent_runner.cancel", AsyncMock(return_value=False)),
             patch("app.services.messages._cancel_loaded_run", AsyncMock()) as cancel_loaded,
         ):
             result = await cancel_agent_run(session=session, user_id=1, conversation_id=3, run_id=7)
 
         self.assertIs(result, run)
-        cancel_loaded.assert_awaited_once()
-        self.assertEqual(cancel_loaded.await_args.kwargs["message"], "Run cancelled by the user.")
+        cancel_loaded.assert_not_awaited()
+        self.assertEqual(run.status, "waiting_approval")
+        self.assertIn('"cancel_requested":true', run.metadata_json)
+        session.commit.assert_awaited_once()
 
     async def test_startup_cancels_runs_left_active_by_a_previous_process(self) -> None:
         run = AgentRun(id=7, conversation_id=3, assistant_message_id=11, provider="openai", model="test", status="waiting_approval")

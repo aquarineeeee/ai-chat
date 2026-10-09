@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import AttachmentList from './AttachmentList'
+import AttachmentPicker from './AttachmentPicker'
+import useAttachmentDraft from './useAttachmentDraft'
 import {
   ChevronDown,
   ChevronLeft,
@@ -506,6 +509,7 @@ function SiblingNavigator({ message, onPrevSibling, onNextSibling, disabled }) {
 }
 
 function InlineEditComposer({
+  attachments = [],
   value,
   mode,
   disabled,
@@ -516,6 +520,10 @@ function InlineEditComposer({
 }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const textareaRef = useRef(null)
+  const draft = useAttachmentDraft()
+  const [removedIds, setRemovedIds] = useState([])
+  const retained = mode === 'update' ? attachments.filter(item => !removedIds.includes(item.id)) : []
+  const canSubmit = draft.ready && (value.trim() || retained.length || draft.items.length) && !disabled
 
   useEffect(() => {
     const textarea = textareaRef.current
@@ -526,13 +534,13 @@ function InlineEditComposer({
 
   function submit() {
     const trimmed = value.trim()
-    if (!trimmed || disabled) return
-    onSubmit()
+    if ((!trimmed && !retained.length && !draft.items.length) || !canSubmit) return
+    onSubmit([...retained.map(item => item.id), ...draft.attachments.map(item => item.id)])
     setMenuOpen(false)
   }
 
   function handleKeyDown(event) {
-    if (event.key === 'Enter' && !event.shiftKey) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       submit()
     }
@@ -541,10 +549,18 @@ function InlineEditComposer({
   return (
     <div
       className="mt-3 rounded-2xl px-4 py-3"
+      onDragOver={event => { if (event.dataTransfer.types.includes('Files')) event.preventDefault() }}
+      onDrop={event => { if (event.dataTransfer.files.length) { event.preventDefault(); if (!disabled) draft.addFiles(event.dataTransfer.files) } }}
+      onPaste={event => { const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/')); if (files.length && !disabled) { event.preventDefault(); draft.addFiles(files) } }}
       style={{ background: 'var(--bg-surface)', border: '1px solid var(--border)' }}
     >
+      {mode === 'branch' && attachments.length > 0 && <p className="text-xs mb-2" style={{ color: 'var(--text-muted)' }}>新分支如需图片，请重新上传。</p>}
+      {retained.length > 0 && <div className="flex flex-wrap gap-2 mb-2">{retained.map(item => <div key={item.id} className="text-xs" style={{ color: 'var(--text-secondary)' }}>{item.filename} <button type="button" disabled={disabled} className="underline" onClick={() => setRemovedIds(current => [...current, item.id])}>从消息移除</button></div>)}</div>}
+      {mode === 'update' && removedIds.length > 0 && <button type="button" disabled={disabled} onClick={() => setRemovedIds([])} className="text-xs underline">恢复原图片</button>}
+      <AttachmentPicker draft={draft} disabled={disabled} />
       <textarea
         ref={textareaRef}
+        aria-label="编辑消息"
         value={value}
         onChange={event => onChange(event.target.value)}
         onKeyDown={handleKeyDown}
@@ -575,7 +591,7 @@ function InlineEditComposer({
             <button
               type="button"
               onClick={submit}
-              disabled={!value.trim() || disabled}
+              disabled={!canSubmit}
               className="w-11 h-8 flex items-center justify-center transition disabled:cursor-not-allowed"
               style={{ color: 'var(--text-primary)' }}
               aria-label="Submit edit"
@@ -650,6 +666,7 @@ export default function MessageBubble({
   onEditModeChange,
   onEditCancel,
   onEditSubmit,
+  onAttachmentChanged,
   isEditSubmitting = false,
   disableActions = false,
   isRegenerating = false,
@@ -684,9 +701,11 @@ export default function MessageBubble({
             <div className="prose-chat whitespace-pre-wrap break-words">
               {message.content}
             </div>
+            <AttachmentList attachments={message.attachments} allowDelete={!actionDisabled} onChanged={onAttachmentChanged} />
           </div>
           {isEditing && (
             <InlineEditComposer
+              attachments={message.attachments}
               value={editDraft}
               mode={editMode}
               disabled={isEditSubmitting}

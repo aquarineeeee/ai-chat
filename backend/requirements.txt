@@ -11,3 +11,4 @@ cryptography
 httpx
 python-dotenv
 mcp
+Pillow==12.1.1

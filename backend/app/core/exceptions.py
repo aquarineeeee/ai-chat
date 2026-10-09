@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import OperationalError
 
 
 class AppError(Exception):
@@ -27,14 +28,21 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_error_handler(_: Request, exc: RequestValidationError) -> JSONResponse:
+        errors = [{key: value for key, value in error.items() if key != "ctx"} for error in exc.errors()]
         return JSONResponse(
             status_code=422,
-            content=error_payload("VALIDATION_ERROR", "请求参数错误", exc.errors()),
+            content=error_payload("VALIDATION_ERROR", "请求参数错误", errors),
         )
+
+    @app.exception_handler(OperationalError)
+    async def database_error_handler(_: Request, exc: OperationalError) -> JSONResponse:
+        if getattr(exc.orig, "args", (None,))[0] in {1205, 1213}:
+            return JSONResponse(status_code=409, content=error_payload("RESOURCE_BUSY", "操作发生并发冲突，请稍后重试"))
+        return JSONResponse(status_code=500, content=error_payload("INTERNAL_ERROR", "数据库暂不可用"))
 
     @app.exception_handler(Exception)
     async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
         return JSONResponse(
             status_code=500,
-            content=error_payload("INTERNAL_ERROR", "未预期的服务端错误", str(exc)),
+            content=error_payload("INTERNAL_ERROR", "未预期的服务端错误"),
         )

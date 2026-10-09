@@ -77,6 +77,39 @@ async function download(path) {
 }
 
 export const api = {
+  uploadAttachment: (file, { onProgress, signal } = {}) => new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    const abort = () => xhr.abort()
+    xhr.open('POST', '/api/attachments')
+    xhr.withCredentials = true
+    xhr.upload.onprogress = event => {
+      if (event.lengthComputable) onProgress?.(Math.round(event.loaded / event.total * 100))
+    }
+    const finish = () => signal?.removeEventListener('abort', abort)
+    xhr.onload = () => {
+      finish()
+      let data
+      try { data = JSON.parse(xhr.responseText) } catch { data = null }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data)
+      else reject(Object.assign(new Error(data?.error?.message || data?.detail || '图片上传失败'), { status: xhr.status, data }))
+    }
+    xhr.onerror = () => { finish(); reject(new Error('上传连接中断，请重试')) }
+    xhr.onabort = () => { finish(); reject(new DOMException('已取消上传', 'AbortError')) }
+    signal?.addEventListener('abort', abort, { once: true })
+    if (signal?.aborted) { finish(); reject(new DOMException('已取消上传', 'AbortError')); return }
+    const body = new FormData()
+    body.append('file', file)
+    xhr.send(body)
+  }),
+  deleteAttachment: id => request('DELETE', `/api/attachments/${id}`),
+  getAttachmentPreview: async id => {
+    const response = await fetch(`/api/attachments/${id}/preview`, { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) {
+      const data = await response.json().catch(() => null)
+      throw Object.assign(new Error(data?.error?.message || '图片无法预览'), { status: response.status, data })
+    }
+    return response.blob()
+  },
   login: (username, password) => request('POST', '/api/auth/login', { username, password }),
   logout: () => request('POST', '/api/auth/logout'),
   me: () => request('GET', '/api/auth/me'),

@@ -30,6 +30,20 @@ TRACE_EVENT_TYPES = (
 
 
 @dataclass(frozen=True, slots=True)
+class TextPart:
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImagePart:
+    attachment_id: int
+    media_type: str
+
+
+TranscriptPart = TextPart | ImagePart
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalTranscriptItem:
     kind: TranscriptItemKind
     text: str = ""
@@ -37,6 +51,7 @@ class CanonicalTranscriptItem:
     tool_name: str = ""
     arguments: str = ""
     result: str = ""
+    parts: tuple[TranscriptPart, ...] = ()
 
 
 def system_text_item(text: str) -> CanonicalTranscriptItem:
@@ -44,7 +59,24 @@ def system_text_item(text: str) -> CanonicalTranscriptItem:
 
 
 def user_text_item(text: str) -> CanonicalTranscriptItem:
-    return CanonicalTranscriptItem(kind="user_text", text=text)
+    return CanonicalTranscriptItem(kind="user_text", text=text, parts=(TextPart(text),) if text else ())
+
+
+def user_message_item(message: Message, attachments: list[object]) -> CanonicalTranscriptItem:
+    """Attachments arrive in sequence order from the batch loader."""
+    parts: list[TranscriptPart] = [TextPart(message.content)] if message.content else []
+    for attachment in attachments:
+        status = getattr(attachment, "status", "ready")
+        status = getattr(status, "value", status)
+        if status == "ready":
+            parts.append(ImagePart(attachment.id, attachment.media_type))
+        else:
+            parts.append(TextPart(f"[图片附件 {attachment.id} 已移除，图片内容不可用]"))
+    return CanonicalTranscriptItem(kind="user_text", text=message.content or "", parts=tuple(parts))
+
+
+def user_parts(item: CanonicalTranscriptItem) -> tuple[TranscriptPart, ...]:
+    return item.parts or ((TextPart(item.text),) if item.text else ())
 
 
 def assistant_text_item(text: str) -> CanonicalTranscriptItem:
@@ -205,6 +237,11 @@ async def build_message_history_transcript(
     messages: list[Message],
 ) -> list[CanonicalTranscriptItem]:
     transcript: list[CanonicalTranscriptItem] = []
+    from app.services.attachments import load_message_attachments
+
+    attachments_by_message = await load_message_attachments(
+        session, [message.id for message in messages if message.role == MessageRole.USER]
+    )
     assistant_message_ids = [
         message.id
         for message in messages
@@ -251,8 +288,10 @@ async def build_message_history_transcript(
             transcript.append(system_text_item(message.content))
             continue
 
-        if message.role == MessageRole.USER and message.content:
-            transcript.append(user_text_item(message.content))
+        if message.role == MessageRole.USER:
+            item = user_message_item(message, attachments_by_message.get(message.id, []))
+            if item.parts:
+                transcript.append(item)
             continue
 
         if message.role != MessageRole.ASSISTANT:

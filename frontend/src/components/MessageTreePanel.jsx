@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import AttachmentList from './AttachmentList'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import {
@@ -334,7 +335,7 @@ function MessageDetail({
             </ReactMarkdown>
           </div>
         ) : (
-          <div className="whitespace-pre-wrap break-words">{detail?.content || node.preview}</div>
+          <div><div className="whitespace-pre-wrap break-words">{detail?.content || node.preview}</div><AttachmentList attachments={detail?.attachments || node.attachments} /></div>
         )}
       </div>
       <p className="mt-2 text-xs" style={{ color: 'var(--text-muted)' }}>

@@ -5,14 +5,24 @@ from decimal import Decimal
 from typing import Any
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from app.schemas.attachment import AttachmentResponse
 
 from app.models.message import MessageRole, MessageStatus
 from app.schemas.base import UTCResponseModel
 
 
 class MessageCreateRequest(BaseModel):
-    content: str
+    content: str = ""
+    attachment_ids: list[int] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_content_and_attachments(self):
+        if not self.content.strip() and not self.attachment_ids:
+            raise ValueError("消息必须包含文字或图片")
+        if len(set(self.attachment_ids)) != len(self.attachment_ids) or any(i <= 0 for i in self.attachment_ids):
+            raise ValueError("附件 ID 必须为不重复的正整数")
+        return self
     parent_id: int | None = None
     branch_id: int | None = None
     provider: str | None = None
@@ -40,7 +50,14 @@ class MessageRegenerateRequest(BaseModel):
 
 
 class MessageEditRequest(BaseModel):
-    content: str
+    content: str = ""
+    attachment_ids: list[int] | None = None
+
+    @model_validator(mode="after")
+    def validate_attachment_ids(self):
+        if self.attachment_ids is not None and (len(set(self.attachment_ids)) != len(self.attachment_ids) or any(i <= 0 for i in self.attachment_ids)):
+            raise ValueError("附件 ID 必须为不重复的正整数")
+        return self
     mode: Literal["update", "branch"] = "update"
     branch_id: int | None = None
     context_mode: Literal["full", "root_only", "last_n"] = "full"
@@ -56,6 +73,7 @@ class MessageNodeResponse(UTCResponseModel):
     parent_id: int | None
     role: MessageRole
     content: str
+    attachments: list[AttachmentResponse] = Field(default_factory=list)
     provider: str | None
     provider_id: int | None = None
     adapter_id: str | None = None
@@ -92,6 +110,7 @@ class MessageTreeNodeResponse(UTCResponseModel):
     parent_id: int | None
     role: MessageRole
     preview: str
+    attachment_count: int = 0
     status: MessageStatus
     error_message: str | None = None
     provider: str | None

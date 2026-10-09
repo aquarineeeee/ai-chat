@@ -36,6 +36,7 @@ docs/local/
 # Build outputs
 /backend/static/
 /backend/.artifacts/
+/backend/data/uploads/
 /frontend/dist-check/
 /frontend/dist-temp/
 /frontend/dist-temp-2/

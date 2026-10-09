@@ -15,6 +15,8 @@ from app.db.session import bootstrap_admin_user
 from app.services.approval_manager import approval_manager
 from app.services.agent_runner import agent_runner
 from app.services.messages import reconcile_interrupted_runs
+from app.services.attachment_cleanup import attachment_cleanup
+from app.middleware.upload_limits import UploadLimitsMiddleware
 
 
 settings = get_settings()
@@ -25,14 +27,17 @@ STATIC_DIR = Path(__file__).parent.parent.parent / "static"
 async def lifespan(_: FastAPI):
     await bootstrap_admin_user()
     await reconcile_interrupted_runs()
+    await attachment_cleanup.start()
     try:
         yield
     finally:
         await approval_manager.shutdown()
         await agent_runner.shutdown()
+        await attachment_cleanup.shutdown()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(UploadLimitsMiddleware)
 app.include_router(api_router, prefix="/api")
 app.add_middleware(
     CORSMiddleware,

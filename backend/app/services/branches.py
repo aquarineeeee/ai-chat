@@ -11,6 +11,8 @@ from app.models.branch import ConversationBranch
 from app.models.conversation import Conversation
 from app.models.message import Message, MessageRole, MessageStatus
 from app.schemas.branch import BranchCreate, BranchUpdate
+from app.services.attachment_transactions import lock_owned_conversation
+from app.services.attachments import mark_message_attachments_deleting, process_deletions
 
 
 MAIN_BRANCH_AUTO_TITLE = "主分支"
@@ -45,7 +47,7 @@ async def create_conversation_branch(
     conversation_id: int,
     payload: BranchCreate,
 ) -> ConversationBranch:
-    conversation = await _get_user_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     parent_branch = (
         await get_conversation_branch(
             session=session,
@@ -115,7 +117,7 @@ async def activate_conversation_branch(
     conversation_id: int,
     branch_id: int,
 ) -> ConversationBranch:
-    conversation = await _get_user_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     branch = await get_conversation_branch(
         session=session,
         user_id=user_id,
@@ -139,7 +141,7 @@ async def archive_conversation_branch(
     conversation_id: int,
     branch_id: int,
 ) -> ConversationBranch:
-    conversation = await _get_user_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     branch = await get_conversation_branch(
         session=session,
         user_id=user_id,
@@ -162,7 +164,7 @@ async def delete_conversation_branch(
     conversation_id: int,
     branch_id: int,
 ) -> None:
-    conversation = await _get_user_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     branch = await get_conversation_branch(
         session=session,
         user_id=user_id,
@@ -195,6 +197,7 @@ async def delete_conversation_branch(
         raise AppError(status_code=409, code="CONFLICT", message="分支仍有消息在生成中，暂时不能删除")
 
     deleted_message_ids = {item.id for item in subtree_messages}
+    deleting_ids = await mark_message_attachments_deleting(session=session, message_ids=list(deleted_message_ids))
     if deleted_message_ids:
         remaining_messages = [item for item in history if item.id not in deleted_message_ids]
         await repair_branches_after_message_delete(
@@ -216,6 +219,7 @@ async def delete_conversation_branch(
 
     await session.commit()
     await session.refresh(conversation)
+    await process_deletions(session=session, ids=deleting_ids)
 
 
 async def get_conversation_branch(
@@ -230,7 +234,7 @@ async def get_conversation_branch(
         select(ConversationBranch).where(
             ConversationBranch.id == branch_id,
             ConversationBranch.conversation_id == conversation_id,
-        )
+        ).execution_options(populate_existing=True)
     )
     if branch is None:
         raise AppError(status_code=404, code="NOT_FOUND", message="分支不存在")
@@ -247,7 +251,7 @@ async def ensure_current_branch(
             select(ConversationBranch).where(
                 ConversationBranch.id == conversation.current_branch_id,
                 ConversationBranch.conversation_id == conversation.id,
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
         if branch is not None:
             return branch
@@ -271,7 +275,7 @@ async def resolve_branch_for_write(
             select(ConversationBranch).where(
                 ConversationBranch.id == branch_id,
                 ConversationBranch.conversation_id == conversation.id,
-            )
+            ).with_for_update().execution_options(populate_existing=True)
         )
         if branch is None:
             raise AppError(status_code=404, code="NOT_FOUND", message="分支不存在")
@@ -353,7 +357,7 @@ async def _load_conversation_messages(*, session: AsyncSession, conversation_id:
     result = await session.scalars(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at.asc(), Message.id.asc())
+        .order_by(Message.created_at.asc(), Message.id.asc()).execution_options(populate_existing=True).with_for_update()
     )
     return list(result.all())
 
@@ -362,7 +366,7 @@ async def _load_conversation_branches(*, session: AsyncSession, conversation_id:
     result = await session.scalars(
         select(ConversationBranch)
         .where(ConversationBranch.conversation_id == conversation_id)
-        .order_by(ConversationBranch.created_at.asc(), ConversationBranch.id.asc())
+        .order_by(ConversationBranch.created_at.asc(), ConversationBranch.id.asc()).with_for_update().execution_options(populate_existing=True)
     )
     return list(result.all())
 

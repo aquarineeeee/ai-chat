@@ -12,6 +12,8 @@ from app.canonical_transcript import CanonicalTranscriptItem
 from app.core.encryption import decrypt_text
 from app.core.exceptions import AppError
 from app.models.api_key import ApiKey
+from app.core.config import get_settings
+from app.services.vision_budget import AttachmentReader, VisionRequestContext, provider_user_content, vision_request, provider_timeout
 
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -290,7 +292,8 @@ async def _create_completion(
     payload: dict[str, object],
 ) -> httpx.Response:
     try:
-        return await client.post(url, headers=_build_headers(api_key), json=payload)
+        async with provider_timeout():
+            return await client.post(url, headers=_build_headers(api_key), json=payload)
     except httpx.HTTPError as exc:
         raise AppError(
             status_code=502,
@@ -310,7 +313,7 @@ def _assistant_history_message(message: dict[str, Any]) -> dict[str, object]:
     return history_message
 
 
-def _transcript_to_openai_messages(transcript: list[CanonicalTranscriptItem]) -> list[dict[str, object]]:
+def _transcript_to_openai_messages(transcript: list[CanonicalTranscriptItem], images: dict[int, str] | None = None) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
     current_assistant: dict[str, object] | None = None
 
@@ -334,7 +337,7 @@ def _transcript_to_openai_messages(transcript: list[CanonicalTranscriptItem]) ->
 
         if item.kind == "user_text":
             flush_assistant()
-            messages.append({"role": "user", "content": item.text})
+            messages.append({"role": "user", "content": provider_user_content(item, "openai_chat_completions", images or {})})
             continue
 
         if item.kind == "assistant_text":
@@ -427,7 +430,7 @@ async def _stream_completion_round(
     payload: dict[str, object],
 ) -> AsyncIterator[dict[str, object]]:
     try:
-        async with client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
+        async with provider_timeout(), client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
             if response.status_code >= 400:
                 body = await response.aread()
                 fallback = httpx.Response(
@@ -508,6 +511,7 @@ async def _stream_completion_round(
         ) from exc
 
 
+@vision_request("openai_chat_completions")
 async def create_openai_reply(
     *,
     api_key: ApiKey,
@@ -518,6 +522,8 @@ async def create_openai_reply(
     tools: list[dict[str, object]] | None = None,
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
+    attachment_reader: AttachmentReader | None = None,
+    vision_context: VisionRequestContext | None = None,
 ) -> str:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/chat/completions"
@@ -525,16 +531,18 @@ async def create_openai_reply(
         raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(90.0, connect=15.0),
+        timeout=httpx.Timeout(getattr(get_settings(), "vision_request_timeout_seconds", 90.0), connect=15.0),
         follow_redirects=True,
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript)
+        message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript, vision_context.images if vision_context else None)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
         loop_guard = ToolCallLoopGuard()
         for _ in range(max_rounds):
+            if vision_context is not None:
+                vision_context.check_request_data((message_history, tools))
             payload = _chat_payload(
                 model=model,
                 messages=message_history,
@@ -543,6 +551,8 @@ async def create_openai_reply(
                 stream=False,
                 tools=tools,
             )
+            if vision_context is not None:
+                vision_context.check_payload(payload)
             response = await _create_completion(
                 client,
                 url=url,
@@ -586,6 +596,7 @@ async def create_openai_reply(
     raise AppError(status_code=502, code="MODEL_ERROR", message="模型工具调用次数超出限制")
 
 
+@vision_request("openai_chat_completions")
 async def stream_openai_reply(
     *,
     api_key: ApiKey,
@@ -598,6 +609,8 @@ async def stream_openai_reply(
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
     tool_event_callback: ToolEventCallback | None = None,
     usage_callback: UsageCallback | None = None,
+    attachment_reader: AttachmentReader | None = None,
+    vision_context: VisionRequestContext | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/chat/completions"
@@ -605,16 +618,18 @@ async def stream_openai_reply(
         raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(90.0, connect=15.0),
+        timeout=httpx.Timeout(getattr(get_settings(), "vision_request_timeout_seconds", 90.0), connect=15.0),
         follow_redirects=True,
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript)
+        message_history: list[dict[str, object]] = _transcript_to_openai_messages(transcript, vision_context.images if vision_context else None)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
         loop_guard = ToolCallLoopGuard()
         for _ in range(max_rounds):
+            if vision_context is not None:
+                vision_context.check_request_data((message_history, tools))
             payload = _chat_payload(
                 model=model,
                 messages=message_history,
@@ -623,6 +638,8 @@ async def stream_openai_reply(
                 stream=True,
                 tools=tools,
             )
+            if vision_context is not None:
+                vision_context.check_payload(payload)
 
             round_content = ""
             round_emitted_content = ""

@@ -13,6 +13,8 @@ from app.core.encryption import decrypt_text
 from app.core.exceptions import AppError
 from app.providers.openai import ToolCallLoopGuard
 from app.models.api_key import ApiKey
+from app.core.config import get_settings
+from app.services.vision_budget import AttachmentReader, VisionRequestContext, provider_user_content, vision_request, provider_timeout
 
 
 DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1"
@@ -176,6 +178,12 @@ def _normalize_message_content(content: object) -> str | list[dict[str, object]]
                     normalized_blocks.append(block)
                 continue
 
+            if block_type == "image":
+                source = item.get("source")
+                if isinstance(source, dict):
+                    normalized_blocks.append({"type": "image", "source": dict(source)})
+                continue
+
             if block_type == "thinking":
                 thinking = str(item.get("thinking") or "")
                 signature = str(item.get("signature") or "")
@@ -263,7 +271,7 @@ def _convert_messages(messages: list[dict[str, object]]) -> tuple[list[dict[str,
     return _anthropic_system_blocks("\n\n".join(system_parts)), anthropic_messages
 
 
-def _transcript_to_anthropic_history(transcript: list[CanonicalTranscriptItem]) -> list[dict[str, object]]:
+def _transcript_to_anthropic_history(transcript: list[CanonicalTranscriptItem], images: dict[int, str] | None = None) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
     current_role: str | None = None
     current_content: str | list[dict[str, object]] | None = None
@@ -295,7 +303,8 @@ def _transcript_to_anthropic_history(transcript: list[CanonicalTranscriptItem]) 
 
         if item.kind == "user_text":
             blocks = ensure_role("user")
-            blocks.append({"type": "text", "text": item.text})
+            content = provider_user_content(item, "anthropic_messages", images or {})
+            blocks.extend(content if isinstance(content, list) else [{"type": "text", "text": content}])
             continue
 
         if item.kind == "assistant_text":
@@ -557,7 +566,7 @@ async def _stream_completion_round(
     round_index: int,
 ) -> AsyncIterator[dict[str, object]]:
     try:
-        async with client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
+        async with provider_timeout(), client.stream("POST", url, headers=_build_headers(api_key), json=payload) as response:
             if response.status_code >= 400:
                 body = await response.aread()
                 fallback = httpx.Response(
@@ -763,6 +772,7 @@ async def _stream_completion_round(
         ) from exc
 
 
+@vision_request("anthropic_messages")
 async def create_anthropic_reply(
     *,
     api_key: ApiKey,
@@ -773,6 +783,8 @@ async def create_anthropic_reply(
     tools: list[dict[str, object]] | None = None,
     tool_executor: ToolExecutor | None = None,
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
+    attachment_reader: AttachmentReader | None = None,
+    vision_context: VisionRequestContext | None = None,
 ) -> ReplyText:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/messages"
@@ -780,16 +792,18 @@ async def create_anthropic_reply(
         raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(180.0, connect=15.0),
+        timeout=httpx.Timeout(getattr(get_settings(), "vision_request_timeout_seconds", 90.0), connect=15.0),
         follow_redirects=True,
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
+        message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript, vision_context.images if vision_context else None)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
         loop_guard = ToolCallLoopGuard()
         for round_index in range(max_rounds):
+            if vision_context is not None:
+                vision_context.check_request_data((message_history, tools))
             payload = _messages_payload(
                 model=model,
                 messages=message_history,
@@ -798,9 +812,12 @@ async def create_anthropic_reply(
                 stream=False,
                 tools=tools,
             )
+            if vision_context is not None:
+                vision_context.check_payload(payload)
 
             try:
-                response = await client.post(url, headers=_build_headers(raw_key), json=payload)
+                async with provider_timeout():
+                    response = await client.post(url, headers=_build_headers(raw_key), json=payload)
             except httpx.HTTPError as exc:
                 raise AppError(
                     status_code=502,
@@ -845,6 +862,7 @@ async def create_anthropic_reply(
     raise AppError(status_code=502, code="MODEL_ERROR", message="模型工具调用次数超出限制")
 
 
+@vision_request("anthropic_messages")
 async def stream_anthropic_reply(
     *,
     api_key: ApiKey,
@@ -857,6 +875,8 @@ async def stream_anthropic_reply(
     max_tool_round_trips: int = DEFAULT_MAX_TOOL_ROUND_TRIPS,
     tool_event_callback: ToolEventCallback | None = None,
     usage_callback: UsageCallback | None = None,
+    attachment_reader: AttachmentReader | None = None,
+    vision_context: VisionRequestContext | None = None,
 ) -> AsyncIterator[dict[str, object]]:
     raw_key = decrypt_text(api_key.key_encrypted)
     url = f"{_resolve_base_url(api_key.base_url)}/messages"
@@ -864,16 +884,18 @@ async def stream_anthropic_reply(
         raise AppError(status_code=500, code="CONFIG_ERROR", message="启用工具调用时必须提供 tool_executor")
 
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(90.0, connect=15.0),
+        timeout=httpx.Timeout(getattr(get_settings(), "vision_request_timeout_seconds", 90.0), connect=15.0),
         follow_redirects=True,
         trust_env=False,
         http2=False,
     ) as client:
-        message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript)
+        message_history: list[dict[str, object]] = _transcript_to_anthropic_history(transcript, vision_context.images if vision_context else None)
         max_rounds = max_tool_round_trips if tools else 1
         total_usage: dict[str, int] | None = None
         loop_guard = ToolCallLoopGuard()
         for round_index in range(max_rounds):
+            if vision_context is not None:
+                vision_context.check_request_data((message_history, tools))
             payload = _messages_payload(
                 model=model,
                 messages=message_history,
@@ -882,6 +904,8 @@ async def stream_anthropic_reply(
                 stream=True,
                 tools=tools,
             )
+            if vision_context is not None:
+                vision_context.check_payload(payload)
 
             round_content = ""
             round_emitted_content = ""

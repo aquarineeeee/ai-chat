@@ -6,6 +6,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.models.conversation import Conversation
+from app.models.message import Message
+from app.services.attachment_transactions import lock_owned_conversation, lock_owned_project
+from app.services.attachments import mark_message_attachments_deleting, process_deletions
 from app.models.project import ConversationMcpTool
 from app.schemas.conversation import ConversationCreate, ConversationUpdate
 from app.services.branches import create_main_branch_for_conversation
@@ -44,7 +47,9 @@ async def get_conversation(session: AsyncSession, user_id: int, conversation_id:
 
 
 async def create_conversation(session: AsyncSession, user_id: int, payload: ConversationCreate) -> Conversation:
-    project = await get_project(session, user_id, payload.project_id) if payload.project_id is not None else None
+    project = await lock_owned_project(session, user_id, payload.project_id) if payload.project_id is not None else None
+    if project is not None:
+        project = await get_project(session, user_id, project.id)
     provider_instance_id = payload.provider_id
     provider_name = payload.provider or settings.default_provider
     provider_model = payload.model or (project.default_model_id if project and project.default_model_id else settings.default_model)
@@ -88,7 +93,7 @@ async def update_conversation(
     conversation_id: int,
     payload: ConversationUpdate,
 ) -> Conversation:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
     update_data = payload.model_dump(exclude_unset=True)
     if "project_id" in update_data:
         target_project_id = update_data.pop("project_id")
@@ -130,6 +135,9 @@ async def update_conversation(
 
 
 async def delete_conversation(session: AsyncSession, user_id: int, conversation_id: int) -> None:
-    conversation = await get_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    conversation = await lock_owned_conversation(session=session, user_id=user_id, conversation_id=conversation_id)
+    message_ids = list((await session.scalars(select(Message.id).where(Message.conversation_id == conversation_id).with_for_update())).all())
+    deleting_ids = await mark_message_attachments_deleting(session=session, message_ids=message_ids)
     await session.delete(conversation)
     await session.commit()
+    await process_deletions(session=session, ids=deleting_ids)

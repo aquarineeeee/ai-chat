@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.routes.auth import router as auth_router
+from app.api.routes.attachments import router as attachments_router
 from app.api.routes.branches import router as branches_router
 from app.api.routes.conversations import router as conversations_router
 from app.api.routes.keys import router as keys_router
@@ -11,6 +12,7 @@ from app.api.routes.projects import router as projects_router
 
 
 api_router = APIRouter()
+api_router.include_router(attachments_router, prefix="/attachments", tags=["attachments"])
 api_router.include_router(auth_router, prefix="/auth", tags=["auth"])
 api_router.include_router(branches_router, tags=["branches"])
 api_router.include_router(conversations_router, prefix="/conversations", tags=["conversations"])

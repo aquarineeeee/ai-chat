@@ -14,6 +14,7 @@ export default function BranchPane({
   onEditSubmit,
   onEditDraftChange,
   onEditModeChange,
+  onAttachmentChanged,
   onSend,
   onCancelGeneration,
   onRegenerate,
@@ -117,6 +118,7 @@ export default function BranchPane({
             runView={getRunView?.(rootMessage.id) || null}
             onCopy={rootMessage.role === 'system' ? undefined : () => { void onCopy(rootMessage) }}
             onEdit={rootMessage.role === 'user' ? () => { void onEdit(rootMessage) } : undefined}
+            onAttachmentChanged={onAttachmentChanged}
             onRegenerate={rootMessage.role === 'system' ? undefined : () => { void onRegenerate(rootMessage.id) }}
             onDelete={rootMessage.role === 'system' ? undefined : () => { void onDelete(rootMessage.id) }}
             onCreateBranch={rootMessage.role === 'assistant' ? () => { void onCreateBranch(rootMessage) } : undefined}
@@ -128,7 +130,7 @@ export default function BranchPane({
             onEditDraftChange={onEditDraftChange}
             onEditModeChange={onEditModeChange}
             onEditCancel={onEditCancel}
-            onEditSubmit={() => { void onEditSubmit(rootMessage.id) }}
+            onEditSubmit={attachmentIds => { void onEditSubmit(rootMessage.id, attachmentIds) }}
             isEditSubmitting={pane.editingSubmittingMessageId === rootMessage.id}
             disableActions={pane.busy}
             isRegenerating={pane.regeneratingMessageId === rootMessage.id}
@@ -159,6 +161,7 @@ export default function BranchPane({
               runView={getRunView?.(message.id) || null}
               onCopy={message.role === 'system' ? undefined : () => { void onCopy(message) }}
               onEdit={message.role === 'user' ? () => { void onEdit(message) } : undefined}
+              onAttachmentChanged={onAttachmentChanged}
               onRegenerate={message.role === 'system' ? undefined : () => { void onRegenerate(message.id) }}
               onDelete={message.role === 'system' ? undefined : () => { void onDelete(message.id) }}
               onCreateBranch={message.role === 'assistant' ? () => { void onCreateBranch(message) } : undefined}
@@ -170,7 +173,7 @@ export default function BranchPane({
               onEditDraftChange={onEditDraftChange}
               onEditModeChange={onEditModeChange}
               onEditCancel={onEditCancel}
-              onEditSubmit={() => { void onEditSubmit(message.id) }}
+              onEditSubmit={attachmentIds => { void onEditSubmit(message.id, attachmentIds) }}
               isEditSubmitting={pane.editingSubmittingMessageId === message.id}
               disableActions={pane.busy}
               isRegenerating={pane.regeneratingMessageId === message.id}

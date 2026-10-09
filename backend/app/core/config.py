@@ -40,6 +40,32 @@ class Settings:
     memory_max_context_chars: int
     memory_write_max_chars: int
     approval_required_tools: tuple[str, ...]
+    local_upload_dir: str = "./data/uploads"
+    image_max_bytes: int = 1048576
+    image_max_pixels: int = 25000000
+    message_max_image_bytes: int = 8388608
+    message_max_image_pixels: int = 50000000
+    upload_max_request_bytes: int = 1572864
+    upload_min_free_bytes: int = 268435456
+    upload_rate_per_minute: int = 30
+    upload_body_timeout_seconds: float = 30.0
+    image_decode_concurrency: int = 1
+    image_decode_timeout_seconds: float = 10.0
+    image_decode_max_memory_bytes: int = 268435456
+    unattached_attachment_ttl_hours: int = 24
+    attachment_cleanup_interval_seconds: float = 300.0
+    vision_buffer_max_bytes: int = 268435456
+    vision_encoding_concurrency: int = 1
+    openai_chat_request_max_bytes: int = 16777216
+    openai_responses_request_max_bytes: int = 16777216
+    anthropic_request_max_bytes: int = 16777216
+    openai_chat_max_images: int = 500
+    openai_responses_max_images: int = 500
+    anthropic_max_images: int = 100
+    openai_chat_max_image_dimension: int = 0
+    openai_responses_max_image_dimension: int = 0
+    anthropic_max_image_dimension: int = 8000
+    vision_request_timeout_seconds: float = 90.0
 
     @property
     def cookie_secure(self) -> bool:
@@ -111,4 +137,30 @@ def get_settings() -> Settings:
         memory_max_context_chars=int(os.getenv("MEMORY_MAX_CONTEXT_CHARS", "3000")),
         memory_write_max_chars=int(os.getenv("MEMORY_WRITE_MAX_CHARS", "6000")),
         approval_required_tools=_csv_tuple("APPROVAL_REQUIRED_TOOLS"),
+        local_upload_dir=os.getenv("LOCAL_UPLOAD_DIR", "./data/uploads"),
+        image_max_bytes=int(os.getenv("IMAGE_MAX_BYTES", "1048576")),
+        image_max_pixels=int(os.getenv("IMAGE_MAX_PIXELS", "25000000")),
+        message_max_image_bytes=int(os.getenv("MESSAGE_MAX_IMAGE_BYTES", "8388608")),
+        message_max_image_pixels=int(os.getenv("MESSAGE_MAX_IMAGE_PIXELS", "50000000")),
+        upload_max_request_bytes=int(os.getenv("UPLOAD_MAX_REQUEST_BYTES", "1572864")),
+        upload_min_free_bytes=int(os.getenv("UPLOAD_MIN_FREE_BYTES", "268435456")),
+        upload_rate_per_minute=int(os.getenv("UPLOAD_RATE_PER_MINUTE", "30")),
+        upload_body_timeout_seconds=float(os.getenv("UPLOAD_BODY_TIMEOUT_SECONDS", "30")),
+        image_decode_concurrency=int(os.getenv("IMAGE_DECODE_CONCURRENCY", "1")),
+        image_decode_timeout_seconds=float(os.getenv("IMAGE_DECODE_TIMEOUT_SECONDS", "10")),
+        image_decode_max_memory_bytes=int(os.getenv("IMAGE_DECODE_MAX_MEMORY_BYTES", "268435456")),
+        unattached_attachment_ttl_hours=int(os.getenv("UNATTACHED_ATTACHMENT_TTL_HOURS", "24")),
+        attachment_cleanup_interval_seconds=float(os.getenv("ATTACHMENT_CLEANUP_INTERVAL_SECONDS", "300")),
+        vision_buffer_max_bytes=int(os.getenv("VISION_BUFFER_MAX_BYTES", "268435456")),
+        vision_encoding_concurrency=int(os.getenv("VISION_ENCODING_CONCURRENCY", "1")),
+        openai_chat_request_max_bytes=int(os.getenv("OPENAI_CHAT_REQUEST_MAX_BYTES", "16777216")),
+        openai_responses_request_max_bytes=int(os.getenv("OPENAI_RESPONSES_REQUEST_MAX_BYTES", "16777216")),
+        anthropic_request_max_bytes=int(os.getenv("ANTHROPIC_REQUEST_MAX_BYTES", "16777216")),
+        openai_chat_max_images=int(os.getenv("OPENAI_CHAT_MAX_IMAGES", "500")),
+        openai_responses_max_images=int(os.getenv("OPENAI_RESPONSES_MAX_IMAGES", "500")),
+        anthropic_max_images=int(os.getenv("ANTHROPIC_MAX_IMAGES", "100")),
+        openai_chat_max_image_dimension=int(os.getenv("OPENAI_CHAT_MAX_IMAGE_DIMENSION", "0")),
+        openai_responses_max_image_dimension=int(os.getenv("OPENAI_RESPONSES_MAX_IMAGE_DIMENSION", "0")),
+        anthropic_max_image_dimension=int(os.getenv("ANTHROPIC_MAX_IMAGE_DIMENSION", "8000")),
+        vision_request_timeout_seconds=float(os.getenv("VISION_REQUEST_TIMEOUT_SECONDS", "90")),
     )
